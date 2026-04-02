@@ -36,9 +36,9 @@ export async function POST(request: NextRequest) {
 
     const round = roundRow.rows[0];
 
-    if (!["reviewing", "generating"].includes(round.status as string)) {
+    if (!["reviewing", "generating", "failed"].includes(round.status as string)) {
       return NextResponse.json(
-        { error: `Test round status is '${round.status}', expected 'reviewing' or 'generating'` },
+        { error: `Test round status is '${round.status}', expected 'reviewing', 'generating', or 'failed'` },
         { status: 400 }
       );
     }

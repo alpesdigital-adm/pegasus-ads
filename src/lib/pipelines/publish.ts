@@ -185,9 +185,9 @@ export async function runPublishPipeline(
       const step5: PipelineStep = { name: `create_creative_${adName}`, status: "running", started_at: new Date().toISOString() };
       steps.push(step5);
 
-      // Buscar body/title do ad existente ou usar padrão
-      const existingAd = await getExistingAdContent(campaignId, accountId);
-      console.log(`[PublishPipeline] Ad content: body=${existingAd.body?.substring(0, 50)}... link=${existingAd.link} title=${existingAd.title}`);
+      // Buscar body/title do ad controle existente na campanha (via Meta API)
+      const existingAd = await getExistingAdContentWithFallback(campaignId, accountId);
+      console.log(`[PublishPipeline] Ad content: body=${existingAd.body?.substring(0, 50)}... link=${existingAd.link} title=${existingAd.title} cta=${existingAd.callToAction}`);
       console.log(`[PublishPipeline] Creating creative: feedHash=${feedUpload.hash} storiesHash=${storiesUpload.hash} feedLabel=${feedLabel.id} storiesLabel=${storiesLabel.id}`);
 
       const metaCreative = await meta.createCreative({
@@ -393,13 +393,17 @@ function groupVariantsByAd(rows: Record<string, unknown>[]): VariantPair[] {
 
 /**
  * Busca body/title/link de um ad existente da campanha para reutilizar.
+ *
+ * Prioridade:
+ * 1. config.ad_content salvo no banco (override manual)
+ * 2. Meta API — lê o object_story_spec/asset_feed_spec de um ad ativo da campanha
+ * 3. Erro se nenhum conteúdo encontrado (não usar strings vazias!)
  */
-async function getExistingAdContent(
+async function getExistingAdContentWithFallback(
   campaignId: string,
   accountId: string
 ): Promise<{ body: string; title: string; link: string; callToAction: string }> {
-  // Tentar buscar do banco primeiro (published_ads com conteúdo)
-  // Fallback para defaults
+  // 1. Tentar buscar do banco primeiro (override manual)
   try {
     const db = getDb();
     const result = await db.execute({
@@ -412,19 +416,44 @@ async function getExistingAdContent(
         ? JSON.parse(result.rows[0].config as string)
         : result.rows[0].config;
 
-      if (config?.ad_content) {
+      if (config?.ad_content?.link) {
+        console.log("[PublishPipeline] Using ad_content from campaign config (DB)");
         return config.ad_content;
       }
     }
   } catch {
-    // ignore
+    // ignore DB errors, try Meta API next
   }
 
-  // Defaults (estes devem ser configurados por campanha)
-  return {
-    body: "",
-    title: "",
-    link: "",
-    callToAction: "LEARN_MORE",
-  };
+  // 2. Buscar da Meta API — ler ad existente da campanha
+  console.log("[PublishPipeline] Fetching ad content from Meta API...");
+  const metaContent = await meta.getAdContentFromCampaign(campaignId);
+  if (metaContent && metaContent.link) {
+    console.log("[PublishPipeline] Got ad content from Meta API");
+
+    // Cachear no banco para próximas execuções
+    try {
+      const db = getDb();
+      await db.execute({
+        sql: `UPDATE campaigns SET config = jsonb_set(
+                COALESCE(config::jsonb, '{}'::jsonb),
+                '{ad_content}',
+                ?::jsonb
+              )
+              WHERE meta_campaign_id = ? AND meta_account_id = ?`,
+        args: [JSON.stringify(metaContent), campaignId, accountId],
+      });
+      console.log("[PublishPipeline] Cached ad_content in campaign config");
+    } catch (cacheErr) {
+      console.warn("[PublishPipeline] Failed to cache ad_content:", cacheErr);
+    }
+
+    return metaContent;
+  }
+
+  // 3. Nenhum conteúdo encontrado — erro, não publicar com strings vazias
+  throw new Error(
+    `No ad content (body/title/link) found for campaign ${campaignId}. ` +
+    `Either configure ad_content in campaign config or ensure the campaign has at least one active ad with creative content.`
+  );
 }

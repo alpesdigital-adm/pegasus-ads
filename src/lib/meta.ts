@@ -423,6 +423,89 @@ export async function updateAdSetStatus(
   return data.success;
 }
 
+// ── Read: Ad Content from existing ads ──
+
+interface AdContentResult {
+  body: string;
+  title: string;
+  link: string;
+  callToAction: string;
+}
+
+/**
+ * Busca ads existentes de uma campanha e extrai body/title/link/CTA
+ * do object_story_spec ou asset_feed_spec do primeiro ad ativo.
+ * Usado para replicar o conteúdo textual em novos criativos de teste.
+ */
+export async function getAdContentFromCampaign(
+  campaignId: string
+): Promise<AdContentResult | null> {
+  await rateLimit();
+
+  // 1. Buscar ads da campanha (via ad sets)
+  const adSets = await getAdSets(campaignId, "id");
+  if (adSets.length === 0) return null;
+
+  // 2. Buscar ads do primeiro ad set ativo
+  for (const adSet of adSets) {
+    await rateLimit();
+    const params = new URLSearchParams({
+      fields: "id,name,status,creative{id,name,object_story_spec,asset_feed_spec}",
+      access_token: getToken(),
+      limit: "10",
+    });
+
+    const data = await metaFetch<{ data: Array<Record<string, unknown>> }>(
+      `${META_BASE_URL}/${adSet.id}/ads?${params.toString()}`
+    );
+
+    if (!data.data || data.data.length === 0) continue;
+
+    // Buscar primeiro ad ativo com creative
+    for (const ad of data.data) {
+      const creative = ad.creative as Record<string, unknown> | undefined;
+      if (!creative) continue;
+
+      // Tentar extrair de asset_feed_spec primeiro (mais completo)
+      const assetFeedSpec = creative.asset_feed_spec as Record<string, unknown> | undefined;
+      if (assetFeedSpec) {
+        const bodies = assetFeedSpec.bodies as Array<{ text: string }> | undefined;
+        const titles = assetFeedSpec.titles as Array<{ text: string }> | undefined;
+        const linkUrls = assetFeedSpec.link_urls as Array<{ website_url: string }> | undefined;
+        const ctaTypes = assetFeedSpec.call_to_action_types as string[] | undefined;
+
+        if (bodies?.[0]?.text || linkUrls?.[0]?.website_url) {
+          console.log(`[MetaService] Extracted ad content from asset_feed_spec of ad ${ad.name}`);
+          return {
+            body: bodies?.[0]?.text || "",
+            title: titles?.[0]?.text || "",
+            link: linkUrls?.[0]?.website_url || "",
+            callToAction: ctaTypes?.[0] || "LEARN_MORE",
+          };
+        }
+      }
+
+      // Fallback: extrair de object_story_spec
+      const oss = creative.object_story_spec as Record<string, unknown> | undefined;
+      if (oss) {
+        const linkData = oss.link_data as Record<string, unknown> | undefined;
+        if (linkData) {
+          const cta = linkData.call_to_action as Record<string, unknown> | undefined;
+          console.log(`[MetaService] Extracted ad content from object_story_spec of ad ${ad.name}`);
+          return {
+            body: (linkData.message as string) || "",
+            title: (linkData.name as string) || "",
+            link: (linkData.link as string) || "",
+            callToAction: (cta?.type as string) || "LEARN_MORE",
+          };
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
 // ── Utility: Extrair leads de actions ──
 
 export function extractLeadsFromInsights(

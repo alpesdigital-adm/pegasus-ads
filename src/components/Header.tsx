@@ -10,17 +10,13 @@ interface DriveStatus {
   email?: string;
 }
 
-interface DriveFolder {
-  id: string;
-  name: string;
-}
+// DriveFolder kept for type reference
+
 
 function GoogleDriveButton() {
   const [status, setStatus] = useState<DriveStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
-  const [folders, setFolders] = useState<DriveFolder[]>([]);
-  const [loadingFolders, setLoadingFolders] = useState(false);
   const [saving, setSaving] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
@@ -71,20 +67,8 @@ function GoogleDriveButton() {
     }
   };
 
-  const handleOpenModal = async () => {
+  const handleOpenModal = () => {
     setShowModal(true);
-    setLoadingFolders(true);
-    try {
-      const res = await fetch("/api/drive/folders", { method: "POST" });
-      if (res.ok) {
-        const data = await res.json();
-        setFolders(data.folders || []);
-      }
-    } catch {
-      setFolders([]);
-    } finally {
-      setLoadingFolders(false);
-    }
   };
 
   const handleSelectFolder = async (folderId: string) => {
@@ -221,9 +205,7 @@ function GoogleDriveButton() {
       </div>
 
       {showModal && (
-        <FolderModal
-          folders={folders}
-          loading={loadingFolders}
+        <FolderBrowser
           saving={saving}
           onSelect={handleSelectFolder}
           onClose={() => setShowModal(false)}
@@ -234,21 +216,96 @@ function GoogleDriveButton() {
   );
 }
 
-function FolderModal({
-  folders,
-  loading,
+interface BrowseItem {
+  id: string;
+  name: string;
+  type: "my_drive" | "shared_drive" | "folder";
+  hasChildren: boolean;
+}
+
+interface BreadcrumbItem {
+  id: string;
+  name: string;
+  driveId?: string;
+}
+
+function FolderBrowser({
   saving,
   onSelect,
   onClose,
   currentFolderId,
 }: {
-  folders: DriveFolder[];
-  loading: boolean;
   saving: boolean;
   onSelect: (id: string) => void;
   onClose: () => void;
   currentFolderId?: string;
 }) {
+  const [items, setItems] = useState<BrowseItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [breadcrumbs, setBreadcrumbs] = useState<BreadcrumbItem[]>([]);
+  const [activeDriveId, setActiveDriveId] = useState<string | undefined>(undefined);
+
+  const currentFolderName = breadcrumbs.length > 0 ? breadcrumbs[breadcrumbs.length - 1].name : null;
+  const currentBrowseId = breadcrumbs.length > 0 ? breadcrumbs[breadcrumbs.length - 1].id : null;
+
+  const loadFolder = useCallback(async (parentId?: string, driveId?: string) => {
+    setLoading(true);
+    try {
+      const body: Record<string, string> = {};
+      if (parentId) body.parent_id = parentId;
+      if (driveId) body.drive_id = driveId;
+
+      const res = await fetch("/api/drive/folders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setItems(data.items || []);
+      } else {
+        setItems([]);
+      }
+    } catch {
+      setItems([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Load roots on mount
+  useEffect(() => {
+    loadFolder();
+  }, [loadFolder]);
+
+  const handleNavigateInto = (item: BrowseItem) => {
+    const newDriveId = item.type === "shared_drive" ? item.id : activeDriveId;
+    setActiveDriveId(newDriveId);
+    setBreadcrumbs((prev) => [...prev, { id: item.id, name: item.name, driveId: newDriveId }]);
+    loadFolder(item.id, newDriveId);
+  };
+
+  const handleBreadcrumbClick = (index: number) => {
+    if (index < 0) {
+      // Go to root
+      setBreadcrumbs([]);
+      setActiveDriveId(undefined);
+      loadFolder();
+    } else {
+      const target = breadcrumbs[index];
+      setBreadcrumbs((prev) => prev.slice(0, index + 1));
+      setActiveDriveId(target.driveId);
+      loadFolder(target.id, target.driveId);
+    }
+  };
+
+  const handleSelectCurrent = () => {
+    if (currentBrowseId) {
+      onSelect(currentBrowseId);
+    }
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center"
@@ -256,7 +313,7 @@ function FolderModal({
       onClick={onClose}
     >
       <div
-        className="w-96 max-h-[70vh] rounded-xl overflow-hidden flex flex-col"
+        className="w-[440px] max-h-[75vh] rounded-xl overflow-hidden flex flex-col"
         style={{
           background: "linear-gradient(180deg, #1e293b 0%, #0f172a 100%)",
           border: "1px solid rgba(59,130,246,0.2)",
@@ -267,8 +324,8 @@ function FolderModal({
         {/* Modal header */}
         <div className="px-5 py-4 flex items-center justify-between border-b border-slate-700/50">
           <div>
-            <h3 className="text-sm font-semibold text-white">Selecionar Pasta do Drive</h3>
-            <p className="text-[10px] text-slate-500 mt-0.5">As variações serão salvas automaticamente</p>
+            <h3 className="text-sm font-semibold text-white">Navegar Google Drive</h3>
+            <p className="text-[10px] text-slate-500 mt-0.5">Escolha a pasta onde salvar os criativos</p>
           </div>
           <button onClick={onClose} className="text-slate-500 hover:text-white transition-colors">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -277,42 +334,126 @@ function FolderModal({
           </button>
         </div>
 
-        {/* Folder list */}
-        <div className="flex-1 overflow-y-auto p-3 space-y-1">
-          {loading ? (
-            <div className="flex items-center justify-center py-8">
-              <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-              <span className="ml-2 text-xs text-slate-400">Carregando pastas...</span>
+        {/* Breadcrumbs */}
+        <div className="px-4 py-2 flex items-center gap-1 overflow-x-auto border-b border-slate-800/50" style={{ minHeight: 36 }}>
+          <button
+            onClick={() => handleBreadcrumbClick(-1)}
+            className={`shrink-0 text-[11px] px-1.5 py-0.5 rounded transition-colors ${
+              breadcrumbs.length === 0
+                ? "text-blue-400 font-medium"
+                : "text-slate-400 hover:text-white"
+            }`}
+          >
+            Drive
+          </button>
+          {breadcrumbs.map((bc, i) => (
+            <div key={bc.id} className="flex items-center gap-1 shrink-0">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#475569" strokeWidth="2.5">
+                <path d="M9 18l6-6-6-6" />
+              </svg>
+              <button
+                onClick={() => handleBreadcrumbClick(i)}
+                className={`text-[11px] px-1.5 py-0.5 rounded transition-colors truncate max-w-[120px] ${
+                  i === breadcrumbs.length - 1
+                    ? "text-blue-400 font-medium"
+                    : "text-slate-400 hover:text-white"
+                }`}
+                title={bc.name}
+              >
+                {bc.name}
+              </button>
             </div>
-          ) : folders.length === 0 ? (
-            <div className="text-center py-8">
-              <p className="text-xs text-slate-500">Nenhuma pasta encontrada</p>
-              <p className="text-[10px] text-slate-600 mt-1">Crie uma pasta no Google Drive primeiro</p>
+          ))}
+        </div>
+
+        {/* Folder list */}
+        <div className="flex-1 overflow-y-auto p-3 space-y-0.5" style={{ minHeight: 200 }}>
+          {loading ? (
+            <div className="flex items-center justify-center py-12">
+              <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+              <span className="ml-2 text-xs text-slate-400">Carregando...</span>
+            </div>
+          ) : items.length === 0 ? (
+            <div className="text-center py-12">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#334155" strokeWidth="1.5" className="mx-auto mb-2">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+              </svg>
+              <p className="text-xs text-slate-500">Pasta vazia</p>
+              <p className="text-[10px] text-slate-600 mt-1">Nenhuma subpasta encontrada aqui</p>
             </div>
           ) : (
-            folders.map((folder) => (
+            items.map((item) => (
               <button
-                key={folder.id}
-                onClick={() => onSelect(folder.id)}
-                disabled={saving}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left transition-all ${
-                  folder.id === currentFolderId
-                    ? "bg-blue-500/20 border border-blue-500/40 text-blue-300"
-                    : "bg-slate-800/30 border border-transparent text-slate-300 hover:bg-slate-700/50 hover:border-slate-600/50"
-                } disabled:opacity-50`}
+                key={item.id}
+                onClick={() => handleNavigateInto(item)}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left transition-all group ${
+                  item.id === currentFolderId
+                    ? "bg-blue-500/15 border border-blue-500/30"
+                    : "border border-transparent hover:bg-slate-700/40 hover:border-slate-600/30"
+                }`}
               >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0">
-                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-                </svg>
-                <span className="text-xs font-medium truncate">{folder.name}</span>
-                {folder.id === currentFolderId && (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" strokeWidth="2.5" className="ml-auto shrink-0">
-                    <path d="M20 6L9 17l-5-5" />
+                {/* Icon */}
+                {item.type === "shared_drive" ? (
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" className="shrink-0">
+                    <path d="M7.71 3.5l-5.16 8.93 3.45 5.96h6.03" stroke="#0F9D58" strokeWidth="1.5" />
+                    <path d="M7.71 3.5h10.3l-5.15 8.93H2.55" stroke="#4285F4" strokeWidth="1.5" />
+                    <path d="M18.01 3.5l-5.15 8.93 3.45 5.96h5.14l-3.45-5.96" stroke="#F4B400" strokeWidth="1.5" />
+                  </svg>
+                ) : item.type === "my_drive" ? (
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" strokeWidth="1.5" className="shrink-0">
+                    <circle cx="12" cy="12" r="10" />
+                    <path d="M12 8v8M8 12h8" />
+                  </svg>
+                ) : (
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={item.id === currentFolderId ? "#60a5fa" : "#64748b"} strokeWidth="1.5" className="shrink-0">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
                   </svg>
                 )}
+
+                {/* Name */}
+                <span className={`text-xs font-medium truncate flex-1 ${
+                  item.id === currentFolderId ? "text-blue-300" : "text-slate-300"
+                }`}>
+                  {item.name}
+                </span>
+
+                {/* Current folder indicator */}
+                {item.id === currentFolderId && (
+                  <span className="text-[9px] text-blue-400 bg-blue-500/15 px-1.5 py-0.5 rounded shrink-0">ATUAL</span>
+                )}
+
+                {/* Chevron */}
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#475569" strokeWidth="2" className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <path d="M9 18l6-6-6-6" />
+                </svg>
               </button>
             ))
           )}
+        </div>
+
+        {/* Footer: select current folder */}
+        <div className="px-4 py-3 border-t border-slate-700/50 flex items-center justify-between">
+          <div className="text-[10px] text-slate-500 truncate mr-3">
+            {currentFolderName ? (
+              <span>Pasta: <span className="text-slate-300">{currentFolderName}</span></span>
+            ) : (
+              <span>Navegue e selecione uma pasta</span>
+            )}
+          </div>
+          <button
+            onClick={handleSelectCurrent}
+            disabled={!currentBrowseId || saving}
+            className="shrink-0 flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-medium bg-blue-600 text-white hover:bg-blue-500 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+          >
+            {saving ? (
+              <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+            ) : (
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <path d="M20 6L9 17l-5-5" />
+              </svg>
+            )}
+            Selecionar esta pasta
+          </button>
         </div>
       </div>
     </div>

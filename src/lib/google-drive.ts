@@ -204,79 +204,81 @@ export async function setSelectedFolderId(folderId: string): Promise<void> {
 }
 
 /**
- * List Shared Drives the user has access to
+ * List root-level locations: My Drive + Shared Drives
  */
-async function listSharedDrives(accessToken: string): Promise<{ id: string; name: string }[]> {
+export async function listRoots(): Promise<{ id: string; name: string; type: "my_drive" | "shared_drive" }[]> {
+  const accessToken = await getValidAccessToken();
+  const roots: { id: string; name: string; type: "my_drive" | "shared_drive" }[] = [];
+
+  // My Drive
+  roots.push({ id: "root", name: "Meu Drive", type: "my_drive" });
+
+  // Shared Drives
   const response = await fetch(
     "https://www.googleapis.com/drive/v3/drives?pageSize=100&fields=drives(id,name)",
-    {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    }
+    { headers: { Authorization: `Bearer ${accessToken}` } }
   );
 
-  if (!response.ok) return [];
+  if (response.ok) {
+    const data = (await response.json()) as { drives: { id: string; name: string }[] };
+    for (const drive of data.drives || []) {
+      roots.push({ id: drive.id, name: drive.name, type: "shared_drive" });
+    }
+  }
 
-  const data = (await response.json()) as { drives: { id: string; name: string }[] };
-  return data.drives || [];
+  return roots;
 }
 
 /**
- * List folders in Google Drive (including Shared Drives)
+ * List child folders inside a given parent folder
  */
-export async function listFolders(): Promise<GoogleDriveFolder[]> {
+export async function listFoldersInParent(parentId: string, driveId?: string): Promise<GoogleDriveFolder[]> {
   const accessToken = await getValidAccessToken();
 
-  const allFolders: GoogleDriveFolder[] = [];
+  const params = new URLSearchParams({
+    q: `mimeType='application/vnd.google-apps.folder' and '${parentId}' in parents and trashed=false`,
+    spaces: "drive",
+    pageSize: "100",
+    fields: "files(id,name,mimeType)",
+    includeItemsFromAllDrives: "true",
+    supportsAllDrives: "true",
+    orderBy: "name",
+  });
 
-  // Check token scope
-  const tokenInfoRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${accessToken}`);
-  if (tokenInfoRes.ok) {
-    const tokenInfo = await tokenInfoRes.json();
-    console.log("[Drive] Token scope:", tokenInfo.scope);
+  // If browsing inside a Shared Drive, must specify corpora=drive and driveId
+  if (driveId) {
+    params.set("corpora", "drive");
+    params.set("driveId", driveId);
   }
 
-  // 1. List folders from My Drive
-  const myDriveResponse = await fetch(
-    "https://www.googleapis.com/drive/v3/files?q=mimeType='application/vnd.google-apps.folder'&spaces=drive&pageSize=100&fields=files(id,name,mimeType)&includeItemsFromAllDrives=true&supportsAllDrives=true",
-    {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    }
+  const response = await fetch(
+    `https://www.googleapis.com/drive/v3/files?${params.toString()}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
   );
 
-  if (myDriveResponse.ok) {
-    const data = (await myDriveResponse.json()) as { files: GoogleDriveFolder[] };
-    console.log("[Drive] My Drive folders:", data.files?.length || 0);
-    allFolders.push(...(data.files || []));
-  } else {
-    const errText = await myDriveResponse.text();
-    console.error("[Drive] My Drive error:", myDriveResponse.status, errText);
+  if (!response.ok) {
+    const errText = await response.text();
+    console.error("[Drive] listFoldersInParent error:", response.status, errText);
+    return [];
   }
 
-  // 2. List Shared Drives themselves (they act as root folders)
-  const sharedDrives = await listSharedDrives(accessToken);
-  console.log("[Drive] Shared Drives found:", sharedDrives.length, sharedDrives.map(d => d.name));
-  for (const drive of sharedDrives) {
-    allFolders.push({
-      id: drive.id,
-      name: `📁 ${drive.name} (Drive Compartilhado)`,
-      mimeType: "application/vnd.google-apps.folder",
-    });
+  const data = (await response.json()) as { files: GoogleDriveFolder[] };
+  return data.files || [];
+}
 
-    // 3. List top-level folders inside each Shared Drive
-    const sharedResponse = await fetch(
-      `https://www.googleapis.com/drive/v3/files?q=mimeType='application/vnd.google-apps.folder' and '${drive.id}' in parents&spaces=drive&pageSize=100&fields=files(id,name,mimeType)&includeItemsFromAllDrives=true&supportsAllDrives=true&corpora=drive&driveId=${drive.id}`,
-      {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      }
-    );
+/**
+ * Legacy: list all folders flat (kept for backward compatibility)
+ */
+export async function listFolders(): Promise<GoogleDriveFolder[]> {
+  const roots = await listRoots();
+  const allFolders: GoogleDriveFolder[] = [];
 
-    if (sharedResponse.ok) {
-      const sharedData = (await sharedResponse.json()) as { files: GoogleDriveFolder[] };
-      for (const folder of sharedData.files || []) {
-        folder.name = `  └ ${folder.name}`;
-        allFolders.push(folder);
-      }
+  for (const root of roots) {
+    if (root.type === "shared_drive") {
+      allFolders.push({ id: root.id, name: root.name, mimeType: "application/vnd.google-apps.folder" });
     }
+    const children = await listFoldersInParent(root.id, root.type === "shared_drive" ? root.id : undefined);
+    allFolders.push(...children);
   }
 
   return allFolders;

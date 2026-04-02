@@ -3,6 +3,8 @@ import { initDb } from "@/lib/db";
 import { generateImage } from "@/lib/gemini";
 import { put } from "@vercel/blob";
 import { v4 as uuid } from "uuid";
+
+export const maxDuration = 60;
 import type { GenerateRequest } from "@/lib/types";
 
 export async function POST(request: NextRequest) {

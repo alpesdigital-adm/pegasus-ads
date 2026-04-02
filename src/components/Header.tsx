@@ -22,6 +22,8 @@ function GoogleDriveButton() {
   const [folders, setFolders] = useState<DriveFolder[]>([]);
   const [loadingFolders, setLoadingFolders] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [showMenu, setShowMenu] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
 
   const checkStatus = useCallback(async () => {
     try {
@@ -44,6 +46,29 @@ function GoogleDriveButton() {
 
   const handleConnect = () => {
     window.location.href = "/api/auth/google";
+  };
+
+  const handleDisconnect = async () => {
+    setDisconnecting(true);
+    try {
+      await fetch("/api/drive/disconnect", { method: "POST" });
+      setStatus({ connected: false });
+      setShowMenu(false);
+    } catch {
+      // ignore
+    } finally {
+      setDisconnecting(false);
+    }
+  };
+
+  const handleReconnect = async () => {
+    setDisconnecting(true);
+    try {
+      await fetch("/api/drive/disconnect", { method: "POST" });
+      window.location.href = "/api/auth/google";
+    } catch {
+      setDisconnecting(false);
+    }
   };
 
   const handleOpenModal = async () => {
@@ -108,46 +133,93 @@ function GoogleDriveButton() {
     );
   }
 
-  // Connected but no folder selected
-  if (!status.folder_id) {
-    return (
-      <>
-        <button
-          onClick={handleOpenModal}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-amber-300 bg-amber-900/20 border border-amber-500/30 hover:bg-amber-900/30 transition-all"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-          </svg>
-          Selecionar Pasta
-        </button>
-        {showModal && (
-          <FolderModal
-            folders={folders}
-            loading={loadingFolders}
-            saving={saving}
-            onSelect={handleSelectFolder}
-            onClose={() => setShowModal(false)}
-          />
-        )}
-      </>
-    );
-  }
+  // Connected (with or without folder)
+  const isFullySetup = !!status.folder_id;
 
-  // Connected and folder selected
   return (
     <>
-      <button
-        onClick={handleOpenModal}
-        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-green-300 bg-green-900/20 border border-green-500/30 hover:bg-green-900/30 transition-all"
-        title={`Drive conectado: ${status.folder_name || status.folder_id}`}
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-          <path d="M9 13l2 2 4-4" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-        Drive ✓
-      </button>
+      <div className="relative">
+        <div className="flex items-center">
+          {/* Main action button */}
+          <button
+            onClick={isFullySetup ? handleOpenModal : handleOpenModal}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-l-lg text-xs font-medium transition-all ${
+              isFullySetup
+                ? "text-green-300 bg-green-900/20 border border-green-500/30 hover:bg-green-900/30"
+                : "text-amber-300 bg-amber-900/20 border border-amber-500/30 hover:bg-amber-900/30"
+            }`}
+            title={isFullySetup ? `Drive: ${status.folder_name || status.folder_id}` : undefined}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+              {isFullySetup && <path d="M9 13l2 2 4-4" strokeLinecap="round" strokeLinejoin="round" />}
+            </svg>
+            {isFullySetup ? "Drive ✓" : "Selecionar Pasta"}
+          </button>
+
+          {/* Dropdown trigger */}
+          <button
+            onClick={() => setShowMenu(!showMenu)}
+            className={`flex items-center px-1.5 py-1.5 rounded-r-lg text-xs font-medium transition-all border-l-0 ${
+              isFullySetup
+                ? "text-green-300 bg-green-900/20 border border-green-500/30 hover:bg-green-900/30"
+                : "text-amber-300 bg-amber-900/20 border border-amber-500/30 hover:bg-amber-900/30"
+            }`}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <path d="M6 9l6 6 6-6" />
+            </svg>
+          </button>
+        </div>
+
+        {/* Dropdown menu */}
+        {showMenu && (
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setShowMenu(false)} />
+            <div
+              className="absolute right-0 top-full mt-1 w-48 rounded-lg overflow-hidden z-50"
+              style={{
+                background: "#1e293b",
+                border: "1px solid rgba(59,130,246,0.2)",
+                boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+              }}
+            >
+              <button
+                onClick={() => { setShowMenu(false); handleOpenModal(); }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-slate-300 hover:bg-slate-700/50 transition-colors text-left"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                </svg>
+                {isFullySetup ? "Trocar Pasta" : "Selecionar Pasta"}
+              </button>
+              <button
+                onClick={handleReconnect}
+                disabled={disconnecting}
+                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-blue-300 hover:bg-slate-700/50 transition-colors text-left disabled:opacity-50"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+                  <path d="M21 3v5h-5" />
+                </svg>
+                Reconectar Drive
+              </button>
+              <div className="border-t border-slate-700/50" />
+              <button
+                onClick={handleDisconnect}
+                disabled={disconnecting}
+                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-red-400 hover:bg-red-900/20 transition-colors text-left disabled:opacity-50"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M18 6L6 18M6 6l12 12" />
+                </svg>
+                Desconectar
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+
       {showModal && (
         <FolderModal
           folders={folders}

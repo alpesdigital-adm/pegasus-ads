@@ -1,5 +1,100 @@
 import { NextRequest, NextResponse } from "next/server";
 import { initDb } from "@/lib/db";
+import { put } from "@vercel/blob";
+import { v4 as uuid } from "uuid";
+
+// POST: Import an existing creative (not AI-generated)
+export async function POST(request: NextRequest) {
+  try {
+    const db = await initDb();
+    const contentType = request.headers.get("content-type") || "";
+
+    let name: string;
+    let blobUrl: string;
+    let parentId: string | null = null;
+    let status = "testing";
+    let generation = 0;
+    let metaAdId: string | null = null;
+    let prompt: string | null = null;
+
+    if (contentType.includes("multipart/form-data")) {
+      const formData = await request.formData();
+      name = formData.get("name") as string;
+      const file = formData.get("file") as File | null;
+      const url = formData.get("url") as string | null;
+      parentId = formData.get("parent_id") as string | null;
+      status = (formData.get("status") as string) || "testing";
+      metaAdId = formData.get("meta_ad_id") as string | null;
+      prompt = formData.get("prompt") as string | null;
+
+      if (!name) {
+        return NextResponse.json({ error: "name is required" }, { status: 400 });
+      }
+
+      if (file) {
+        const ext = file.name.split(".").pop() || "png";
+        const blob = await put(`creatives/${uuid()}.${ext}`, file, {
+          access: "public",
+          contentType: file.type,
+        });
+        blobUrl = blob.url;
+      } else if (url) {
+        blobUrl = url; // Use external URL directly
+      } else {
+        return NextResponse.json({ error: "file or url required" }, { status: 400 });
+      }
+    } else {
+      const body = await request.json();
+      name = body.name;
+      blobUrl = body.blob_url;
+      parentId = body.parent_id || null;
+      status = body.status || "testing";
+      metaAdId = body.meta_ad_id || null;
+      prompt = body.prompt || null;
+      generation = body.generation || 0;
+
+      if (!name || !blobUrl) {
+        return NextResponse.json({ error: "name and blob_url are required" }, { status: 400 });
+      }
+    }
+
+    if (parentId) {
+      const parentRow = await db.execute({
+        sql: "SELECT generation FROM creatives WHERE id = ?",
+        args: [parentId],
+      });
+      if (parentRow.rows.length > 0) {
+        generation = (parentRow.rows[0].generation as number) + 1;
+      }
+    }
+
+    const id = uuid();
+    await db.execute({
+      sql: `INSERT INTO creatives (id, name, blob_url, prompt, parent_id, generation, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      args: [id, name, blobUrl, prompt, parentId, generation, status],
+    });
+
+    // Create edge if parent exists
+    if (parentId) {
+      const edgeId = uuid();
+      await db.execute({
+        sql: `INSERT INTO creative_edges (id, source_id, target_id, relationship)
+              VALUES (?, ?, ?, 'variation')`,
+        args: [edgeId, parentId, id],
+      });
+    }
+
+    const creative = { id, name, blob_url: blobUrl, prompt, parent_id: parentId, generation, status, meta_ad_id: metaAdId, created_at: new Date().toISOString() };
+    return NextResponse.json({ creative }, { status: 201 });
+  } catch (error) {
+    console.error("Import creative error:", error);
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Internal server error" },
+      { status: 500 }
+    );
+  }
+}
 
 export async function GET(request: NextRequest) {
   try {

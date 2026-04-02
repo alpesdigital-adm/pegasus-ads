@@ -51,8 +51,10 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(result, { status: 200 });
   } catch (error) {
     console.error("Publish pipeline error:", error);
+    const errorMessage = error instanceof Error ? error.message : "Pipeline failed";
+    const errorStack = error instanceof Error ? error.stack : undefined;
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Pipeline failed" },
+      { error: errorMessage, stack: errorStack },
       { status: 500 }
     );
   }

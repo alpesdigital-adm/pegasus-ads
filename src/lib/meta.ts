@@ -25,10 +25,12 @@ async function metaFetch<T = Record<string, unknown>>(
 
   if (!response.ok || (data as Record<string, unknown>).error) {
     const err = (data as Record<string, unknown>).error as Record<string, unknown> | undefined;
+    const safeUrl = url.replace(/access_token=[^&]+/, "access_token=***");
+    const errJson = JSON.stringify(err);
     const message = err
-      ? `Meta API Error ${err.code}: ${err.message} (subcode: ${err.error_subcode})`
-      : `Meta API HTTP ${response.status}: ${response.statusText}`;
-    console.error("[MetaService]", message, "| URL:", url.replace(/access_token=[^&]+/, "access_token=***"), "| Full error:", JSON.stringify(err));
+      ? `Meta API Error ${err.code}: ${err.message} (subcode: ${err.error_subcode}) | URL: ${safeUrl} | Detail: ${errJson}`
+      : `Meta API HTTP ${response.status}: ${response.statusText} | URL: ${safeUrl}`;
+    console.error("[MetaService]", message);
     throw new Error(message);
   }
 

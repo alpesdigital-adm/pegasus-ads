@@ -125,6 +125,7 @@ interface PromptJson {
     width: number;
     height: number;
     aspect_ratio: string;
+    safe_zone: string;
     quality: string[];
   };
   control_description: string | null;
@@ -139,6 +140,20 @@ interface PromptGenerationInput {
   controlDescription?: string;
   format: "feed" | "stories";
   additionalContext?: string;
+  /** Textos exatos que existem no controle — evita erros de ortografia */
+  controlTexts?: ControlTexts;
+}
+
+/**
+ * Textos exatos extraídos do criativo controle.
+ * Quando fornecidos, cada texto é listado literalmente no prompt JSON,
+ * eliminando a necessidade do modelo "ler" da imagem de referência.
+ */
+export interface ControlTexts {
+  headline: string;
+  subtitle?: string;
+  cta?: string;
+  extra?: string[];
 }
 
 /**
@@ -169,13 +184,58 @@ export function buildVariantPrompt(input: PromptGenerationInput): string {
       instruction: `Keep exactly as in the reference image. Do not modify.`,
     }));
 
-  // Construir textos que devem aparecer na imagem
-  // Para variáveis do tipo "copy" (headline, cta), o texto muda.
-  // Para todas as outras, os textos devem ser copiados letra por letra.
+  // ── Construir textos que devem aparecer na imagem ──
+  // Quando temos controlTexts, listamos cada texto literalmente.
+  // Isso evita que o modelo "leia" da referência e erre a ortografia.
   const textInstructions: PromptJson["text_content"]["texts_in_image"] = [];
+  const { controlTexts } = input;
 
-  if (variableType.category === "copy" && variableValue) {
-    // Quando a variável é de copy E tem valor específico, esse é o texto novo
+  if (controlTexts) {
+    // Temos os textos exatos do controle — melhor cenário
+    const isHeadlineTest = variableType.id === "headline" && variableValue;
+    const isCtaTest = variableType.id === "cta_style" && variableValue;
+
+    // Headline
+    textInstructions.push({
+      role: "headline",
+      exact_text: isHeadlineTest ? variableValue! : controlTexts.headline,
+      notes: isHeadlineTest
+        ? "This is the NEW headline. Render EXACTLY as written — every letter, accent, space."
+        : "Keep this headline EXACTLY as written. Do not rephrase or modify.",
+    });
+
+    // Subtitle
+    if (controlTexts.subtitle) {
+      textInstructions.push({
+        role: "subtitle",
+        exact_text: controlTexts.subtitle,
+        notes: "Render this subtitle EXACTLY as written. Every accent and space must match.",
+      });
+    }
+
+    // CTA
+    if (controlTexts.cta) {
+      textInstructions.push({
+        role: "cta",
+        exact_text: isCtaTest ? variableValue! : controlTexts.cta,
+        notes: isCtaTest
+          ? "This is the NEW CTA text. Render EXACTLY as written."
+          : "Render this CTA EXACTLY as written. Do not change any letter.",
+      });
+    }
+
+    // Extra texts
+    if (controlTexts.extra) {
+      for (const text of controlTexts.extra) {
+        textInstructions.push({
+          role: "extra",
+          exact_text: text,
+          notes: "Render EXACTLY as written.",
+        });
+      }
+    }
+  } else if (variableType.category === "copy" && variableValue) {
+    // Sem controlTexts mas temos variação de copy
     textInstructions.push({
       role: "modified_text",
       exact_text: variableValue,
@@ -187,10 +247,11 @@ export function buildVariantPrompt(input: PromptGenerationInput): string {
       notes: "All other text elements must be reproduced character-by-character from the reference image.",
     });
   } else {
+    // Fallback: sem controlTexts, sem variação de copy
     textInstructions.push({
       role: "all_texts",
       exact_text: "[reproduce every text from the reference image exactly as it appears]",
-      notes: "Copy every text element character-by-character from the reference image. Do NOT rephrase, translate, abbreviate, or correct any text. Portuguese accents (ã, ç, é, ô, etc.) must be perfectly reproduced.",
+      notes: "Copy every text element character-by-character from the reference image. Do NOT rephrase, translate, abbreviate, or correct any text. Portuguese accents (ã, ç, é, ê, ô, etc.) must be perfectly reproduced.",
     });
   }
 
@@ -225,11 +286,15 @@ export function buildVariantPrompt(input: PromptGenerationInput): string {
       width: dimensions.w,
       height: dimensions.h,
       aspect_ratio: dimensions.aspect,
+      safe_zone: format === "stories"
+        ? "CRITICAL for Stories: Keep ALL text and important elements within a safe zone of 5% margin on ALL sides. No text may touch or be cut off at the edges. The vertical format is narrower — text lines must be shorter to fit within the safe area."
+        : "Keep all text and important elements away from the edges with comfortable margins.",
       quality: [
         "Production-ready, publishable as-is",
         "All text must be sharp, legible, and correctly spelled",
         "Professional design quality matching the reference",
         "No artifacts, no blurry text, no cut-off elements",
+        "ALL text must fit completely within the image — no cropping or overflow",
       ],
     },
     control_description: controlDescription || null,
@@ -258,7 +323,8 @@ export function buildVariantPromptPair(
   variableType: VariableType | string,
   variableValue?: string,
   controlDescription?: string,
-  additionalContext?: string
+  additionalContext?: string,
+  controlTexts?: ControlTexts
 ): { feedPrompt: string; storiesPrompt: string } {
   const vt = typeof variableType === "string"
     ? VARIABLE_TYPES.find((v) => v.id === variableType) || VARIABLE_TYPES[0]
@@ -270,6 +336,7 @@ export function buildVariantPromptPair(
     controlDescription,
     format: "feed",
     additionalContext,
+    controlTexts,
   });
 
   const storiesPrompt = buildVariantPrompt({
@@ -278,6 +345,7 @@ export function buildVariantPromptPair(
     controlDescription,
     format: "stories",
     additionalContext,
+    controlTexts,
   });
 
   return { feedPrompt, storiesPrompt };

@@ -16,7 +16,7 @@
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db";
 import { generateImage } from "../gemini";
-import { buildVariantPromptPair, getVariableType } from "../ai-prompt";
+import { buildVariantPromptPair, getVariableType, type ControlTexts } from "../ai-prompt";
 import { verifyPostGeneration } from "../ai-verify";
 import { getNextAdNumber, generateCreativeNamePair, generateMetaAdName } from "../creative-naming";
 import { uploadToGoogleDrive, getSelectedFolderId } from "../google-drive";
@@ -58,6 +58,8 @@ export interface GeneratePipelineInput {
   variableType: string;
   variableValue?: string;
   numVariants?: number;
+  /** Textos exatos do controle para evitar erros de ortografia na geração */
+  controlTexts?: ControlTexts;
 }
 
 export interface GeneratePipelineOutput {
@@ -135,7 +137,9 @@ export async function runGeneratePipeline(
     const { feedPrompt, storiesPrompt } = buildVariantPromptPair(
       variableTypeDef,
       input.variableValue,
-      control.prompt as string | undefined
+      control.prompt as string | undefined,
+      undefined, // additionalContext
+      input.controlTexts
     );
 
     // Salvar prompt usado no test round

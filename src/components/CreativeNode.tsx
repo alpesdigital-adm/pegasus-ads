@@ -84,6 +84,22 @@ function CreativeNodeComponent({ data }: NodeProps<GraphNode>) {
           />
         </div>
 
+        {/* Placement badges */}
+        {data.placements && data.placements.length > 0 && (
+          <div className="absolute top-[38px] right-2 flex gap-1 z-10">
+            {data.placements.includes("feed") && (
+              <span className="text-[8px] font-bold uppercase px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 border border-blue-500/30">
+                F
+              </span>
+            )}
+            {data.placements.includes("stories") && (
+              <span className="text-[8px] font-bold uppercase px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-400 border border-purple-500/30">
+                S
+              </span>
+            )}
+          </div>
+        )}
+
         {/* Name */}
         <div className="px-3 -mt-6 relative z-10">
           <p className="text-xs font-semibold text-white truncate">{data.name}</p>

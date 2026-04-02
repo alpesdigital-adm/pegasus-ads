@@ -76,6 +76,12 @@ export interface GraphNode {
   prompt?: string;
   metrics?: MetricsAggregate;
   created_at: string;
+  /** Placements disponíveis para este criativo (ex: ["feed", "stories"]) */
+  placements?: string[];
+  /** ID do criativo Stories pareado (quando agrupado) */
+  stories_id?: string;
+  /** Blob URL da versão Stories (quando agrupado) */
+  stories_blob_url?: string;
 }
 
 export interface GraphEdge {

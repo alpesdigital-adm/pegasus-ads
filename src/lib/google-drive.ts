@@ -29,7 +29,7 @@ export function generateAuthUrl(): string {
     client_id: GOOGLE_CLIENT_ID,
     redirect_uri: REDIRECT_URI,
     response_type: "code",
-    scope: "https://www.googleapis.com/auth/drive.file",
+    scope: "https://www.googleapis.com/auth/drive",
     access_type: "offline",
     prompt: "consent",
   });
@@ -204,24 +204,70 @@ export async function setSelectedFolderId(folderId: string): Promise<void> {
 }
 
 /**
- * List folders in Google Drive
+ * List Shared Drives the user has access to
  */
-export async function listFolders(): Promise<GoogleDriveFolder[]> {
-  const accessToken = await getValidAccessToken();
-
+async function listSharedDrives(accessToken: string): Promise<{ id: string; name: string }[]> {
   const response = await fetch(
-    "https://www.googleapis.com/drive/v3/files?q=mimeType='application/vnd.google-apps.folder'&spaces=drive&pageSize=100&fields=files(id,name,mimeType)",
+    "https://www.googleapis.com/drive/v3/drives?pageSize=100&fields=drives(id,name)",
     {
       headers: { Authorization: `Bearer ${accessToken}` },
     }
   );
 
-  if (!response.ok) {
-    throw new Error(`Failed to list folders: ${response.statusText}`);
+  if (!response.ok) return [];
+
+  const data = (await response.json()) as { drives: { id: string; name: string }[] };
+  return data.drives || [];
+}
+
+/**
+ * List folders in Google Drive (including Shared Drives)
+ */
+export async function listFolders(): Promise<GoogleDriveFolder[]> {
+  const accessToken = await getValidAccessToken();
+
+  const allFolders: GoogleDriveFolder[] = [];
+
+  // 1. List folders from My Drive
+  const myDriveResponse = await fetch(
+    "https://www.googleapis.com/drive/v3/files?q=mimeType='application/vnd.google-apps.folder'&spaces=drive&pageSize=100&fields=files(id,name,mimeType)&includeItemsFromAllDrives=true&supportsAllDrives=true",
+    {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    }
+  );
+
+  if (myDriveResponse.ok) {
+    const data = (await myDriveResponse.json()) as { files: GoogleDriveFolder[] };
+    allFolders.push(...(data.files || []));
   }
 
-  const data = (await response.json()) as { files: GoogleDriveFolder[] };
-  return data.files || [];
+  // 2. List Shared Drives themselves (they act as root folders)
+  const sharedDrives = await listSharedDrives(accessToken);
+  for (const drive of sharedDrives) {
+    allFolders.push({
+      id: drive.id,
+      name: `📁 ${drive.name} (Drive Compartilhado)`,
+      mimeType: "application/vnd.google-apps.folder",
+    });
+
+    // 3. List top-level folders inside each Shared Drive
+    const sharedResponse = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q=mimeType='application/vnd.google-apps.folder' and '${drive.id}' in parents&spaces=drive&pageSize=100&fields=files(id,name,mimeType)&includeItemsFromAllDrives=true&supportsAllDrives=true&corpora=drive&driveId=${drive.id}`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    );
+
+    if (sharedResponse.ok) {
+      const sharedData = (await sharedResponse.json()) as { files: GoogleDriveFolder[] };
+      for (const folder of sharedData.files || []) {
+        folder.name = `  └ ${folder.name}`;
+        allFolders.push(folder);
+      }
+    }
+  }
+
+  return allFolders;
 }
 
 /**
@@ -256,7 +302,7 @@ export async function uploadToGoogleDrive(
 
   const body = Buffer.concat([Buffer.from(header), fileBuffer, Buffer.from(footer)]);
 
-  const response = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", {
+  const response = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -307,7 +353,7 @@ export async function getConnectionStatus(): Promise<{
   }
 
   const accessToken = await getValidAccessToken();
-  const response = await fetch(`https://www.googleapis.com/drive/v3/files/${folderId}?fields=name`, {
+  const response = await fetch(`https://www.googleapis.com/drive/v3/files/${folderId}?fields=name&supportsAllDrives=true`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
 

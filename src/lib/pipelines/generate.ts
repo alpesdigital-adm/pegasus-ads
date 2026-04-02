@@ -162,11 +162,12 @@ export async function runGeneratePipeline(
       const { feedName, storiesName } = generateCreativeNamePair(adNumber);
       const adName = generateMetaAdName(adNumber);
 
-      // Gerar Feed
+      // Gerar Feed (Nano Banana 2 — gemini-3.1-flash-image-preview)
       const feedResult = await generateImage({
         prompt: feedPrompt,
         referenceImages: [{ base64: controlBase64, mimeType: controlMimeType }],
         aspectRatio: "1:1",
+        imageSize: "1K",
       });
 
       if (feedResult.error || feedResult.images.length === 0) {
@@ -175,11 +176,12 @@ export async function runGeneratePipeline(
         throw new Error(step3.error);
       }
 
-      // Gerar Stories
+      // Gerar Stories (Nano Banana 2 — gemini-3.1-flash-image-preview)
       const storiesResult = await generateImage({
         prompt: storiesPrompt,
         referenceImages: [{ base64: controlBase64, mimeType: controlMimeType }],
         aspectRatio: "9:16",
+        imageSize: "1K",
       });
 
       if (storiesResult.error || storiesResult.images.length === 0) {

@@ -232,7 +232,7 @@ export async function runGeneratePipeline(
         [storiesCreativeId, storiesPrompt, storiesResult.model],
       ]) {
         await db.execute({
-          sql: `INSERT INTO prompts (id, creative_id, prompt_text, prompt_format, model) VALUES (?, ?, ?, 'text', ?)`,
+          sql: `INSERT INTO prompts (id, creative_id, prompt_text, prompt_format, model) VALUES (?, ?, ?, 'json', ?)`,
           args: [uuid(), cid, prompt, model],
         });
       }

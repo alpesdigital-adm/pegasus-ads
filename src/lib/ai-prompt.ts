@@ -1,15 +1,17 @@
 /**
  * AIPromptService — Geração dinâmica de prompts para testes A/B de criativos.
  *
- * Diferente de um catálogo de prompts estáticos, este service usa a IA (Gemini)
- * para gerar prompts contextualizados com base na imagem controle e no tipo de
- * variável que está sendo testada. Isso garante isolamento de variável real.
+ * v2: Prompt em formato JSON ultra-detalhado para o Gemini.
+ * Motivação: prompts em texto corrido causavam erros de ortografia/gramática
+ * nos textos gerados dentro das imagens. O formato JSON estruturado força
+ * o modelo a tratar cada texto como dado literal, reduzindo erros.
+ *
+ * Convenção: chaves e instruções em inglês, conteúdo textual em pt-BR.
  */
 
 import type { VariableType } from "./types";
 
 // ── Variable Types Catalog ──
-// Definições estáticas do que pode ser testado. O prompt em si é gerado dinamicamente.
 
 export const VARIABLE_TYPES: VariableType[] = [
   {
@@ -17,7 +19,7 @@ export const VARIABLE_TYPES: VariableType[] = [
     name: "Headline / Copy principal",
     description: "Texto principal sobreposto à imagem (título, chamada, promessa)",
     category: "copy",
-    prompt_guidance: "Mantenha TODOS os elementos visuais idênticos (cores, layout, imagens, fontes). Altere APENAS o texto principal/headline da imagem. O novo headline deve comunicar o mesmo benefício com abordagem diferente.",
+    prompt_guidance: "Keep ALL visual elements identical (colors, layout, images, fonts). Change ONLY the main text/headline in the image. The new headline must communicate the same benefit with a different approach.",
     examples: ["Transforme sua carreira → Domine medicina capilar", "Faturamento 6 dígitos → Destaque-se na área"],
   },
   {
@@ -25,7 +27,7 @@ export const VARIABLE_TYPES: VariableType[] = [
     name: "Paleta de cores",
     description: "Esquema de cores dominante (fundo, elementos, acentos)",
     category: "visual",
-    prompt_guidance: "Mantenha TODOS os elementos iguais (layout, textos, imagens, fontes). Altere APENAS a paleta de cores. Substitua as cores dominantes por uma paleta completamente diferente mas que mantenha contraste e legibilidade.",
+    prompt_guidance: "Keep ALL elements identical (layout, texts, images, fonts). Change ONLY the color palette. Replace dominant colors with a completely different palette that maintains contrast and readability.",
     examples: ["Azul escuro → Dourado quente", "Verde médico → Roxo premium"],
   },
   {
@@ -33,7 +35,7 @@ export const VARIABLE_TYPES: VariableType[] = [
     name: "Layout / Composição",
     description: "Distribuição e posicionamento dos elementos na imagem",
     category: "layout",
-    prompt_guidance: "Mantenha TODOS os textos, cores e imagens idênticos. Altere APENAS o layout/composição: posição dos elementos, alinhamento, proporção entre texto e imagem, uso do espaço.",
+    prompt_guidance: "Keep ALL texts, colors, and images identical. Change ONLY the layout/composition: element positioning, alignment, text-to-image ratio, use of space.",
     examples: ["Centralizado → Lateral esquerdo", "Texto sobre imagem → Texto em banner separado"],
   },
   {
@@ -41,7 +43,7 @@ export const VARIABLE_TYPES: VariableType[] = [
     name: "Imagem hero / Foto principal",
     description: "A foto ou imagem principal que ancora o criativo",
     category: "visual",
-    prompt_guidance: "Mantenha TODOS os textos, cores, layout e elementos gráficos. Altere APENAS a foto/imagem principal. Use uma foto diferente que comunique o mesmo conceito mas com enquadramento ou contexto diferente.",
+    prompt_guidance: "Keep ALL texts, colors, layout, and graphic elements. Change ONLY the main photo/image. Use a different photo that communicates the same concept but with different framing or context.",
     examples: ["Foto de rosto → Foto em consultório", "Produto isolado → Produto em uso"],
   },
   {
@@ -49,7 +51,7 @@ export const VARIABLE_TYPES: VariableType[] = [
     name: "Estilo do CTA (botão/chamada)",
     description: "Aparência e texto do call-to-action visual no criativo",
     category: "copy",
-    prompt_guidance: "Mantenha TODOS os elementos visuais e textos principais. Altere APENAS o botão/CTA: cor, formato, texto, posição, estilo (arredondado, retangular, com ícone, etc).",
+    prompt_guidance: "Keep ALL visual elements and main texts. Change ONLY the CTA button: color, shape, text, position, style (rounded, rectangular, with icon, etc).",
     examples: ["Botão verde → Seta laranja", "SAIBA MAIS → QUERO PARTICIPAR"],
   },
   {
@@ -57,7 +59,7 @@ export const VARIABLE_TYPES: VariableType[] = [
     name: "Prova social / Autoridade",
     description: "Elementos de credibilidade: números, depoimentos, logos, selos",
     category: "copy",
-    prompt_guidance: "Mantenha o layout e cores base. Adicione ou modifique APENAS elementos de prova social: números de alunos, depoimento curto, selo de garantia, logo de parceiros, resultado comprovado.",
+    prompt_guidance: "Keep the base layout and colors. Add or modify ONLY social proof elements: student numbers, short testimonial, guarantee badge, partner logos, proven results.",
     examples: ["+2.000 alunos", "97% de aprovação", "Selo de garantia 7 dias"],
   },
   {
@@ -65,7 +67,7 @@ export const VARIABLE_TYPES: VariableType[] = [
     name: "Estilo visual / Tratamento",
     description: "Tratamento visual geral: fotográfico, ilustrado, minimalista, premium",
     category: "visual",
-    prompt_guidance: "Mantenha textos e mensagem idênticos. Altere o tratamento visual geral: pode ser mais fotográfico vs. ilustrado, minimalista vs. rico, profissional vs. casual, moderno vs. clássico.",
+    prompt_guidance: "Keep texts and message identical. Change the overall visual treatment: photographic vs. illustrated, minimalist vs. rich, professional vs. casual, modern vs. classic.",
     examples: ["Fotográfico → Flat design", "Minimalista → Rich media"],
   },
   {
@@ -73,10 +75,61 @@ export const VARIABLE_TYPES: VariableType[] = [
     name: "Enquadramento / Orientação",
     description: "Proporção e orientação do conteúdo dentro do formato",
     category: "format",
-    prompt_guidance: "Mantenha todos os elementos. Altere como o conteúdo é enquadrado: zoom in vs. zoom out, foco central vs. regra dos terços, margem ampla vs. full bleed.",
+    prompt_guidance: "Keep all elements. Change how content is framed: zoom in vs. zoom out, center focus vs. rule of thirds, wide margin vs. full bleed.",
     examples: ["Close-up → Plano aberto", "Centralizado → Terços"],
   },
 ];
+
+// ── JSON Prompt Schema ──
+
+/**
+ * Estrutura JSON do prompt enviado ao Gemini.
+ * Cada campo tem propósito claro — o modelo recebe um contrato estruturado.
+ */
+interface PromptJson {
+  task: {
+    role: string;
+    objective: string;
+    context: string;
+  };
+  reference_image: {
+    description: string;
+    relationship: string;
+  };
+  ab_test: {
+    variable_being_tested: {
+      id: string;
+      name: string;
+      category: string;
+      instruction: string;
+      requested_variation: string | null;
+    };
+    isolation_rule: string;
+    elements_to_keep_identical: Array<{
+      element: string;
+      category: string;
+      instruction: string;
+    }>;
+  };
+  text_content: {
+    language: string;
+    critical_rule: string;
+    texts_in_image: Array<{
+      role: string;
+      exact_text: string;
+      notes: string;
+    }>;
+  };
+  output_specs: {
+    format: string;
+    width: number;
+    height: number;
+    aspect_ratio: string;
+    quality: string[];
+  };
+  control_description: string | null;
+  additional_context: string | null;
+}
 
 // ── Prompt Generation ──
 
@@ -89,82 +142,117 @@ interface PromptGenerationInput {
 }
 
 /**
- * Gera o prompt para o Gemini criar uma variante com variável isolada.
- * O prompt é construído em camadas:
- * 1. Instrução base (manter fidelidade ao controle)
- * 2. Regra de isolamento da variável
- * 3. Guidance específico do tipo de variável
- * 4. Valor concreto da variação (se fornecido)
- * 5. Especificações técnicas do formato
+ * Gera o prompt JSON ultra-detalhado para o Gemini.
+ *
+ * Retorna uma string com:
+ * 1. Instrução curta em texto (pré-JSON) — define contexto para o modelo
+ * 2. Bloco JSON completo com todas as especificações
+ *
+ * O formato JSON resolve o problema de erros de ortografia porque:
+ * - Textos são dados literais em campos explícitos, não parte de prosa
+ * - Regras ficam inequívocas e parseáveis
+ * - O modelo trata o JSON como especificação, não como conversa
  */
 export function buildVariantPrompt(input: PromptGenerationInput): string {
   const { variableType, variableValue, controlDescription, format } = input;
 
   const dimensions = format === "feed"
-    ? { w: 1080, h: 1080, aspect: "1:1" }
-    : { w: 1080, h: 1920, aspect: "9:16" };
+    ? { w: 1080, h: 1080, aspect: "1:1", formatName: "Feed (square)" }
+    : { w: 1080, h: 1920, aspect: "9:16", formatName: "Stories (vertical)" };
 
-  const sections: string[] = [];
+  // Elementos que devem permanecer idênticos (tudo exceto a variável testada)
+  const keepElements = VARIABLE_TYPES
+    .filter((v) => v.id !== variableType.id)
+    .map((v) => ({
+      element: v.name,
+      category: v.category,
+      instruction: `Keep exactly as in the reference image. Do not modify.`,
+    }));
 
-  // 1. Instrução base
-  sections.push(
-    `Você é um designer especialista em anúncios para Instagram/Facebook.`,
-    `Sua tarefa: criar uma VARIANTE de um anúncio existente (a imagem de referência anexada).`,
-    `A variante deve ser IDÊNTICA ao original em todos os aspectos EXCETO a variável sendo testada.`,
-    `Isso é um teste A/B — o isolamento da variável é CRÍTICO para que o teste seja válido.`,
-  );
+  // Construir textos que devem aparecer na imagem
+  // Para variáveis do tipo "copy" (headline, cta), o texto muda.
+  // Para todas as outras, os textos devem ser copiados letra por letra.
+  const textInstructions: PromptJson["text_content"]["texts_in_image"] = [];
 
-  // 2. O que manter (tudo exceto a variável)
-  const keepList = [
-    "headline", "color_palette", "layout", "hero_image",
-    "cta_style", "social_proof", "visual_style", "format_orientation",
-  ].filter((v) => v !== variableType.id);
-
-  sections.push(
-    `\nMANTENHA IDÊNTICO ao original:`,
-    ...keepList.map((v) => {
-      const vt = VARIABLE_TYPES.find((t) => t.id === v);
-      return `- ${vt?.name || v}`;
-    }),
-  );
-
-  // 3. O que alterar
-  sections.push(
-    `\nALTERE APENAS: ${variableType.name}`,
-    variableType.prompt_guidance,
-  );
-
-  // 4. Valor concreto (se especificado)
-  if (variableValue) {
-    sections.push(`\nVariação específica solicitada: ${variableValue}`);
+  if (variableType.category === "copy" && variableValue) {
+    // Quando a variável é de copy E tem valor específico, esse é o texto novo
+    textInstructions.push({
+      role: "modified_text",
+      exact_text: variableValue,
+      notes: `This is the NEW text for the ${variableType.name}. Render this EXACTLY as written — every letter, accent, and space must match.`,
+    });
+    textInstructions.push({
+      role: "preserved_texts",
+      exact_text: "[copy all other texts from the reference image exactly as they appear]",
+      notes: "All other text elements must be reproduced character-by-character from the reference image.",
+    });
+  } else {
+    textInstructions.push({
+      role: "all_texts",
+      exact_text: "[reproduce every text from the reference image exactly as it appears]",
+      notes: "Copy every text element character-by-character from the reference image. Do NOT rephrase, translate, abbreviate, or correct any text. Portuguese accents (ã, ç, é, ô, etc.) must be perfectly reproduced.",
+    });
   }
 
-  // 5. Descrição do controle (se fornecida, para reforçar contexto)
-  if (controlDescription) {
-    sections.push(`\nDescrição do criativo original: ${controlDescription}`);
-  }
+  const promptJson: PromptJson = {
+    task: {
+      role: "Expert Instagram/Facebook ad designer specializing in A/B testing",
+      objective: "Create a VARIANT of the reference image (attached) by modifying ONLY the specified variable while keeping everything else pixel-perfect identical.",
+      context: "This is a controlled A/B test. Variable isolation is CRITICAL for test validity. The variant must look like it was made by the same designer, same day, same brief — only the tested element changes.",
+    },
+    reference_image: {
+      description: controlDescription || "See attached image — this is the control creative to create a variant from.",
+      relationship: "The attached image is the CONTROL. Your output must be a variant of this exact image.",
+    },
+    ab_test: {
+      variable_being_tested: {
+        id: variableType.id,
+        name: variableType.name,
+        category: variableType.category,
+        instruction: variableType.prompt_guidance,
+        requested_variation: variableValue || null,
+      },
+      isolation_rule: "ONLY the variable above may differ from the reference image. Every other visual element, text, color, position, font, and graphic must remain IDENTICAL to the reference.",
+      elements_to_keep_identical: keepElements,
+    },
+    text_content: {
+      language: "pt-BR (Brazilian Portuguese)",
+      critical_rule: "ALL text in the output image MUST be in correct Brazilian Portuguese with proper spelling, accents (ã, ç, é, ê, ô, ú, etc.), and grammar. NEVER invent, rephrase, or approximate text. If copying from the reference, reproduce character-by-character. If creating new text, ensure perfect Portuguese orthography. Double-check every word before rendering.",
+      texts_in_image: textInstructions,
+    },
+    output_specs: {
+      format: dimensions.formatName,
+      width: dimensions.w,
+      height: dimensions.h,
+      aspect_ratio: dimensions.aspect,
+      quality: [
+        "Production-ready, publishable as-is",
+        "All text must be sharp, legible, and correctly spelled",
+        "Professional design quality matching the reference",
+        "No artifacts, no blurry text, no cut-off elements",
+      ],
+    },
+    control_description: controlDescription || null,
+    additional_context: input.additionalContext || null,
+  };
 
-  // 6. Contexto adicional
-  if (input.additionalContext) {
-    sections.push(`\nContexto adicional: ${input.additionalContext}`);
-  }
+  // Montar prompt final: instrução curta + JSON
+  const preamble = [
+    "You are generating an ad image variant for an A/B test.",
+    "Below is a detailed JSON specification. Follow it precisely.",
+    "CRITICAL: All text rendered in the image must be in perfect Brazilian Portuguese with correct spelling and accents.",
+    "The reference image is attached — create a variant following the spec below.",
+    "",
+    "```json",
+    JSON.stringify(promptJson, null, 2),
+    "```",
+  ].join("\n");
 
-  // 7. Especificações técnicas
-  sections.push(
-    `\nESPECIFICAÇÕES TÉCNICAS:`,
-    `- Formato: ${format === "feed" ? "Feed (quadrado)" : "Stories (vertical)"}`,
-    `- Dimensões alvo: ${dimensions.w}x${dimensions.h}px`,
-    `- Proporção: ${dimensions.aspect}`,
-    `- Gere a imagem completa, pronta para publicação`,
-    `- Texto deve ser legível e sem erros de ortografia`,
-    `- A imagem deve parecer profissional e publicável`,
-  );
-
-  return sections.join("\n");
+  return preamble;
 }
 
 /**
- * Gera par de prompts (Feed + Stories) para uma variante.
+ * Gera par de prompts JSON (Feed + Stories) para uma variante.
  */
 export function buildVariantPromptPair(
   variableType: VariableType | string,

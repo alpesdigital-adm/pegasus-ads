@@ -281,6 +281,9 @@ export function buildVariantPrompt(input: PromptGenerationInput): string {
     reference_image: {
       description: controlDescription || "See attached image — this is the control creative to create a variant from.",
       relationship: "The attached image is the CONTROL. Your output must be a variant of this exact image.",
+      ...(controlTexts ? {
+        text_warning: "IMPORTANT: The reference image may have overlaid text from an external platform (e.g., a content moderation overlay). DO NOT use any text you see in the reference image. Use ONLY the texts explicitly listed in the 'text_content.texts_in_image' section below.",
+      } : {}),
     },
     ab_test: {
       variable_being_tested: {
@@ -295,7 +298,9 @@ export function buildVariantPrompt(input: PromptGenerationInput): string {
     },
     text_content: {
       language: "pt-BR (Brazilian Portuguese)",
-      critical_rule: "ALL text in the output image MUST be in correct Brazilian Portuguese with proper spelling, accents (ã, ç, é, ê, ô, ú, etc.), and grammar. NEVER invent, rephrase, or approximate text. If copying from the reference, reproduce character-by-character. If creating new text, ensure perfect Portuguese orthography. Double-check every word before rendering.",
+      critical_rule: controlTexts
+        ? "The reference image may have overlaid or obscured text from an external tool — DO NOT read text from the reference image. Use ONLY the exact texts listed below in 'texts_in_image'. Render each one character-by-character exactly as written. Portuguese accents (ã, ç, é, ê, ô, ú, etc.) must be pixel-perfect."
+        : "ALL text in the output image MUST be in correct Brazilian Portuguese with proper spelling, accents (ã, ç, é, ê, ô, ú, etc.), and grammar. NEVER invent, rephrase, or approximate text. If copying from the reference, reproduce character-by-character.",
       texts_in_image: textInstructions,
     },
     output_specs: {
@@ -329,16 +334,21 @@ export function buildVariantPrompt(input: PromptGenerationInput): string {
   };
 
   // Montar prompt final: instrução curta + JSON
+  const textWarning = controlTexts
+    ? "⚠️ TEXT WARNING: The reference image may contain overlaid/incorrect text. Use ONLY the text fields in the JSON spec below — ignore everything you see written in the reference image."
+    : "";
+
   const preamble = [
     "You are generating an ad image variant for an A/B test.",
     "Below is a detailed JSON specification. Follow it precisely.",
     "CRITICAL: All text rendered in the image must be in perfect Brazilian Portuguese with correct spelling and accents.",
+    textWarning,
     "The reference image is attached — create a variant following the spec below.",
     "",
     "```json",
     JSON.stringify(promptJson, null, 2),
     "```",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 
   return preamble;
 }

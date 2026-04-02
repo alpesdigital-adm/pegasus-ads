@@ -177,13 +177,26 @@ export async function runGeneratePipeline(
       }
 
       // Gerar Stories usando Feed gerado como referência adicional
-      // Isso garante que Feed e Stories usem a mesma variação (cor, layout, etc.)
-      // Ordem: [controle original, feed gerado] — o modelo vê ambos para manter consistência
+      // Feed é reduzido para 512px antes de enviar (reduz payload e evita timeout no Vercel)
+      // O modelo precisa ver as CORES, não a resolução completa
+      let feedReferenceBase64 = feedResult.images[0].base64;
+      try {
+        const sharp = (await import("sharp")).default;
+        // 256px JPEG 70% — o modelo só precisa ver cores/estilo, não detalhes de texto
+        const feedReferenceBuffer = await sharp(Buffer.from(feedResult.images[0].base64, "base64"))
+          .resize(256, 256, { fit: "inside" })
+          .jpeg({ quality: 70 })
+          .toBuffer();
+        feedReferenceBase64 = feedReferenceBuffer.toString("base64");
+      } catch {
+        console.warn("[GeneratePipeline] sharp unavailable for feed reference resize, using full-res");
+      }
+
       const storiesResult = await generateImage({
         prompt: storiesPrompt,
         referenceImages: [
           { base64: controlBase64, mimeType: controlMimeType },
-          { base64: feedResult.images[0].base64, mimeType: feedResult.images[0].mimeType },
+          { base64: feedReferenceBase64, mimeType: "image/jpeg" },
         ],
         aspectRatio: "9:16",
         imageSize: "1K",

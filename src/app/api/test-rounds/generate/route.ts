@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { initDb } from "@/lib/db";
 import { runGeneratePipeline } from "@/lib/pipelines/generate";
 
-export const maxDuration = 60;
+export const maxDuration = 300; // Vercel Pro: até 300s (2x chamadas Gemini + referência dupla)
 
 /**
  * POST /api/test-rounds/generate — Executa o pipeline de geração para um test round.

@@ -30,8 +30,8 @@ export async function generateImage(
   if (request.referenceImages) {
     for (const img of request.referenceImages) {
       parts.push({
-        inline_data: {
-          mime_type: img.mimeType,
+        inlineData: {
+          mimeType: img.mimeType,
           data: img.base64,
         },
       });
@@ -78,10 +78,12 @@ export async function generateImage(
     if (part.text) {
       text += part.text;
     }
-    if (part.inline_data) {
+    // Gemini API returns camelCase (inlineData) not snake_case (inline_data)
+    const inlineData = part.inlineData || part.inline_data;
+    if (inlineData) {
       images.push({
-        base64: part.inline_data.data,
-        mimeType: part.inline_data.mime_type,
+        base64: inlineData.data,
+        mimeType: inlineData.mimeType || inlineData.mime_type,
       });
     }
   }

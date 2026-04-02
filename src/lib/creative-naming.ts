@@ -44,28 +44,68 @@ export function detectPlacementSuffix(width: number, height: number): "F" | "S" 
 }
 
 /**
- * Busca o próximo número de AD disponível no banco de dados.
- * Analisa todos os criativos existentes e retorna max + 1.
+ * Busca o próximo número de AD disponível.
+ *
+ * Busca em 3 fontes (para cobrir criativos feitos manualmente fora do sistema):
+ * 1. Tabela `creatives` — todos os criativos no grafo
+ * 2. Tabela `published_ads` — ads publicados via pipeline (campo ad_name)
+ * 3. Tabela `settings` — chave `last_ad_number` como fallback/override manual
+ *
+ * Retorna max(todas as fontes) + 1.
  */
 export async function getNextAdNumber(config: NamingConfig = DEFAULT_CONFIG): Promise<number> {
   const db = getDb();
-  const pattern = `${config.prefix}${config.separator}${config.adPrefix}%`;
-
-  const result = await db.execute({
-    sql: "SELECT name FROM creatives WHERE name LIKE ?",
-    args: [pattern],
-  });
 
   let maxNumber = 0;
-  const regex = new RegExp(`${config.adPrefix}(\\d{${config.padLength}})`, "i");
+  // Regex genérico: captura qualquer AD seguido de dígitos, independente do prefixo
+  const regex = /AD(\d+)/i;
 
-  for (const row of result.rows) {
+  // Fonte 1: creatives — busca QUALQUER nome com "AD" seguido de números
+  const creativesResult = await db.execute({
+    sql: "SELECT name FROM creatives WHERE name LIKE '%AD%'",
+  });
+
+  for (const row of creativesResult.rows) {
     const name = row.name as string;
     const match = name.match(regex);
     if (match) {
       const num = parseInt(match[1], 10);
       if (num > maxNumber) maxNumber = num;
     }
+  }
+
+  // Fonte 2: published_ads — ads publicados via pipeline
+  try {
+    const publishedResult = await db.execute({
+      sql: "SELECT ad_name FROM published_ads WHERE ad_name LIKE '%AD%'",
+    });
+
+    for (const row of publishedResult.rows) {
+      const name = row.ad_name as string;
+      const match = name.match(regex);
+      if (match) {
+        const num = parseInt(match[1], 10);
+        if (num > maxNumber) maxNumber = num;
+      }
+    }
+  } catch {
+    // Tabela pode não existir ainda
+  }
+
+  // Fonte 3: settings — override manual para cobrir criativos criados fora do sistema
+  try {
+    const settingsResult = await db.execute({
+      sql: "SELECT value FROM settings WHERE key = 'last_ad_number'",
+    });
+
+    if (settingsResult.rows.length > 0) {
+      const settingsNum = parseInt(settingsResult.rows[0].value as string, 10);
+      if (!isNaN(settingsNum) && settingsNum > maxNumber) {
+        maxNumber = settingsNum;
+      }
+    }
+  } catch {
+    // ignore
   }
 
   return maxNumber + 1;

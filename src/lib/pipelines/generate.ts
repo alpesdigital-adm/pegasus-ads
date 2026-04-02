@@ -16,7 +16,7 @@
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db";
 import { generateImage } from "../gemini";
-import { buildVariantPromptPair, getVariableType, type ControlTexts } from "../ai-prompt";
+import { buildVariantPromptPair, buildVariantPrompt, getVariableType, parseColorSpec, type ControlTexts } from "../ai-prompt";
 import { verifyPostGeneration } from "../ai-verify";
 import { getNextAdNumber, generateCreativeNamePair, generateMetaAdName } from "../creative-naming";
 import { uploadToGoogleDrive, getSelectedFolderId } from "../google-drive";
@@ -176,28 +176,25 @@ export async function runGeneratePipeline(
         throw new Error(step3.error);
       }
 
-      // Gerar Stories usando Feed gerado como referência adicional
-      // Feed é reduzido para 512px antes de enviar (reduz payload e evita timeout no Vercel)
-      // O modelo precisa ver as CORES, não a resolução completa
-      let feedReferenceBase64 = feedResult.images[0].base64;
-      try {
-        const sharp = (await import("sharp")).default;
-        // 256px JPEG 70% — o modelo só precisa ver cores/estilo, não detalhes de texto
-        const feedReferenceBuffer = await sharp(Buffer.from(feedResult.images[0].base64, "base64"))
-          .resize(256, 256, { fit: "inside" })
-          .jpeg({ quality: 70 })
-          .toBuffer();
-        feedReferenceBase64 = feedReferenceBuffer.toString("base64");
-      } catch {
-        console.warn("[GeneratePipeline] sharp unavailable for feed reference resize, using full-res");
-      }
+      // Color Spec First: extrair paleta do texto do Feed, injetar no Stories
+      // O Feed emite PALETTE_SPEC::{...} antes da imagem quando é variável visual
+      const colorSpec = parseColorSpec(feedResult.text);
+      console.log("[GeneratePipeline] Color spec extracted:", colorSpec);
 
+      // Reconstruir prompt do Stories com o colorSpec real do Feed
+      const variableTypeDef = getVariableType(input.variableType)!;
+      const storiesPromptWithColor = buildVariantPrompt({
+        variableType: variableTypeDef,
+        variableValue: input.variableValue,
+        format: "stories",
+        controlTexts: input.controlTexts,
+        colorSpec: colorSpec ?? undefined,
+      });
+
+      // Stories usa apenas a imagem de controle — sem referência do Feed (evita timeout)
       const storiesResult = await generateImage({
-        prompt: storiesPrompt,
-        referenceImages: [
-          { base64: controlBase64, mimeType: controlMimeType },
-          { base64: feedReferenceBase64, mimeType: "image/jpeg" },
-        ],
+        prompt: storiesPromptWithColor,
+        referenceImages: [{ base64: controlBase64, mimeType: controlMimeType }],
         aspectRatio: "9:16",
         imageSize: "1K",
       });
@@ -238,7 +235,7 @@ export async function runGeneratePipeline(
       await db.execute({
         sql: `INSERT INTO creatives (id, name, blob_url, prompt, model, width, height, parent_id, generation, status)
               VALUES (?, ?, ?, ?, ?, 1080, 1920, ?, ?, 'generated')`,
-        args: [storiesCreativeId, storiesName, storiesBlob.url, storiesPrompt, storiesResult.model, input.controlCreativeId, generation],
+        args: [storiesCreativeId, storiesName, storiesBlob.url, storiesPromptWithColor, storiesResult.model, input.controlCreativeId, generation],
       });
 
       // Criar edges
@@ -253,7 +250,7 @@ export async function runGeneratePipeline(
       // Salvar prompts
       for (const [cid, prompt, model] of [
         [feedCreativeId, feedPrompt, feedResult.model],
-        [storiesCreativeId, storiesPrompt, storiesResult.model],
+        [storiesCreativeId, storiesPromptWithColor, storiesResult.model],
       ]) {
         await db.execute({
           sql: `INSERT INTO prompts (id, creative_id, prompt_text, prompt_format, model) VALUES (?, ?, ?, 'json', ?)`,

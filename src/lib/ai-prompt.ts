@@ -129,6 +129,24 @@ interface PromptJson {
     safe_zone: string;
     quality: string[];
   };
+  /**
+   * Feed only: instrui o modelo a emitir a paleta escolhida como texto
+   * antes de gerar a imagem — usada para garantir consistência no Stories.
+   */
+  color_specification_output?: {
+    REQUIRED: string;
+    format: string;
+    example: string;
+  };
+  /**
+   * Stories only: paleta exata extraída do texto do Feed gerado.
+   * Garante que Feed e Stories usem as mesmas cores.
+   */
+  color_consistency?: {
+    REQUIRED: string;
+    palette: Record<string, string>;
+    instruction: string;
+  };
   control_description: string | null;
   additional_context: string | null;
 }
@@ -144,11 +162,12 @@ interface PromptGenerationInput {
   /** Textos exatos que existem no controle — evita erros de ortografia */
   controlTexts?: ControlTexts;
   /**
-   * Para Stories: indica que há duas imagens de referência anexadas.
-   * Imagem 1 = controle original. Imagem 2 = Feed gerado com a mesma variação.
-   * Isso garante consistência visual (cores, estilo) entre Feed e Stories.
+   * Stories only — Color Spec First:
+   * Paleta de cores exata que o Feed escolheu, extraída do texto da resposta.
+   * Formato: { primary, secondary, accent, background, description }
+   * Quando fornecida, o Stories é instruído a usar EXATAMENTE essas cores.
    */
-  hasFeedReference?: boolean;
+  colorSpec?: Record<string, string>;
 }
 
 /**
@@ -268,16 +287,10 @@ export function buildVariantPrompt(input: PromptGenerationInput): string {
       objective: "Create a VARIANT of the reference image (attached) by modifying ONLY the specified variable while keeping everything else pixel-perfect identical.",
       context: "This is a controlled A/B test. Variable isolation is CRITICAL for test validity. The variant must look like it was made by the same designer, same day, same brief — only the tested element changes.",
     },
-    reference_image: input.hasFeedReference
-      ? {
-          description: "TWO reference images are attached: (1) the original control creative, (2) the Feed variant (1:1) already generated with this same A/B variation applied.",
-          relationship: "Image 1 (control): source of structure, texts, and base layout. Image 2 (Feed variant): defines the EXACT visual variation applied (colors, style, treatment). Your Stories output MUST use the SAME visual variation as Image 2, adapted to the 9:16 vertical format.",
-          consistency_rule: "The Stories and Feed versions must look like siblings — same color palette, same visual style, same mood. A user scrolling from Feed to Stories must recognize they are the same campaign.",
-        }
-      : {
-          description: controlDescription || "See attached image — this is the control creative to create a variant from.",
-          relationship: "The attached image is the CONTROL. Your output must be a variant of this exact image.",
-        },
+    reference_image: {
+      description: controlDescription || "See attached image — this is the control creative to create a variant from.",
+      relationship: "The attached image is the CONTROL. Your output must be a variant of this exact image.",
+    },
     ab_test: {
       variable_being_tested: {
         id: variableType.id,
@@ -310,23 +323,63 @@ export function buildVariantPrompt(input: PromptGenerationInput): string {
         "ALL text must fit completely within the image — no cropping or overflow",
       ],
     },
+    // Feed: pede que o modelo emita a paleta como texto antes de gerar a imagem
+    ...(format === "feed" && variableType.category === "visual" ? {
+      color_specification_output: {
+        REQUIRED: "Before generating the image, output your chosen color palette as the VERY FIRST line of text. Use EXACTLY this format — no extra text before it:",
+        format: 'PALETTE_SPEC::{"primary":"#hexcode","secondary":"#hexcode","accent":"#hexcode","background":"#hexcode","description":"brief palette description"}',
+        example: 'PALETTE_SPEC::{"primary":"#1a3a6b","secondary":"#d4af37","accent":"#ffffff","background":"#0d1f3c","description":"Navy blue with gold accents, professional premium feel"}',
+      },
+    } : {}),
+
+    // Stories: usa a paleta exata que o Feed escolheu
+    ...(format === "stories" && input.colorSpec ? {
+      color_consistency: {
+        REQUIRED: "You MUST use EXACTLY this color palette. This palette was already applied to the Feed (1:1) version of this ad — Stories must match it precisely.",
+        palette: input.colorSpec,
+        instruction: "Every color in your image must correspond to this specification. Do NOT choose a different palette. The user will see Feed and Stories side by side — they must look like the same campaign.",
+      },
+    } : {}),
+
     control_description: controlDescription || null,
     additional_context: input.additionalContext || null,
   };
 
   // Montar prompt final: instrução curta + JSON
+  const colorSpecInstruction = format === "feed" && variableType.category === "visual"
+    ? "IMPORTANT: Output the PALETTE_SPEC line as plain text BEFORE the image. Then generate the image."
+    : "";
+
   const preamble = [
     "You are generating an ad image variant for an A/B test.",
     "Below is a detailed JSON specification. Follow it precisely.",
     "CRITICAL: All text rendered in the image must be in perfect Brazilian Portuguese with correct spelling and accents.",
+    colorSpecInstruction,
     "The reference image is attached — create a variant following the spec below.",
     "",
     "```json",
     JSON.stringify(promptJson, null, 2),
     "```",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 
   return preamble;
+}
+
+/**
+ * Extrai o color spec do texto emitido pelo Gemini no Feed.
+ * O modelo emite: PALETTE_SPEC::{"primary":"#hex",...}
+ * Retorna o objeto JSON ou null se não encontrado.
+ */
+export function parseColorSpec(text: string | undefined): Record<string, string> | null {
+  if (!text) return null;
+  const match = text.match(/PALETTE_SPEC::(\{[^}]+\})/);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[1]) as Record<string, string>;
+  } catch {
+    console.warn("[AIPrompt] Failed to parse PALETTE_SPEC:", match[1]);
+    return null;
+  }
 }
 
 /**
@@ -337,7 +390,8 @@ export function buildVariantPromptPair(
   variableValue?: string,
   controlDescription?: string,
   additionalContext?: string,
-  controlTexts?: ControlTexts
+  controlTexts?: ControlTexts,
+  colorSpec?: Record<string, string>
 ): { feedPrompt: string; storiesPrompt: string } {
   const vt = typeof variableType === "string"
     ? VARIABLE_TYPES.find((v) => v.id === variableType) || VARIABLE_TYPES[0]
@@ -352,6 +406,8 @@ export function buildVariantPromptPair(
     controlTexts,
   });
 
+  // Stories usa colorSpec (Color Spec First) quando disponível
+  // Se colorSpec ainda não existe (pré-geração do Feed), será reconstruído após
   const storiesPrompt = buildVariantPrompt({
     variableType: vt,
     variableValue,
@@ -359,7 +415,7 @@ export function buildVariantPromptPair(
     format: "stories",
     additionalContext,
     controlTexts,
-    hasFeedReference: true, // Feed gerado é passado como 2ª referência no pipeline
+    colorSpec,
   });
 
   return { feedPrompt, storiesPrompt };

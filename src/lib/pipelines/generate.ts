@@ -176,10 +176,15 @@ export async function runGeneratePipeline(
         throw new Error(step3.error);
       }
 
-      // Gerar Stories (Nano Banana 2 — gemini-3.1-flash-image-preview)
+      // Gerar Stories usando Feed gerado como referência adicional
+      // Isso garante que Feed e Stories usem a mesma variação (cor, layout, etc.)
+      // Ordem: [controle original, feed gerado] — o modelo vê ambos para manter consistência
       const storiesResult = await generateImage({
         prompt: storiesPrompt,
-        referenceImages: [{ base64: controlBase64, mimeType: controlMimeType }],
+        referenceImages: [
+          { base64: controlBase64, mimeType: controlMimeType },
+          { base64: feedResult.images[0].base64, mimeType: feedResult.images[0].mimeType },
+        ],
         aspectRatio: "9:16",
         imageSize: "1K",
       });

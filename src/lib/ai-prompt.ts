@@ -95,6 +95,7 @@ interface PromptJson {
   reference_image: {
     description: string;
     relationship: string;
+    consistency_rule?: string;
   };
   ab_test: {
     variable_being_tested: {
@@ -142,6 +143,12 @@ interface PromptGenerationInput {
   additionalContext?: string;
   /** Textos exatos que existem no controle — evita erros de ortografia */
   controlTexts?: ControlTexts;
+  /**
+   * Para Stories: indica que há duas imagens de referência anexadas.
+   * Imagem 1 = controle original. Imagem 2 = Feed gerado com a mesma variação.
+   * Isso garante consistência visual (cores, estilo) entre Feed e Stories.
+   */
+  hasFeedReference?: boolean;
 }
 
 /**
@@ -261,10 +268,16 @@ export function buildVariantPrompt(input: PromptGenerationInput): string {
       objective: "Create a VARIANT of the reference image (attached) by modifying ONLY the specified variable while keeping everything else pixel-perfect identical.",
       context: "This is a controlled A/B test. Variable isolation is CRITICAL for test validity. The variant must look like it was made by the same designer, same day, same brief — only the tested element changes.",
     },
-    reference_image: {
-      description: controlDescription || "See attached image — this is the control creative to create a variant from.",
-      relationship: "The attached image is the CONTROL. Your output must be a variant of this exact image.",
-    },
+    reference_image: input.hasFeedReference
+      ? {
+          description: "TWO reference images are attached: (1) the original control creative, (2) the Feed variant (1:1) already generated with this same A/B variation applied.",
+          relationship: "Image 1 (control): source of structure, texts, and base layout. Image 2 (Feed variant): defines the EXACT visual variation applied (colors, style, treatment). Your Stories output MUST use the SAME visual variation as Image 2, adapted to the 9:16 vertical format.",
+          consistency_rule: "The Stories and Feed versions must look like siblings — same color palette, same visual style, same mood. A user scrolling from Feed to Stories must recognize they are the same campaign.",
+        }
+      : {
+          description: controlDescription || "See attached image — this is the control creative to create a variant from.",
+          relationship: "The attached image is the CONTROL. Your output must be a variant of this exact image.",
+        },
     ab_test: {
       variable_being_tested: {
         id: variableType.id,
@@ -346,6 +359,7 @@ export function buildVariantPromptPair(
     format: "stories",
     additionalContext,
     controlTexts,
+    hasFeedReference: true, // Feed gerado é passado como 2ª referência no pipeline
   });
 
   return { feedPrompt, storiesPrompt };

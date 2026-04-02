@@ -1,0 +1,29 @@
+import { NextRequest, NextResponse } from "next/server";
+import { setSelectedFolderId } from "@/lib/google-drive";
+import { initDb } from "@/lib/db";
+
+interface SelectFolderRequest {
+  folder_id: string;
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    await initDb();
+
+    const body: SelectFolderRequest = await request.json();
+
+    if (!body.folder_id) {
+      return NextResponse.json({ error: "folder_id is required" }, { status: 400 });
+    }
+
+    await setSelectedFolderId(body.folder_id);
+
+    return NextResponse.json({ success: true, folder_id: body.folder_id });
+  } catch (error) {
+    console.error("Select folder error:", error);
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Failed to select folder" },
+      { status: 500 }
+    );
+  }
+}

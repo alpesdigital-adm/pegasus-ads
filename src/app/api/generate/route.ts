@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { initDb } from "@/lib/db";
 import { generateImage } from "@/lib/gemini";
+import { uploadToGoogleDrive, getSelectedFolderId } from "@/lib/google-drive";
 import { put } from "@vercel/blob";
 import { v4 as uuid } from "uuid";
 
@@ -158,6 +159,22 @@ export async function POST(request: NextRequest) {
           args: [uuid(), creativeId, imgId],
         });
       }
+    }
+
+    // Try to auto-upload to Google Drive if connected
+    try {
+      const folderId = await getSelectedFolderId();
+      if (folderId) {
+        await uploadToGoogleDrive(
+          `creative-${creativeId}.${ext}`,
+          imageBuffer,
+          generatedImage.mimeType,
+          folderId
+        );
+      }
+    } catch (driveError) {
+      // Log the error but don't fail the generation
+      console.error("Failed to auto-upload to Google Drive:", driveError);
     }
 
     const creative = {

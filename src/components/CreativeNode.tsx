@@ -12,18 +12,28 @@ const statusConfig = {
   paused: { color: "#f59e0b", label: "Pausado", glow: "rgba(245,158,11,0.3)" },
 };
 
-function getCplColor(cpl: number | null | undefined): string {
+const killRuleConfig: Record<"kill" | "warn" | "promote" | "observe", { bg: string; border: string; text: string }> = {
+  kill:    { bg: "#ef444420", border: "#ef444450", text: "#ef4444" },
+  warn:    { bg: "#f9731620", border: "#f9731650", text: "#f97316" },
+  promote: { bg: "#10b98120", border: "#10b98150", text: "#10b981" },
+  observe: { bg: "#8b5cf620", border: "#8b5cf650", text: "#8b5cf6" },
+};
+
+function getCplColor(cpl: number | null | undefined, cplTarget: number): string {
   if (cpl === null || cpl === undefined) return "#64748b";
-  if (cpl <= 32.77) return "#10b981";
-  if (cpl <= 49.16) return "#f59e0b";
-  if (cpl <= 65.54) return "#f97316";
-  return "#ef4444";
+  if (cpl <= cplTarget * 1.31) return "#10b981";   // ≤ 1.31x target → verde
+  if (cpl <= cplTarget * 1.97) return "#f59e0b";   // ≤ 1.97x target → amarelo
+  if (cpl <= cplTarget * 2.62) return "#f97316";   // ≤ 2.62x target → laranja
+  return "#ef4444";                                  // > 2.62x target → vermelho
 }
 
 function CreativeNodeComponent({ data }: NodeProps<GraphNode>) {
   const config = statusConfig[data.status] || statusConfig.generated;
   const metrics = data.metrics;
-  const cplColor = getCplColor(metrics?.cpl);
+  const cplTarget = data.cpl_target ?? 25;
+  const cplColor = getCplColor(metrics?.cpl, cplTarget);
+  const killRule = data.kill_rule;
+  const killConfig = killRule ? killRuleConfig[killRule.action] : null;
 
   return (
     <div
@@ -33,13 +43,37 @@ function CreativeNodeComponent({ data }: NodeProps<GraphNode>) {
         minHeight: 240,
       }}
     >
+      {/* Kill rule badge — flutua acima do card */}
+      {killRule && killConfig && (
+        <div
+          className="absolute -top-6 left-0 right-0 flex justify-center z-20"
+        >
+          <div
+            className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider"
+            style={{
+              backgroundColor: killConfig.bg,
+              border: `1px solid ${killConfig.border}`,
+              color: killConfig.text,
+            }}
+          >
+            <span>{killRule.level}</span>
+            <span className="font-normal opacity-80">·</span>
+            <span>{killRule.name}</span>
+          </div>
+        </div>
+      )}
+
       {/* Card */}
       <div
         className="rounded-xl overflow-hidden transition-all duration-300 group-hover:scale-[1.02]"
         style={{
           background: "linear-gradient(135deg, #1e293b 0%, #0f172a 100%)",
-          border: `1px solid ${config.color}40`,
-          boxShadow: `0 0 20px ${config.glow}, 0 4px 24px rgba(0,0,0,0.4)`,
+          border: killRule
+            ? `1px solid ${killConfig?.border ?? "#475569"}`
+            : `1px solid ${config.color}40`,
+          boxShadow: killRule
+            ? `0 0 20px ${killConfig?.bg ?? "transparent"}, 0 4px 24px rgba(0,0,0,0.4)`
+            : `0 0 20px ${config.glow}, 0 4px 24px rgba(0,0,0,0.4)`,
         }}
       >
         {/* Status badge */}

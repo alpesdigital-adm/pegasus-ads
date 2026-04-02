@@ -66,6 +66,12 @@ export interface MetricsAggregate {
   cpl: number | null;
 }
 
+export interface KillRuleResult {
+  level: string;
+  name: string;
+  action: "kill" | "warn" | "promote" | "observe";
+}
+
 export interface GraphNode {
   id: string;
   name: string;
@@ -82,6 +88,10 @@ export interface GraphNode {
   stories_id?: string;
   /** Blob URL da versão Stories (quando agrupado) */
   stories_blob_url?: string;
+  /** Kill rule ativa para este AD (resultado avaliação L0-L5) */
+  kill_rule?: KillRuleResult;
+  /** CPL target da campanha (para colorização dinâmica) */
+  cpl_target?: number;
 }
 
 export interface GraphEdge {

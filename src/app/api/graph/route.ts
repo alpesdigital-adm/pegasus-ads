@@ -1,6 +1,8 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { initDb } from "@/lib/db";
 import type { GraphData, GraphNode, GraphEdge } from "@/lib/types";
+import { evaluateKillRules } from "@/config/kill-rules";
+import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
 
 /**
  * GET /api/graph
@@ -8,6 +10,9 @@ import type { GraphData, GraphNode, GraphEdge } from "@/lib/types";
  * Retorna o grafo de ADs (não criativos individuais).
  * Cada nó = 1 AD (ex: T7EBMX-AD014), agrupando Feed + Stories.
  * A imagem exibida é a do Feed (1:1), com referência à versão Stories.
+ *
+ * Query params:
+ *   cpl_target = número (padrão: T7_0003_RAT.cplTarget = 25)
  *
  * Agrupamento: nome base sem sufixo F/S e sem extensão.
  *   "T7EBMX-AD014F.png" → base "T7EBMX-AD014"
@@ -22,11 +27,15 @@ function getAdBaseName(creativeName: string): string {
   return name;
 }
 
-export async function GET() {
+const DEFAULT_CPL_TARGET = KNOWN_CAMPAIGNS["T7_0003_RAT"]?.cplTarget ?? 25;
+
+export async function GET(req: NextRequest) {
   try {
     const db = await initDb();
+    const { searchParams } = req.nextUrl;
+    const cplTarget = parseFloat(searchParams.get("cpl_target") || String(DEFAULT_CPL_TARGET));
 
-    // Buscar todos os criativos com métricas agregadas
+    // Buscar todos os criativos com métricas agregadas + dias rodando
     const creativesResult = await db.execute(`
       SELECT c.*,
         (SELECT SUM(m.spend) FROM metrics m WHERE m.creative_id = c.id) as total_spend,
@@ -35,7 +44,8 @@ export async function GET() {
         (SELECT SUM(m.leads) FROM metrics m WHERE m.creative_id = c.id) as total_leads,
         (SELECT AVG(m.cpm) FROM metrics m WHERE m.creative_id = c.id) as avg_cpm,
         (SELECT AVG(m.ctr) FROM metrics m WHERE m.creative_id = c.id) as avg_ctr,
-        (SELECT AVG(m.cpc) FROM metrics m WHERE m.creative_id = c.id AND m.cpc > 0) as avg_cpc
+        (SELECT AVG(m.cpc) FROM metrics m WHERE m.creative_id = c.id AND m.cpc > 0) as avg_cpc,
+        (SELECT COUNT(DISTINCT m.date) FROM metrics m WHERE m.creative_id = c.id) as days_count
       FROM creatives c
       ORDER BY c.generation ASC, c.created_at ASC
     `);
@@ -78,8 +88,7 @@ export async function GET() {
       }
     }
 
-    // ── Construir nós agrupados ──
-    // Mapear creative IDs individuais → baseName (para redirecionar edges)
+    // ── Mapear creative IDs individuais → baseName (para redirecionar edges) ──
     const creativeIdToBaseName: Record<string, string> = {};
 
     for (const row of creativesResult.rows) {
@@ -87,6 +96,85 @@ export async function GET() {
       creativeIdToBaseName[row.id as string] = baseName;
     }
 
+    // ── Primeiro passo: construir métricas por nó para poder calcular controlCpl ──
+    type NodeMetrics = {
+      totalSpend: number;
+      totalImpressions: number;
+      totalClicks: number;
+      totalLeads: number;
+      avgCpm: number;
+      avgCtr: number;
+      avgCpc: number;
+      daysRunning: number;
+      cpl: number | null;
+    };
+
+    const nodeMetricsMap: Record<string, NodeMetrics> = {};
+
+    for (const [baseName, group] of Object.entries(adGroups)) {
+      const feedSpend = Number(group.feed?.total_spend ?? 0);
+      const storiesSpend = Number(group.stories?.total_spend ?? 0);
+      const totalSpend = feedSpend + storiesSpend;
+
+      const feedLeads = Number(group.feed?.total_leads ?? 0);
+      const storiesLeads = Number(group.stories?.total_leads ?? 0);
+      const totalLeads = feedLeads + storiesLeads;
+
+      const feedImpressions = Number(group.feed?.total_impressions ?? 0);
+      const storiesImpressions = Number(group.stories?.total_impressions ?? 0);
+      const totalImpressions = feedImpressions + storiesImpressions;
+
+      const feedClicks = Number(group.feed?.total_clicks ?? 0);
+      const storiesClicks = Number(group.stories?.total_clicks ?? 0);
+      const totalClicks = feedClicks + storiesClicks;
+
+      const feedCpm = Number(group.feed?.avg_cpm ?? 0);
+      const storiesCpm = Number(group.stories?.avg_cpm ?? 0);
+      const avgCpm = totalImpressions > 0
+        ? (feedCpm * feedImpressions + storiesCpm * storiesImpressions) / totalImpressions
+        : 0;
+
+      const feedCtr = Number(group.feed?.avg_ctr ?? 0);
+      const storiesCtr = Number(group.stories?.avg_ctr ?? 0);
+      const avgCtr = totalImpressions > 0
+        ? (feedCtr * feedImpressions + storiesCtr * storiesImpressions) / totalImpressions
+        : 0;
+
+      const avgCpc = totalClicks > 0 ? totalSpend / totalClicks : 0;
+
+      // daysRunning: máximo entre feed e stories (ambos contam tempo de veiculação)
+      const feedDays = Number(group.feed?.days_count ?? 0);
+      const storiesDays = Number(group.stories?.days_count ?? 0);
+      const daysRunning = Math.max(feedDays, storiesDays);
+
+      nodeMetricsMap[baseName] = {
+        totalSpend,
+        totalImpressions,
+        totalClicks,
+        totalLeads,
+        avgCpm,
+        avgCtr,
+        avgCpc,
+        daysRunning,
+        cpl: totalLeads > 0 ? totalSpend / totalLeads : null,
+      };
+    }
+
+    // ── Identificar controlCpl: nó com generation=0, que tenha métricas ──
+    let controlCpl: number | null = null;
+    for (const [baseName, group] of Object.entries(adGroups)) {
+      const primary = group.feed || group.stories;
+      if (!primary) continue;
+      if ((primary.generation as number) === 0) {
+        const m = nodeMetricsMap[baseName];
+        if (m && m.cpl !== null) {
+          controlCpl = m.cpl;
+          break;
+        }
+      }
+    }
+
+    // ── Construir nós agrupados com kill rule ──
     const nodes: GraphNode[] = [];
 
     for (const [baseName, group] of Object.entries(adGroups)) {
@@ -94,45 +182,36 @@ export async function GET() {
       const primary = group.feed || group.stories;
       if (!primary) continue;
 
-      // Somar métricas de Feed + Stories
-      const feedSpend = (group.feed?.total_spend as number) || 0;
-      const storiesSpend = (group.stories?.total_spend as number) || 0;
-      const totalSpend = feedSpend + storiesSpend;
-
-      const feedLeads = (group.feed?.total_leads as number) || 0;
-      const storiesLeads = (group.stories?.total_leads as number) || 0;
-      const totalLeads = feedLeads + storiesLeads;
-
-      const feedImpressions = (group.feed?.total_impressions as number) || 0;
-      const storiesImpressions = (group.stories?.total_impressions as number) || 0;
-      const totalImpressions = feedImpressions + storiesImpressions;
-
-      const feedClicks = (group.feed?.total_clicks as number) || 0;
-      const storiesClicks = (group.stories?.total_clicks as number) || 0;
-      const totalClicks = feedClicks + storiesClicks;
-
-      // Médias ponderadas (ou simples avg se apenas um tem dados)
-      const feedCpm = (group.feed?.avg_cpm as number) || 0;
-      const storiesCpm = (group.stories?.avg_cpm as number) || 0;
-      const avgCpm = totalImpressions > 0
-        ? (feedCpm * feedImpressions + storiesCpm * storiesImpressions) / totalImpressions
-        : 0;
-
-      const feedCtr = (group.feed?.avg_ctr as number) || 0;
-      const storiesCtr = (group.stories?.avg_ctr as number) || 0;
-      const avgCtr = totalImpressions > 0
-        ? (feedCtr * feedImpressions + storiesCtr * storiesImpressions) / totalImpressions
-        : 0;
-
-      const avgCpc = totalClicks > 0 ? totalSpend / totalClicks : 0;
-
-      // Determinar placements disponíveis
+      const m = nodeMetricsMap[baseName];
       const placements: string[] = [];
       if (group.feed) placements.push("feed");
       if (group.stories) placements.push("stories");
 
+      // Avaliar kill rules se há métricas
+      let killRuleResult: GraphNode["kill_rule"] = undefined;
+      if (m && m.totalSpend > 0) {
+        const evaluated = evaluateKillRules({
+          spend: m.totalSpend,
+          leads: m.totalLeads,
+          cpl: m.cpl,
+          impressions: m.totalImpressions,
+          ctr: m.avgCtr,
+          cplTarget,
+          controlCpl,
+          daysRunning: m.daysRunning,
+        });
+
+        if (evaluated) {
+          killRuleResult = {
+            level: evaluated.level,
+            name: evaluated.name,
+            action: evaluated.action,
+          };
+        }
+      }
+
       const node: GraphNode = {
-        id: baseName, // ID do nó = base name do AD
+        id: baseName,
         name: baseName,
         thumbnail_url: primary.thumbnail_url as string | undefined,
         blob_url: (group.feed?.blob_url || group.stories?.blob_url) as string,
@@ -143,16 +222,18 @@ export async function GET() {
         placements,
         stories_id: group.stories?.id as string | undefined,
         stories_blob_url: group.stories?.blob_url as string | undefined,
-        metrics: totalSpend > 0
+        cpl_target: cplTarget,
+        kill_rule: killRuleResult,
+        metrics: m && m.totalSpend > 0
           ? {
-              total_spend: totalSpend,
-              total_impressions: totalImpressions,
-              total_clicks: totalClicks,
-              total_leads: totalLeads,
-              avg_cpm: avgCpm,
-              avg_ctr: avgCtr,
-              avg_cpc: avgCpc,
-              cpl: totalLeads > 0 ? totalSpend / totalLeads : null,
+              total_spend: m.totalSpend,
+              total_impressions: m.totalImpressions,
+              total_clicks: m.totalClicks,
+              total_leads: m.totalLeads,
+              avg_cpm: m.avgCpm,
+              avg_ctr: m.avgCtr,
+              avg_cpc: m.avgCpc,
+              cpl: m.cpl,
             }
           : undefined,
       };
@@ -161,8 +242,6 @@ export async function GET() {
     }
 
     // ── Redirecionar edges para os nós agrupados ──
-    // As edges originais apontam para creative IDs individuais.
-    // Precisamos redirecionar para os baseNames (IDs dos nós agrupados).
     const edgeSet = new Set<string>(); // Para deduplicar
     const edges: GraphEdge[] = [];
 

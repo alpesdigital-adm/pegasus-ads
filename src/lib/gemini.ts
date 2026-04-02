@@ -21,7 +21,7 @@ export async function generateImage(
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY not configured");
 
-  const model = request.model || "gemini-2.0-flash-exp";
+  const model = request.model || "gemini-2.5-flash-image";
   const url = `${GEMINI_API_URL}/${model}:generateContent?key=${apiKey}`;
 
   // Build parts array: text prompt + reference images

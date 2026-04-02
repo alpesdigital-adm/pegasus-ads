@@ -88,7 +88,7 @@ export async function initDb(): Promise<DbClient> {
         thumbnail_url TEXT,
         prompt TEXT,
         prompt_json TEXT,
-        model TEXT DEFAULT 'gemini-2.0-flash-exp',
+        model TEXT DEFAULT 'gemini-2.5-flash-image',
         width INTEGER,
         height INTEGER,
         parent_id TEXT REFERENCES creatives(id),

@@ -157,7 +157,10 @@ export async function createCreative(params: CreateCreativeParams): Promise<Crea
   } = params;
 
   // asset_feed_spec com imagens mapeadas por label
+  // ad_formats OBRIGATÓRIO: especifica que é SINGLE_IMAGE (não CAROUSEL)
+  // mesmo com 2 imagens — cada uma vai para um placement diferente via customization_rules
   const assetFeedSpec = {
+    ad_formats: ["SINGLE_IMAGE"],
     images: [
       { hash: feedImageHash, adlabels: [{ id: feedLabelId }] },
       { hash: storiesImageHash, adlabels: [{ id: storiesLabelId }] },

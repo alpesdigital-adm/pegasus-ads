@@ -228,6 +228,13 @@ export async function listFolders(): Promise<GoogleDriveFolder[]> {
 
   const allFolders: GoogleDriveFolder[] = [];
 
+  // Check token scope
+  const tokenInfoRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${accessToken}`);
+  if (tokenInfoRes.ok) {
+    const tokenInfo = await tokenInfoRes.json();
+    console.log("[Drive] Token scope:", tokenInfo.scope);
+  }
+
   // 1. List folders from My Drive
   const myDriveResponse = await fetch(
     "https://www.googleapis.com/drive/v3/files?q=mimeType='application/vnd.google-apps.folder'&spaces=drive&pageSize=100&fields=files(id,name,mimeType)&includeItemsFromAllDrives=true&supportsAllDrives=true",
@@ -238,11 +245,16 @@ export async function listFolders(): Promise<GoogleDriveFolder[]> {
 
   if (myDriveResponse.ok) {
     const data = (await myDriveResponse.json()) as { files: GoogleDriveFolder[] };
+    console.log("[Drive] My Drive folders:", data.files?.length || 0);
     allFolders.push(...(data.files || []));
+  } else {
+    const errText = await myDriveResponse.text();
+    console.error("[Drive] My Drive error:", myDriveResponse.status, errText);
   }
 
   // 2. List Shared Drives themselves (they act as root folders)
   const sharedDrives = await listSharedDrives(accessToken);
+  console.log("[Drive] Shared Drives found:", sharedDrives.length, sharedDrives.map(d => d.name));
   for (const drive of sharedDrives) {
     allFolders.push({
       id: drive.id,

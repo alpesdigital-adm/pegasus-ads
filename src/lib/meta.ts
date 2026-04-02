@@ -185,15 +185,13 @@ export async function createCreative(params: CreateCreativeParams): Promise<Crea
     },
   ];
 
-  // object_story_spec (instagram_user_id, NÃO instagram_actor_id)
+  // object_story_spec — apenas page_id e instagram_user_id
+  // NÃO incluir link_data aqui quando usando asset_feed_spec,
+  // pois o asset_feed_spec já contém bodies, titles, link_urls, call_to_action_types.
+  // Incluir link_data causa erro "Um feed de ativos pode ter exatamente um formato de anúncio."
   const objectStorySpec = {
     page_id: pageId,
     instagram_user_id: instagramUserId,
-    link_data: {
-      link,
-      message: bodyText,
-      call_to_action: { type: callToAction || "LEARN_MORE", value: { link } },
-    },
   };
 
   // degrees_of_freedom_spec — features individuais, sem standard_enhancements

@@ -28,6 +28,7 @@ async function metaFetch<T = Record<string, unknown>>(
     const message = err
       ? `Meta API Error ${err.code}: ${err.message} (subcode: ${err.error_subcode})`
       : `Meta API HTTP ${response.status}: ${response.statusText}`;
+    console.error("[MetaService]", message, "| URL:", url.replace(/access_token=[^&]+/, "access_token=***"), "| Full error:", JSON.stringify(err));
     throw new Error(message);
   }
 

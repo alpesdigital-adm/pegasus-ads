@@ -96,10 +96,17 @@ export async function runPublishPipeline(
     const variantPairs = groupVariantsByAd(variantsRow.rows);
 
     // Buscar template de ad set
+    console.log("[PublishPipeline] Fetching ad set template for campaign:", campaignId);
     const adSetTemplate = await meta.getAdSetTemplate(campaignId);
     if (!adSetTemplate) {
       throw new Error(`No ad set template found for campaign ${campaignId}`);
     }
+    console.log("[PublishPipeline] Ad set template:", JSON.stringify({
+      name: adSetTemplate.name,
+      daily_budget: adSetTemplate.daily_budget,
+      bid_strategy: adSetTemplate.bid_strategy,
+      targeting_keys: adSetTemplate.targeting ? Object.keys(adSetTemplate.targeting as Record<string, unknown>) : "null",
+    }));
 
     step1.status = "completed";
     step1.completed_at = new Date().toISOString();
@@ -146,14 +153,20 @@ export async function runPublishPipeline(
       steps.push(step3);
 
       // Fetch e upload Feed
+      console.log(`[PublishPipeline] Uploading feed image for ${adName}...`);
       const feedResponse = await fetch(pair.feed!.blobUrl);
       const feedBuffer = Buffer.from(await feedResponse.arrayBuffer());
+      console.log(`[PublishPipeline] Feed image size: ${feedBuffer.length} bytes`);
       const feedUpload = await meta.uploadImage(accountId, feedBuffer, `${adName}F.png`);
+      console.log(`[PublishPipeline] Feed upload OK: hash=${feedUpload.hash}`);
 
       // Fetch e upload Stories
+      console.log(`[PublishPipeline] Uploading stories image for ${adName}...`);
       const storiesResponse = await fetch(pair.stories!.blobUrl);
       const storiesBuffer = Buffer.from(await storiesResponse.arrayBuffer());
+      console.log(`[PublishPipeline] Stories image size: ${storiesBuffer.length} bytes`);
       const storiesUpload = await meta.uploadImage(accountId, storiesBuffer, `${adName}S.png`);
+      console.log(`[PublishPipeline] Stories upload OK: hash=${storiesUpload.hash}`);
 
       step3.status = "completed";
       step3.completed_at = new Date().toISOString();
@@ -174,6 +187,8 @@ export async function runPublishPipeline(
 
       // Buscar body/title do ad existente ou usar padrão
       const existingAd = await getExistingAdContent(campaignId, accountId);
+      console.log(`[PublishPipeline] Ad content: body=${existingAd.body?.substring(0, 50)}... link=${existingAd.link} title=${existingAd.title}`);
+      console.log(`[PublishPipeline] Creating creative: feedHash=${feedUpload.hash} storiesHash=${storiesUpload.hash} feedLabel=${feedLabel.id} storiesLabel=${storiesLabel.id}`);
 
       const metaCreative = await meta.createCreative({
         accountId,

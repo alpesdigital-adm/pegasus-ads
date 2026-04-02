@@ -547,3 +547,194 @@ export function extractCPLFromInsights(
   );
   return leadCost ? parseFloat(leadCost.value) : null;
 }
+
+// ── Insights: Coleta em Massa (Tarefa 2.1) ──────────────────────────────────
+
+export interface AdInsightRecord {
+  meta_ad_id: string;
+  meta_adset_id?: string;
+  meta_campaign_id?: string;
+  ad_name?: string;
+  adset_name?: string;
+  date_start: string;
+  date_stop: string;
+  spend: number;
+  impressions: number;
+  cpm: number;
+  ctr: number;
+  clicks: number;
+  cpc: number;
+  leads: number;
+  cpl: number | null;
+}
+
+/**
+ * Busca insights de TODOS os ads de uma campanha para um período.
+ *
+ * Usa o endpoint campaign-level com level=ad para obter dados
+ * de todos os ads em uma única chamada — muito mais eficiente
+ * que buscar ad por ad.
+ *
+ * @param campaignId  - Meta campaign ID
+ * @param dateFrom    - YYYY-MM-DD
+ * @param dateTo      - YYYY-MM-DD
+ * @param breakdown   - breakdown opcional (ex: "publisher_platform,platform_position")
+ */
+export async function getCampaignAdsInsights(
+  campaignId: string,
+  dateFrom: string,
+  dateTo: string,
+  breakdown?: string
+): Promise<AdInsightRecord[]> {
+  await rateLimit();
+
+  const fields = [
+    "ad_id",
+    "ad_name",
+    "adset_id",
+    "adset_name",
+    "campaign_id",
+    "date_start",
+    "date_stop",
+    "spend",
+    "impressions",
+    "cpm",
+    "ctr",
+    "clicks",
+    "cpc",
+    "actions",
+    "cost_per_action_type",
+  ].join(",");
+
+  const params = new URLSearchParams({
+    fields,
+    level: "ad",
+    time_range: JSON.stringify({ since: dateFrom, until: dateTo }),
+    time_increment: "1",
+    access_token: getToken(),
+    limit: "200",
+  });
+
+  if (breakdown) {
+    params.set("breakdowns", breakdown);
+  }
+
+  const results: AdInsightRecord[] = [];
+  let url: string | null = `${META_BASE_URL}/${campaignId}/insights?${params.toString()}`;
+
+  // Paginar através de todos os resultados
+  while (url) {
+    type PageResult = { data: Record<string, unknown>[]; paging?: { next?: string } };
+    const data: PageResult = await metaFetch<PageResult>(url);
+
+    for (const row of data.data || []) {
+      const leads = extractLeadsFromInsights(row);
+      const cpl = extractCPLFromInsights(row);
+      const spend = parseFloat((row.spend as string) || "0");
+      const impressions = parseInt((row.impressions as string) || "0", 10);
+      const cpm = parseFloat((row.cpm as string) || "0");
+      const ctr = parseFloat((row.ctr as string) || "0");
+      const clicks = parseInt((row.clicks as string) || "0", 10);
+      const cpc = parseFloat((row.cpc as string) || "0");
+
+      results.push({
+        meta_ad_id: row.ad_id as string,
+        meta_adset_id: row.adset_id as string | undefined,
+        meta_campaign_id: row.campaign_id as string | undefined,
+        ad_name: row.ad_name as string | undefined,
+        adset_name: row.adset_name as string | undefined,
+        date_start: row.date_start as string,
+        date_stop: row.date_stop as string,
+        spend,
+        impressions,
+        cpm,
+        ctr,
+        clicks,
+        cpc,
+        leads,
+        cpl,
+      });
+    }
+
+    url = data.paging?.next || null;
+    if (url) await rateLimit(); // respeitar rate limit entre páginas
+  }
+
+  console.log(`[MetaService] getCampaignAdsInsights: ${results.length} registros para campanha ${campaignId} (${dateFrom} → ${dateTo})`);
+  return results;
+}
+
+/**
+ * Busca insights por account — útil quando não se sabe a campanha exata.
+ * Filtra por campanha se campaignId informado.
+ */
+export async function getAccountAdsInsights(
+  accountId: string,
+  dateFrom: string,
+  dateTo: string,
+  campaignId?: string
+): Promise<AdInsightRecord[]> {
+  await rateLimit();
+
+  const fields = [
+    "ad_id",
+    "ad_name",
+    "adset_id",
+    "adset_name",
+    "campaign_id",
+    "campaign_name",
+    "date_start",
+    "date_stop",
+    "spend",
+    "impressions",
+    "cpm",
+    "ctr",
+    "clicks",
+    "cpc",
+    "actions",
+    "cost_per_action_type",
+  ].join(",");
+
+  const params = new URLSearchParams({
+    fields,
+    level: "ad",
+    time_range: JSON.stringify({ since: dateFrom, until: dateTo }),
+    time_increment: "1",
+    access_token: getToken(),
+    limit: "200",
+  });
+
+  if (campaignId) {
+    params.set("filtering", JSON.stringify([{ field: "campaign.id", operator: "EQUAL", value: campaignId }]));
+  }
+
+  const data = await metaFetch<{ data: Record<string, unknown>[] }>(
+    `${META_BASE_URL}/${accountId}/insights?${params.toString()}`
+  );
+
+  const results: AdInsightRecord[] = [];
+  for (const row of data.data || []) {
+    const leads = extractLeadsFromInsights(row);
+    const cpl = extractCPLFromInsights(row);
+
+    results.push({
+      meta_ad_id: row.ad_id as string,
+      meta_adset_id: row.adset_id as string | undefined,
+      meta_campaign_id: row.campaign_id as string | undefined,
+      ad_name: row.ad_name as string | undefined,
+      adset_name: row.adset_name as string | undefined,
+      date_start: row.date_start as string,
+      date_stop: row.date_stop as string,
+      spend: parseFloat((row.spend as string) || "0"),
+      impressions: parseInt((row.impressions as string) || "0", 10),
+      cpm: parseFloat((row.cpm as string) || "0"),
+      ctr: parseFloat((row.ctr as string) || "0"),
+      clicks: parseInt((row.clicks as string) || "0", 10),
+      cpc: parseFloat((row.cpc as string) || "0"),
+      leads,
+      cpl,
+    });
+  }
+
+  return results;
+}

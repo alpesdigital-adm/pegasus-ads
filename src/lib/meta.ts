@@ -566,6 +566,10 @@ export interface AdInsightRecord {
   cpc: number;
   leads: number;
   cpl: number | null;
+  /** Presente quando breakdown inclui publisher_platform */
+  publisher_platform?: string;
+  /** Presente quando breakdown inclui platform_position */
+  platform_position?: string;
 }
 
 /**
@@ -653,6 +657,9 @@ export async function getCampaignAdsInsights(
         cpc,
         leads,
         cpl,
+        // Campos de breakdown (presentes quando breakdowns param é utilizado)
+        publisher_platform: row.publisher_platform as string | undefined,
+        platform_position: row.platform_position as string | undefined,
       });
     }
 

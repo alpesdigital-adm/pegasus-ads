@@ -252,6 +252,28 @@ export async function initDb(): Promise<DbClient> {
       )
     `);
 
+    // ── Tarefa 2.2: Breakdowns por posicionamento ──
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS metrics_breakdowns (
+        id TEXT PRIMARY KEY,
+        creative_id TEXT NOT NULL REFERENCES creatives(id),
+        date TEXT NOT NULL,
+        publisher_platform TEXT NOT NULL DEFAULT '',
+        platform_position TEXT NOT NULL DEFAULT '',
+        spend DOUBLE PRECISION DEFAULT 0,
+        impressions INTEGER DEFAULT 0,
+        cpm DOUBLE PRECISION DEFAULT 0,
+        ctr DOUBLE PRECISION DEFAULT 0,
+        clicks INTEGER DEFAULT 0,
+        cpc DOUBLE PRECISION DEFAULT 0,
+        leads INTEGER DEFAULT 0,
+        cpl DOUBLE PRECISION,
+        meta_ad_id TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(creative_id, date, publisher_platform, platform_position)
+      )
+    `);
+
     // ── Indexes: existing tables ──
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_creatives_parent ON creatives(parent_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_creatives_status ON creatives(status)`);
@@ -270,6 +292,11 @@ export async function initDb(): Promise<DbClient> {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_published_ads_meta ON published_ads(meta_ad_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_pipeline_executions_round ON pipeline_executions(test_round_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_pipeline_executions_status ON pipeline_executions(status)`);
+
+    // Índices metrics_breakdowns
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_metrics_breakdowns_creative ON metrics_breakdowns(creative_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_metrics_breakdowns_date ON metrics_breakdowns(date)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_metrics_breakdowns_platform ON metrics_breakdowns(publisher_platform)`);
   } finally {
     await pool.end();
   }

@@ -147,6 +147,19 @@ interface CreativeResult {
   id: string;
 }
 
+/**
+ * Cria criativo com asset_feed_spec — estrutura validada na publicação
+ * de AD004-AD010 na campanha T7__0003 em 2026-04-01.
+ *
+ * Diferenças chave vs abordagem anterior que falhava:
+ * - ad_formats: AUTOMATIC_FORMAT (não SINGLE_IMAGE)
+ * - asset_customization_rules DENTRO do asset_feed_spec (não campo separado)
+ * - image_label (com name+id) ao invés de adlabel
+ * - optimization_type: PLACEMENT
+ * - descriptions: campo adicional
+ * - Sem link_data no object_story_spec
+ * - Sem is_dynamic_creative no ad set
+ */
 export async function createCreative(params: CreateCreativeParams): Promise<CreativeResult> {
   await rateLimit();
 
@@ -156,42 +169,43 @@ export async function createCreative(params: CreateCreativeParams): Promise<Crea
     body: bodyText, title, link, callToAction, urlTags,
   } = params;
 
-  // asset_feed_spec com imagens mapeadas por label
-  // ad_formats OBRIGATÓRIO: especifica que é SINGLE_IMAGE (não CAROUSEL)
-  // mesmo com 2 imagens — cada uma vai para um placement diferente via customization_rules
+  // asset_feed_spec — estrutura idêntica à validada em produção
+  // asset_customization_rules ficam DENTRO do asset_feed_spec
   const assetFeedSpec = {
-    ad_formats: ["SINGLE_IMAGE"],
+    ad_formats: ["AUTOMATIC_FORMAT"],
     images: [
-      { hash: feedImageHash, adlabels: [{ id: feedLabelId }] },
-      { hash: storiesImageHash, adlabels: [{ id: storiesLabelId }] },
+      { hash: feedImageHash, adlabels: [{ name: `${name}_feed`, id: feedLabelId }] },
+      { hash: storiesImageHash, adlabels: [{ name: `${name}_stories`, id: storiesLabelId }] },
     ],
     bodies: [{ text: bodyText }],
     titles: [{ text: title }],
-    link_urls: [{ website_url: link }],
+    descriptions: [{ text: "" }],
+    link_urls: [{ website_url: link, display_url: new URL(link).hostname }],
     call_to_action_types: [callToAction || "LEARN_MORE"],
+    asset_customization_rules: [
+      {
+        priority: 1,
+        image_label: { name: `${name}_stories`, id: storiesLabelId },
+        customization_spec: {
+          publisher_platforms: ["instagram"],
+          instagram_positions: ["ig_search", "profile_reels", "story", "reels"],
+          age_min: 13,
+          age_max: 65,
+        },
+      },
+      {
+        priority: 2,
+        image_label: { name: `${name}_feed`, id: feedLabelId },
+        customization_spec: {
+          age_min: 13,
+          age_max: 65,
+        },
+      },
+    ],
+    optimization_type: "PLACEMENT",
   };
 
-  // asset_customization_rules: Feed (default) + Stories
-  const assetCustomizationRules = [
-    {
-      priority: 2,
-      customization_spec: { adlabel: { id: feedLabelId } },
-      is_default: true,
-    },
-    {
-      priority: 1,
-      customization_spec: {
-        adlabel: { id: storiesLabelId },
-        publisher_platforms: ["instagram"],
-        instagram_positions: ["story", "reels", "ig_search", "profile_reels"],
-      },
-    },
-  ];
-
-  // object_story_spec — apenas page_id e instagram_user_id
-  // NÃO incluir link_data aqui quando usando asset_feed_spec,
-  // pois o asset_feed_spec já contém bodies, titles, link_urls, call_to_action_types.
-  // Incluir link_data causa erro "Um feed de ativos pode ter exatamente um formato de anúncio."
+  // object_story_spec — APENAS page_id + instagram_user_id, sem link_data
   const objectStorySpec = {
     page_id: pageId,
     instagram_user_id: instagramUserId,
@@ -211,7 +225,6 @@ export async function createCreative(params: CreateCreativeParams): Promise<Crea
     name,
     object_story_spec: JSON.stringify(objectStorySpec),
     asset_feed_spec: JSON.stringify(assetFeedSpec),
-    asset_customization_rules: JSON.stringify(assetCustomizationRules),
     degrees_of_freedom_spec: JSON.stringify(degreesOfFreedomSpec),
   };
 
@@ -273,7 +286,6 @@ export async function createAdSet(params: CreateAdSetParams): Promise<AdSetResul
     targeting: JSON.stringify(targeting),
     promoted_object: JSON.stringify(promotedObject),
     attribution_spec: JSON.stringify(attrSpec),
-    is_dynamic_creative: "true", // Obrigatório para criativos com asset_feed_spec
     status: status || "ACTIVE",
   };
 

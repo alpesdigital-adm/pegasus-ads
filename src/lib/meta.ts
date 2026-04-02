@@ -273,6 +273,7 @@ export async function createAdSet(params: CreateAdSetParams): Promise<AdSetResul
     targeting: JSON.stringify(targeting),
     promoted_object: JSON.stringify(promotedObject),
     attribution_spec: JSON.stringify(attrSpec),
+    is_dynamic_creative: "true", // Obrigatório para criativos com asset_feed_spec
     status: status || "ACTIVE",
   };
 

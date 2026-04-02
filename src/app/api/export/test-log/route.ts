@@ -3,12 +3,11 @@
  *
  * Tarefa 2.7 — Log de testes (planilha controle)
  *
- * Retorna JSON com todos os dados necessários para sincronizar a planilha
- * "T7 - Registro de Testes de Criativos.xlsx" com o estado atual do DB.
+ * Retorna JSON com todos os dados para o Apps Script sincronizar o Google Sheets
+ * "T7 - Registro de Testes de Criativos" diretamente, sem download/upload de arquivo.
  *
- * Pode ser consumido por:
- * - scripts/sync_test_log.py  (script local Python)
- * - Integração futura com Google Drive
+ * Consumido por:
+ * - scripts/sync_test_log.gs  (Apps Script container-bound na planilha)
  *
  * Query params:
  *   format?        - "json" (padrão) | "summary"
@@ -204,7 +203,7 @@ export async function GET(req: NextRequest) {
     c.status === "winner" || c.kill_rule?.action === "promote"
   );
 
-  return NextResponse.json({
+  const payload = {
     generated_at: new Date().toISOString(),
     cpl_target: cplTarget,
     period: { from: dateFrom, to: dateTo },
@@ -217,5 +216,25 @@ export async function GET(req: NextRequest) {
     },
     criativos,
     dados_brutos: dadosBrutos,
+  };
+
+  // CORS: permite chamadas do Apps Script (*.google.com)
+  return NextResponse.json(payload, {
+    headers: {
+      "Access-Control-Allow-Origin": "https://script.google.com",
+      "Access-Control-Allow-Methods": "GET",
+    },
+  });
+}
+
+// OPTIONS: preflight CORS
+export async function OPTIONS() {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "https://script.google.com",
+      "Access-Control-Allow-Methods": "GET",
+      "Access-Control-Allow-Headers": "Content-Type",
+    },
   });
 }

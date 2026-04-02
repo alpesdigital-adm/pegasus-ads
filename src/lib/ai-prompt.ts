@@ -130,17 +130,8 @@ interface PromptJson {
     quality: string[];
   };
   /**
-   * Feed only: instrui o modelo a emitir a paleta escolhida como texto
-   * antes de gerar a imagem — usada para garantir consistência no Stories.
-   */
-  color_specification_output?: {
-    REQUIRED: string;
-    format: string;
-    example: string;
-  };
-  /**
-   * Stories only: paleta exata extraída do texto do Feed gerado.
-   * Garante que Feed e Stories usem as mesmas cores.
+   * Feed + Stories: paleta exata decidida na pré-fase text-only.
+   * Garante que Feed e Stories usem exatamente as mesmas cores.
    */
   color_consistency?: {
     REQUIRED: string;
@@ -162,10 +153,10 @@ interface PromptGenerationInput {
   /** Textos exatos que existem no controle — evita erros de ortografia */
   controlTexts?: ControlTexts;
   /**
-   * Stories only — Color Spec First:
-   * Paleta de cores exata que o Feed escolheu, extraída do texto da resposta.
+   * Feed + Stories — Color Spec Pre-Phase:
+   * Paleta de cores decidida via chamada text-only antes da geração das imagens.
    * Formato: { primary, secondary, accent, background, description }
-   * Quando fornecida, o Stories é instruído a usar EXATAMENTE essas cores.
+   * Quando fornecida, AMBOS Feed e Stories são instruídos a usar EXATAMENTE essas cores.
    */
   colorSpec?: Record<string, string>;
 }
@@ -323,21 +314,13 @@ export function buildVariantPrompt(input: PromptGenerationInput): string {
         "ALL text must fit completely within the image — no cropping or overflow",
       ],
     },
-    // Feed: pede que o modelo emita a paleta como texto antes de gerar a imagem
-    ...(format === "feed" && variableType.category === "visual" ? {
-      color_specification_output: {
-        REQUIRED: "Before generating the image, output your chosen color palette as the VERY FIRST line of text. Use EXACTLY this format — no extra text before it:",
-        format: 'PALETTE_SPEC::{"primary":"#hexcode","secondary":"#hexcode","accent":"#hexcode","background":"#hexcode","description":"brief palette description"}',
-        example: 'PALETTE_SPEC::{"primary":"#1a3a6b","secondary":"#d4af37","accent":"#ffffff","background":"#0d1f3c","description":"Navy blue with gold accents, professional premium feel"}',
-      },
-    } : {}),
-
-    // Stories: usa a paleta exata que o Feed escolheu
-    ...(format === "stories" && input.colorSpec ? {
+    // Feed + Stories: usa a paleta exata decidida na pré-fase text-only
+    // A paleta foi escolhida antes de gerar qualquer imagem — garantia de consistência
+    ...(input.colorSpec ? {
       color_consistency: {
-        REQUIRED: "You MUST use EXACTLY this color palette. This palette was already applied to the Feed (1:1) version of this ad — Stories must match it precisely.",
+        REQUIRED: "You MUST use EXACTLY this color palette — it was pre-selected to ensure Feed and Stories look like the same campaign.",
         palette: input.colorSpec,
-        instruction: "Every color in your image must correspond to this specification. Do NOT choose a different palette. The user will see Feed and Stories side by side — they must look like the same campaign.",
+        instruction: "Every dominant color in your image must correspond to this specification. Do NOT choose a different palette. Primary = main background/hero color, secondary = supporting elements, accent = highlights/CTAs, background = overall canvas color.",
       },
     } : {}),
 
@@ -346,33 +329,30 @@ export function buildVariantPrompt(input: PromptGenerationInput): string {
   };
 
   // Montar prompt final: instrução curta + JSON
-  const colorSpecInstruction = format === "feed" && variableType.category === "visual"
-    ? "IMPORTANT: Output the PALETTE_SPEC line as plain text BEFORE the image. Then generate the image."
-    : "";
-
   const preamble = [
     "You are generating an ad image variant for an A/B test.",
     "Below is a detailed JSON specification. Follow it precisely.",
     "CRITICAL: All text rendered in the image must be in perfect Brazilian Portuguese with correct spelling and accents.",
-    colorSpecInstruction,
     "The reference image is attached — create a variant following the spec below.",
     "",
     "```json",
     JSON.stringify(promptJson, null, 2),
     "```",
-  ].filter(Boolean).join("\n");
+  ].join("\n");
 
   return preamble;
 }
 
 /**
- * Extrai o color spec do texto emitido pelo Gemini no Feed.
+ * Extrai o color spec do texto emitido pelo Gemini (pré-fase text-only).
  * O modelo emite: PALETTE_SPEC::{"primary":"#hex",...}
+ * Regex tolerante a espaços e quebras de linha entre chaves.
  * Retorna o objeto JSON ou null se não encontrado.
  */
 export function parseColorSpec(text: string | undefined): Record<string, string> | null {
   if (!text) return null;
-  const match = text.match(/PALETTE_SPEC::(\{[^}]+\})/);
+  // Tolerante: aceita espaços/tabs após ::, e JSON com espaços internos
+  const match = text.match(/PALETTE_SPEC::\s*(\{[\s\S]*?\})/);
   if (!match) return null;
   try {
     return JSON.parse(match[1]) as Record<string, string>;

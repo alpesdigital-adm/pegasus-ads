@@ -16,12 +16,12 @@
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db";
 import { generateImage } from "../gemini";
-import { buildVariantPromptPair, buildVariantPrompt, getVariableType, parseColorSpec, type ControlTexts } from "../ai-prompt";
+import { buildVariantPrompt, getVariableType, parseColorSpec, type ControlTexts } from "../ai-prompt";
 import { verifyPostGeneration } from "../ai-verify";
 import { getNextAdNumber, generateCreativeNamePair, generateMetaAdName } from "../creative-naming";
 import { uploadToGoogleDrive, getSelectedFolderId } from "../google-drive";
 import { put } from "@vercel/blob";
-import type { PipelineStep, TestRound } from "../types";
+import type { PipelineStep } from "../types";
 
 // ── Resize com sharp (se disponível) ou fallback ──
 // Em serverless Vercel, sharp pode não estar disponível.
@@ -46,6 +46,81 @@ async function resizeImage(
     // Fallback: retorna sem resize (melhor que falhar)
     console.warn("[GeneratePipeline] sharp não disponível, retornando imagem sem resize");
     return inputBuffer;
+  }
+}
+
+// ── Pre-fase: Decisão de Paleta via Text-Only ──
+// Chamada Gemini text-only que decide a paleta de cores antes de gerar as imagens.
+// Isso garante consistência entre Feed e Stories sem depender de text + image simultâneos.
+
+async function fetchColorSpec(
+  controlBase64: string,
+  controlMimeType: string,
+  variableValue?: string
+): Promise<Record<string, string> | null> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return null;
+
+  const model = "gemini-3.1-flash-image-preview";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+  const variableHint = variableValue
+    ? `Requested palette direction: "${variableValue}"`
+    : "Choose a palette that is visually DISTINCT from the reference image — completely different mood and color scheme.";
+
+  const prompt = `Analyze this reference ad image and decide a NEW color palette for an A/B test variant.
+
+${variableHint}
+
+Rules:
+- New palette must be visually DISTINCT from the reference image colors
+- Maintain good contrast (text must be readable)
+- Professional quality suitable for health education brand in Brazil
+- Use solid hex codes (#rrggbb format)
+
+Output ONLY this single JSON line — no explanation, no markdown fences, no extra text:
+PALETTE_SPEC::{"primary":"#hexcode","secondary":"#hexcode","accent":"#hexcode","background":"#hexcode","description":"brief description of the palette mood"}`;
+
+  try {
+    const body = {
+      contents: [{
+        parts: [
+          { text: prompt },
+          { inlineData: { mimeType: controlMimeType, data: controlBase64 } },
+        ],
+      }],
+      generationConfig: {
+        responseModalities: ["TEXT"],
+      },
+    };
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      console.warn("[GeneratePipeline] Color spec pre-phase API error:", response.status);
+      return null;
+    }
+
+    const data = await response.json() as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    };
+    const parts = data.candidates?.[0]?.content?.parts || [];
+    let text = "";
+    for (const part of parts) {
+      if (part.text) text += part.text;
+    }
+
+    const colorSpec = parseColorSpec(text);
+    console.log("[GeneratePipeline] Color spec pre-phase result:", JSON.stringify(colorSpec));
+    console.log("[GeneratePipeline] Color spec raw text:", text.slice(0, 300));
+    return colorSpec;
+  } catch (err) {
+    console.warn("[GeneratePipeline] Color spec pre-phase failed:", err);
+    return null;
   }
 }
 
@@ -125,7 +200,7 @@ export async function runGeneratePipeline(
     step1.status = "completed";
     step1.completed_at = new Date().toISOString();
 
-    // ── Step 2: Gerar prompts ──
+    // ── Step 2: Pré-fase — decisão de paleta (text-only) + build prompts ──
     const step2: PipelineStep = { name: "generate_prompts", status: "running", started_at: new Date().toISOString() };
     steps.push(step2);
 
@@ -134,18 +209,34 @@ export async function runGeneratePipeline(
       throw new Error(`Variable type "${input.variableType}" not found in catalog`);
     }
 
-    const { feedPrompt, storiesPrompt } = buildVariantPromptPair(
-      variableTypeDef,
-      input.variableValue,
-      control.prompt as string | undefined,
-      undefined, // additionalContext
-      input.controlTexts
-    );
+    // Pré-fase: para variáveis visuais, busca paleta via chamada text-only
+    // Isso garante que Feed e Stories usem exatamente as mesmas cores
+    let colorSpec: Record<string, string> | null = null;
+    if (variableTypeDef.category === "visual") {
+      colorSpec = await fetchColorSpec(controlBase64, controlMimeType, input.variableValue);
+    }
+
+    // Construir prompts com colorSpec (aplicado tanto no Feed quanto no Stories)
+    const feedPrompt = buildVariantPrompt({
+      variableType: variableTypeDef,
+      variableValue: input.variableValue,
+      format: "feed",
+      controlTexts: input.controlTexts,
+      colorSpec: colorSpec ?? undefined,
+    });
+
+    const storiesPrompt = buildVariantPrompt({
+      variableType: variableTypeDef,
+      variableValue: input.variableValue,
+      format: "stories",
+      controlTexts: input.controlTexts,
+      colorSpec: colorSpec ?? undefined,
+    });
 
     // Salvar prompt usado no test round
     await db.execute({
       sql: "UPDATE test_rounds SET ai_prompt_used = ?, updated_at = NOW() WHERE id = ?",
-      args: [JSON.stringify({ feed: feedPrompt, stories: storiesPrompt }), input.testRoundId],
+      args: [JSON.stringify({ feed: feedPrompt, stories: storiesPrompt, colorSpec }), input.testRoundId],
     });
 
     step2.status = "completed";
@@ -176,24 +267,9 @@ export async function runGeneratePipeline(
         throw new Error(step3.error);
       }
 
-      // Color Spec First: extrair paleta do texto do Feed, injetar no Stories
-      // O Feed emite PALETTE_SPEC::{...} antes da imagem quando é variável visual
-      const colorSpec = parseColorSpec(feedResult.text);
-      console.log("[GeneratePipeline] Color spec extracted:", colorSpec);
-
-      // Reconstruir prompt do Stories com o colorSpec real do Feed
-      const variableTypeDef = getVariableType(input.variableType)!;
-      const storiesPromptWithColor = buildVariantPrompt({
-        variableType: variableTypeDef,
-        variableValue: input.variableValue,
-        format: "stories",
-        controlTexts: input.controlTexts,
-        colorSpec: colorSpec ?? undefined,
-      });
-
-      // Stories usa apenas a imagem de controle — sem referência do Feed (evita timeout)
+      // Gerar Stories (Nano Banana 2 — mesma paleta do Feed via colorSpec pré-fase)
       const storiesResult = await generateImage({
-        prompt: storiesPromptWithColor,
+        prompt: storiesPrompt,
         referenceImages: [{ base64: controlBase64, mimeType: controlMimeType }],
         aspectRatio: "9:16",
         imageSize: "1K",
@@ -235,7 +311,7 @@ export async function runGeneratePipeline(
       await db.execute({
         sql: `INSERT INTO creatives (id, name, blob_url, prompt, model, width, height, parent_id, generation, status)
               VALUES (?, ?, ?, ?, ?, 1080, 1920, ?, ?, 'generated')`,
-        args: [storiesCreativeId, storiesName, storiesBlob.url, storiesPromptWithColor, storiesResult.model, input.controlCreativeId, generation],
+        args: [storiesCreativeId, storiesName, storiesBlob.url, storiesPrompt, storiesResult.model, input.controlCreativeId, generation],
       });
 
       // Criar edges
@@ -250,7 +326,7 @@ export async function runGeneratePipeline(
       // Salvar prompts
       for (const [cid, prompt, model] of [
         [feedCreativeId, feedPrompt, feedResult.model],
-        [storiesCreativeId, storiesPromptWithColor, storiesResult.model],
+        [storiesCreativeId, storiesPrompt, storiesResult.model],
       ]) {
         await db.execute({
           sql: `INSERT INTO prompts (id, creative_id, prompt_text, prompt_format, model) VALUES (?, ?, ?, 'json', ?)`,

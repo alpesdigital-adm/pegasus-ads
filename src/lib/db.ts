@@ -342,6 +342,86 @@ export async function initDb(): Promise<DbClient> {
       )
     `);
 
+    // ── Tarefa 1.7: Galeria de variáveis visuais ──
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS visual_elements (
+        id TEXT PRIMARY KEY,
+        code TEXT NOT NULL,
+        dimension TEXT NOT NULL CHECK(dimension IN ('hero', 'ebook', 'copy', 'palette', 'style', 'layout')),
+        name TEXT NOT NULL,
+        description TEXT,
+        active_in_meta BOOLEAN DEFAULT FALSE,
+        priority INTEGER DEFAULT 5,
+        funnel_key TEXT,
+        notes TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(code, funnel_key)
+      )
+    `);
+
+    // ── Tarefa 3.3: Hipóteses geradas por IA ──
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS hypotheses (
+        id TEXT PRIMARY KEY,
+        campaign_key TEXT NOT NULL,
+        variable_dimension TEXT NOT NULL,
+        variable_code TEXT,
+        hypothesis TEXT NOT NULL,
+        rationale TEXT,
+        priority INTEGER DEFAULT 5,
+        status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'in_test', 'validated', 'discarded')),
+        source_creative_ids JSONB DEFAULT '[]',
+        ai_model TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
+    // ── Tarefa 4.3: Multi-funil ──
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS funnels (
+        id TEXT PRIMARY KEY,
+        key TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        prefix TEXT NOT NULL,
+        ebook_title TEXT,
+        cpl_target DOUBLE PRECISION,
+        meta_campaign_id TEXT,
+        meta_account_id TEXT,
+        active BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    // Coluna funnel_key em creatives (detectada automaticamente do nome)
+    await pool.query(`
+      ALTER TABLE creatives
+      ADD COLUMN IF NOT EXISTS funnel_key TEXT
+    `);
+    // Retrocompatibilidade: inferir funnel_key pelo prefixo do nome
+    await pool.query(`
+      UPDATE creatives
+      SET funnel_key = CASE
+        WHEN name ILIKE 'T4EBMX%' THEN 'T4'
+        WHEN name ILIKE 'T7EBMX%' THEN 'T7'
+        ELSE NULL
+      END
+      WHERE funnel_key IS NULL
+    `);
+    // Seed inicial de funnels se vazio
+    await pool.query(`
+      INSERT INTO funnels (id, key, name, prefix, ebook_title, cpl_target)
+      VALUES
+        ('funnel-t4', 'T4', 'Turma 4 — Minoxidil', 'T4EBMX', 'Minoxidil: do tópico ao sublingual', 32.77),
+        ('funnel-t7', 'T7', 'Turma 7 — RAT Academy', 'T7EBMX', 'RAT Academy', 25.00)
+      ON CONFLICT (key) DO NOTHING
+    `);
+
+    // Índices para novas tabelas
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_visual_elements_dimension ON visual_elements(dimension)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_visual_elements_funnel ON visual_elements(funnel_key)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_hypotheses_campaign ON hypotheses(campaign_key)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_hypotheses_status ON hypotheses(status)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_creatives_funnel ON creatives(funnel_key)`);
+
     // ── Indexes: existing tables ──
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_creatives_control ON creatives(is_control) WHERE is_control = TRUE`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_creatives_parent ON creatives(parent_id)`);

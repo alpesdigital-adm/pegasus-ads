@@ -1,5 +1,6 @@
 /**
  * AIVerifyService — Checkpoints de verificação com IA ao longo do pipeline.
+ * Inclui OCR via Gemini Vision para tarefa 1.8.
  *
  * 4 checkpoints:
  * 1. post_generation: A variante gerada isola corretamente a variável?
@@ -9,6 +10,107 @@
  */
 
 import type { VerificationCheckpoint } from "./types";
+
+// ── OCR via Gemini Vision (Tarefa 1.8) ──
+
+export interface OcrVerifyResult {
+  passed: boolean;
+  score: number;
+  extracted_text: string;
+  found_phrases: string[];
+  missing_phrases: string[];
+  extra_phrases: string[];
+  issues: string[];
+  verified_at: string;
+}
+
+/**
+ * Extrai texto de uma imagem usando Gemini Vision e compara com textos esperados.
+ * @param imageBase64 Imagem em base64 (PNG ou JPEG)
+ * @param expectedPhrases Textos que devem aparecer no criativo (controlTexts)
+ * @param mimeType "image/png" | "image/jpeg"
+ */
+export async function verifyOcr(
+  imageBase64: string,
+  expectedPhrases: string[],
+  mimeType: "image/png" | "image/jpeg" = "image/png"
+): Promise<OcrVerifyResult> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return {
+      passed: false,
+      score: 0,
+      extracted_text: "",
+      found_phrases: [],
+      missing_phrases: expectedPhrases,
+      extra_phrases: [],
+      issues: ["GEMINI_API_KEY não configurada — OCR não disponível"],
+      verified_at: new Date().toISOString(),
+    };
+  }
+
+  const prompt = `Você é um sistema de OCR preciso. Extraia TODO o texto visível nesta imagem, incluindo títulos, subtítulos, botões, labels e qualquer texto sobreposto. Responda APENAS com o texto extraído, um bloco por linha. Sem formatação extra.`;
+
+  const body = {
+    contents: [{
+      parts: [
+        { text: prompt },
+        { inlineData: { mimeType, data: imageBase64 } },
+      ],
+    }],
+    generationConfig: { responseModalities: ["TEXT"] },
+  };
+
+  let extractedText = "";
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+    );
+
+    if (res.ok) {
+      const data = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+      extractedText = data.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("\n") || "";
+    }
+  } catch {
+    // OCR falhou mas não bloqueia o pipeline
+  }
+
+  const extractedLower = extractedText.toLowerCase();
+  const found_phrases: string[] = [];
+  const missing_phrases: string[] = [];
+
+  for (const phrase of expectedPhrases) {
+    if (extractedLower.includes(phrase.toLowerCase())) {
+      found_phrases.push(phrase);
+    } else {
+      missing_phrases.push(phrase);
+    }
+  }
+
+  const score = expectedPhrases.length > 0
+    ? found_phrases.length / expectedPhrases.length
+    : 1.0;
+
+  const issues: string[] = [];
+  if (missing_phrases.length > 0) {
+    issues.push(`Textos ausentes no criativo: ${missing_phrases.join(", ")}`);
+  }
+  if (!extractedText.trim()) {
+    issues.push("OCR não extraiu texto da imagem — verificar se o criativo contém texto visível.");
+  }
+
+  return {
+    passed: missing_phrases.length === 0,
+    score,
+    extracted_text: extractedText,
+    found_phrases,
+    missing_phrases,
+    extra_phrases: [],
+    issues,
+    verified_at: new Date().toISOString(),
+  };
+}
 
 // ── Checkpoint 1: Post-Generation ──
 

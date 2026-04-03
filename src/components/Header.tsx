@@ -1,7 +1,7 @@
 "use client";
 
 import { useGraphStore } from "@/store/graph";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 
 interface DriveStatus {
   connected: boolean;
@@ -460,6 +460,146 @@ function FolderBrowser({
   );
 }
 
+// ── Botão: Relatório de Testes (Google Sheets) ───────────────────────────────
+
+interface SheetStatus {
+  deployed: boolean;
+  spreadsheet_id?: string;
+  spreadsheet_url?: string;
+  last_sync?: string | null;
+}
+
+function TestLogButton() {
+  const [status, setStatus] = useState<SheetStatus | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [error, setError]   = useState<string | null>(null);
+  const [showTip, setShowTip] = useState(false);
+  const tipTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const checkStatus = useCallback(async () => {
+    try {
+      const res = await fetch("/api/setup/test-log-sheet");
+      if (res.ok) setStatus(await res.json());
+    } catch {
+      setStatus({ deployed: false });
+    }
+  }, []);
+
+  useEffect(() => { checkStatus(); }, [checkStatus]);
+
+  const handleSync = async () => {
+    if (syncing) return;
+    setSyncing(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/setup/test-log-sheet", { method: "POST" });
+      const data = await res.json();
+      if (data.ok) {
+        setStatus({
+          deployed:        true,
+          spreadsheet_id:  data.spreadsheet_id,
+          spreadsheet_url: data.spreadsheet_url,
+          last_sync:       data.last_sync,
+        });
+        // Feedback visual rápido
+        setShowTip(true);
+        tipTimeout.current = setTimeout(() => setShowTip(false), 4000);
+      } else {
+        setError(data.error || "Erro desconhecido");
+      }
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  useEffect(() => () => { if (tipTimeout.current) clearTimeout(tipTimeout.current); }, []);
+
+  const formatLastSync = (iso: string) => {
+    const d = new Date(iso);
+    return d.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  };
+
+  const isDeployed = status?.deployed;
+
+  return (
+    <div className="relative">
+      <div className="flex items-center">
+        {/* Botão principal — sync */}
+        <button
+          onClick={handleSync}
+          disabled={syncing}
+          title={isDeployed ? `Última sync: ${status?.last_sync ? formatLastSync(status.last_sync) : "—"}` : "Criar planilha de testes no Google Sheets"}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-l-lg text-xs font-medium transition-all disabled:opacity-60 disabled:cursor-wait ${
+            error
+              ? "text-red-300 bg-red-900/20 border border-red-500/30 hover:bg-red-900/30"
+              : isDeployed
+              ? "text-emerald-300 bg-emerald-900/20 border border-emerald-500/30 hover:bg-emerald-900/30"
+              : "text-slate-300 bg-slate-800/50 border border-slate-700/50 hover:bg-slate-700/50 hover:border-emerald-500/30"
+          }`}
+        >
+          {syncing ? (
+            <div className="w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
+          ) : (
+            /* Sheets icon */
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+              <rect x="3" y="3" width="18" height="18" rx="2" stroke="currentColor" strokeWidth="1.8" />
+              <path d="M3 9h18M3 15h18M9 3v18" stroke="currentColor" strokeWidth="1.5" />
+            </svg>
+          )}
+          {syncing
+            ? (isDeployed ? "Atualizando..." : "Criando...")
+            : error
+            ? "Erro ✕"
+            : isDeployed
+            ? "Relatório ✓"
+            : "Criar Relatório"}
+        </button>
+
+        {/* Botão de abrir planilha (só aparece quando deployado) */}
+        {isDeployed && status?.spreadsheet_url && (
+          <a
+            href={status.spreadsheet_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Abrir no Google Sheets"
+            className="flex items-center px-1.5 py-1.5 rounded-r-lg text-xs font-medium transition-all border-l-0 text-emerald-300 bg-emerald-900/20 border border-emerald-500/30 hover:bg-emerald-900/30"
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+              <polyline points="15 3 21 3 21 9" />
+              <line x1="10" y1="14" x2="21" y2="3" />
+            </svg>
+          </a>
+        )}
+      </div>
+
+      {/* Tooltip de sucesso */}
+      {showTip && (
+        <div
+          className="absolute right-0 top-full mt-2 px-3 py-2 rounded-lg text-[11px] text-emerald-300 whitespace-nowrap z-50 pointer-events-none"
+          style={{ background: "#0d2016", border: "1px solid rgba(52,211,153,0.25)", boxShadow: "0 4px 16px rgba(0,0,0,0.4)" }}
+        >
+          ✓ Planilha atualizada com sucesso
+        </div>
+      )}
+
+      {/* Tooltip de erro */}
+      {error && (
+        <div
+          className="absolute right-0 top-full mt-2 w-64 px-3 py-2 rounded-lg text-[11px] text-red-300 z-50 cursor-pointer"
+          style={{ background: "#1a0808", border: "1px solid rgba(239,68,68,0.25)", boxShadow: "0 4px 16px rgba(0,0,0,0.4)" }}
+          onClick={() => setError(null)}
+          title="Clique para fechar"
+        >
+          {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function Header() {
   const { nodes, fetchGraph, loading } = useGraphStore();
 
@@ -515,6 +655,10 @@ export function Header() {
       {/* Actions */}
       <div className="flex items-center gap-2">
         <GoogleDriveButton />
+
+        <div className="w-px h-6 bg-slate-700/50" />
+
+        <TestLogButton />
 
         <div className="w-px h-6 bg-slate-700/50" />
 

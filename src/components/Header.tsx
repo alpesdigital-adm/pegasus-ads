@@ -470,10 +470,11 @@ interface SheetStatus {
 }
 
 function TestLogButton() {
-  const [status, setStatus] = useState<SheetStatus | null>(null);
-  const [syncing, setSyncing] = useState(false);
-  const [error, setError]   = useState<string | null>(null);
-  const [showTip, setShowTip] = useState(false);
+  const [status, setStatus]           = useState<SheetStatus | null>(null);
+  const [syncing, setSyncing]         = useState(false);
+  const [error, setError]             = useState<string | null>(null);
+  const [scriptWarning, setScriptWarn]= useState<string | null>(null);
+  const [showTip, setShowTip]         = useState(false);
   const tipTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const checkStatus = useCallback(async () => {
@@ -491,8 +492,9 @@ function TestLogButton() {
     if (syncing) return;
     setSyncing(true);
     setError(null);
+    setScriptWarn(null);
     try {
-      const res = await fetch("/api/setup/test-log-sheet", { method: "POST" });
+      const res  = await fetch("/api/setup/test-log-sheet", { method: "POST" });
       const data = await res.json();
       if (data.ok) {
         setStatus({
@@ -501,9 +503,13 @@ function TestLogButton() {
           spreadsheet_url: data.spreadsheet_url,
           last_sync:       data.last_sync,
         });
-        // Feedback visual rápido
-        setShowTip(true);
-        tipTimeout.current = setTimeout(() => setShowTip(false), 4000);
+        if (data.script_warning) {
+          // Planilha ok, mas Apps Script não foi vinculado
+          setScriptWarn(data.script_warning);
+        } else {
+          setShowTip(true);
+          tipTimeout.current = setTimeout(() => setShowTip(false), 4000);
+        }
       } else {
         setError(data.error || "Erro desconhecido");
       }
@@ -521,7 +527,8 @@ function TestLogButton() {
     return d.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
   };
 
-  const isDeployed = status?.deployed;
+  const isDeployed   = status?.deployed;
+  const hasWarning   = !!scriptWarning;
 
   return (
     <div className="relative">
@@ -530,10 +537,16 @@ function TestLogButton() {
         <button
           onClick={handleSync}
           disabled={syncing}
-          title={isDeployed ? `Última sync: ${status?.last_sync ? formatLastSync(status.last_sync) : "—"}` : "Criar planilha de testes no Google Sheets"}
+          title={
+            isDeployed
+              ? `Última sync: ${status?.last_sync ? formatLastSync(status.last_sync) : "—"}`
+              : "Criar planilha de testes no Google Sheets"
+          }
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-l-lg text-xs font-medium transition-all disabled:opacity-60 disabled:cursor-wait ${
             error
               ? "text-red-300 bg-red-900/20 border border-red-500/30 hover:bg-red-900/30"
+              : hasWarning
+              ? "text-amber-300 bg-amber-900/20 border border-amber-500/30 hover:bg-amber-900/30"
               : isDeployed
               ? "text-emerald-300 bg-emerald-900/20 border border-emerald-500/30 hover:bg-emerald-900/30"
               : "text-slate-300 bg-slate-800/50 border border-slate-700/50 hover:bg-slate-700/50 hover:border-emerald-500/30"
@@ -542,7 +555,6 @@ function TestLogButton() {
           {syncing ? (
             <div className="w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
           ) : (
-            /* Sheets icon */
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
               <rect x="3" y="3" width="18" height="18" rx="2" stroke="currentColor" strokeWidth="1.8" />
               <path d="M3 9h18M3 15h18M9 3v18" stroke="currentColor" strokeWidth="1.5" />
@@ -552,6 +564,8 @@ function TestLogButton() {
             ? (isDeployed ? "Atualizando..." : "Criando...")
             : error
             ? "Erro ✕"
+            : hasWarning
+            ? "Relatório ⚠"
             : isDeployed
             ? "Relatório ✓"
             : "Criar Relatório"}
@@ -564,7 +578,11 @@ function TestLogButton() {
             target="_blank"
             rel="noopener noreferrer"
             title="Abrir no Google Sheets"
-            className="flex items-center px-1.5 py-1.5 rounded-r-lg text-xs font-medium transition-all border-l-0 text-emerald-300 bg-emerald-900/20 border border-emerald-500/30 hover:bg-emerald-900/30"
+            className={`flex items-center px-1.5 py-1.5 rounded-r-lg text-xs font-medium transition-all border-l-0 ${
+              hasWarning
+                ? "text-amber-300 bg-amber-900/20 border border-amber-500/30 hover:bg-amber-900/30"
+                : "text-emerald-300 bg-emerald-900/20 border border-emerald-500/30 hover:bg-emerald-900/30"
+            }`}
           >
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
               <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
@@ -581,7 +599,25 @@ function TestLogButton() {
           className="absolute right-0 top-full mt-2 px-3 py-2 rounded-lg text-[11px] text-emerald-300 whitespace-nowrap z-50 pointer-events-none"
           style={{ background: "#0d2016", border: "1px solid rgba(52,211,153,0.25)", boxShadow: "0 4px 16px rgba(0,0,0,0.4)" }}
         >
-          ✓ Planilha atualizada com sucesso
+          ✓ Planilha e Apps Script atualizados
+        </div>
+      )}
+
+      {/* Aviso: planilha ok, Apps Script sem scope */}
+      {hasWarning && (
+        <div
+          className="absolute right-0 top-full mt-2 w-72 px-3 py-2.5 rounded-lg z-50 cursor-pointer space-y-1.5"
+          style={{ background: "#1a1200", border: "1px solid rgba(251,191,36,0.3)", boxShadow: "0 4px 16px rgba(0,0,0,0.5)" }}
+          onClick={() => setScriptWarn(null)}
+          title="Clique para fechar"
+        >
+          <p className="text-[11px] font-semibold text-amber-300">⚠ Planilha atualizada — Apps Script pendente</p>
+          <p className="text-[10px] text-amber-400/80 leading-relaxed">
+            O Apps Script não pôde ser vinculado porque o token Google não tem o scope <code className="text-amber-300">script.projects</code>.
+          </p>
+          <p className="text-[10px] text-amber-400/80 leading-relaxed">
+            Reconecte o Google clicando em <span className="text-amber-200 font-medium">Drive → ▾ → Reconectar Drive</span> e depois clique em Atualizar Relatório novamente.
+          </p>
         </div>
       )}
 

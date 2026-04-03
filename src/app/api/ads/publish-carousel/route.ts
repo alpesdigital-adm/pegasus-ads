@@ -108,7 +108,7 @@ async function fetchModelAd(adId: string): Promise<ModelAdInfo> {
   const token = getToken();
 
   const adData = await metaFetch<Record<string, unknown>>(
-    `${META_BASE_URL}/${adId}?fields=account_id,creative{id,object_story_spec,asset_feed_spec,effective_object_story_spec,url_tags}&access_token=${token}`
+    `${META_BASE_URL}/${adId}?fields=account_id,creative{id,object_story_spec,asset_feed_spec,url_tags}&access_token=${token}`
   );
 
   const accountId = (adData.account_id as string) || "";
@@ -138,23 +138,6 @@ async function fetchModelAd(adId: string): Promise<ModelAdInfo> {
       (oss.instagram_actor_id as string) ||
       (oss.instagram_user_id as string) ||
       "";
-  }
-
-  // Fallback: effective_object_story_spec always has the resolved fields
-  const eoss = creative?.effective_object_story_spec as Record<string, unknown> | undefined;
-  if (eoss) {
-    if (!pageId) pageId = (eoss.page_id as string) || "";
-    if (!instagramUserId) {
-      instagramUserId =
-        (eoss.instagram_actor_id as string) ||
-        (eoss.instagram_user_id as string) ||
-        "";
-    }
-    const eLinkData = eoss.link_data as Record<string, unknown> | undefined;
-    if (eLinkData) {
-      if (!link) link = (eLinkData.link as string) || "";
-      if (!displayLink) displayLink = (eLinkData.caption as string) || "";
-    }
   }
 
   urlTags = (creative?.url_tags as string) || "";

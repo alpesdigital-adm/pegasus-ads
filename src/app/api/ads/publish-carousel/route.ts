@@ -93,7 +93,7 @@ interface CarouselSpec {
 
 interface PartnershipSpec {
   sponsor_id: string;       // Instagram User ID do parceiro
-  testimonial?: boolean;    // true = branded_content ad_format 1 (depoimento)
+  testimonial?: string;     // Texto do depoimento (branded_content.testimonial)
 }
 
 interface ModelAdInfo {
@@ -260,6 +260,7 @@ async function createCarouselCreative(params: {
     message: bodyText,
     link: link,
     child_attachments: childAttachments,
+    call_to_action: { type: ctaType },
   };
 
   if (displayLink) {
@@ -290,8 +291,11 @@ async function createCarouselCreative(params: {
       sponsor_id: partnership.sponsor_id,
     });
     const brandedContent: Record<string, unknown> = { ad_format: 1 };
+    if (partnership.testimonial) {
+      brandedContent.testimonial = partnership.testimonial;
+    }
     formParams.branded_content = JSON.stringify(brandedContent);
-    console.log(`[PublishCarousel] Partnership: sponsor_id=${partnership.sponsor_id}, testimonial=${!!partnership.testimonial}`);
+    console.log(`[PublishCarousel] Partnership: sponsor_id=${partnership.sponsor_id}, testimonial="${partnership.testimonial || ""}"`);
   }
 
   console.log(`[PublishCarousel] Creating carousel creative: ${name} with ${imageHashes.length} cards`);

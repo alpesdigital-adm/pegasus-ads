@@ -386,6 +386,75 @@ export async function getConnectionStatus(): Promise<{
   return { connected: true, folder_id: folderId };
 }
 
+// ── File listing & download ──
+
+export interface DriveFile {
+  id: string;
+  name: string;
+  mimeType: string;
+  size?: string;
+  imageMediaMetadata?: { width: number; height: number };
+}
+
+/**
+ * List image files in a Google Drive folder.
+ * Returns files with name, id, mimeType, and image dimensions.
+ */
+export async function listFilesInFolder(
+  folderId: string,
+  driveId?: string
+): Promise<DriveFile[]> {
+  const accessToken = await getValidAccessToken();
+
+  const q = `'${folderId}' in parents and trashed=false and (mimeType='image/png' or mimeType='image/jpeg' or mimeType='image/jpg')`;
+  const params = new URLSearchParams({
+    q,
+    spaces: "drive",
+    pageSize: "200",
+    fields: "files(id,name,mimeType,size,imageMediaMetadata(width,height))",
+    includeItemsFromAllDrives: "true",
+    supportsAllDrives: "true",
+    orderBy: "name",
+  });
+
+  if (driveId) {
+    params.set("corpora", "drive");
+    params.set("driveId", driveId);
+  }
+
+  const response = await fetch(
+    `https://www.googleapis.com/drive/v3/files?${params.toString()}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Drive listFilesInFolder failed: ${response.status} ${errText}`);
+  }
+
+  const data = (await response.json()) as { files: DriveFile[] };
+  return data.files || [];
+}
+
+/**
+ * Download a file from Google Drive as Buffer.
+ */
+export async function downloadFile(fileId: string): Promise<Buffer> {
+  const accessToken = await getValidAccessToken();
+
+  const response = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+
+  if (!response.ok) {
+    throw new Error(`Drive download failed for ${fileId}: ${response.status} ${response.statusText}`);
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  return Buffer.from(arrayBuffer);
+}
+
 /**
  * Clear all Google Drive settings
  */

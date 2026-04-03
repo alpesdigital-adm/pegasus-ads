@@ -264,9 +264,9 @@ async function createCreativeSingleImage(params: {
     link_data: linkData,
   };
 
-  // Incluir instagram_actor_id se disponível
+  // Incluir instagram_user_id (NÃO instagram_actor_id — erro 100 na API v25.0)
   if (instagramUserId) {
-    objectStorySpec.instagram_actor_id = instagramUserId;
+    objectStorySpec.instagram_user_id = instagramUserId;
   }
 
   const formParams: Record<string, string> = {

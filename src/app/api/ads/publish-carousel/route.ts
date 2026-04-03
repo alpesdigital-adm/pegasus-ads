@@ -267,7 +267,7 @@ async function createCarouselCreative(params: {
   };
 
   if (instagramUserId) {
-    objectStorySpec.instagram_actor_id = instagramUserId;
+    objectStorySpec.instagram_user_id = instagramUserId;
   }
 
   const formParams: Record<string, string> = {

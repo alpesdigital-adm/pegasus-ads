@@ -81,6 +81,17 @@ function getDateRange(daysBack = 90): { from: string; to: string } {
 }
 
 export async function GET(req: NextRequest) {
+  // ── Verificação de API key ─────────────────────────────────────────────────
+  // Protege dados de métricas contra acesso não autorizado.
+  // Se TEST_LOG_API_KEY não está definida, endpoint é aberto (modo dev).
+  const envKey = process.env.TEST_LOG_API_KEY;
+  if (envKey) {
+    const provided = req.headers.get("x-api-key") ?? req.nextUrl.searchParams.get("key");
+    if (provided !== envKey) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+  }
+
   const db = await initDb();
   const { searchParams } = req.nextUrl;
 

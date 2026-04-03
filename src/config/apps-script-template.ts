@@ -1,65 +1,72 @@
 /**
- * sync_test_log.gs — Pegasus Ads · Log de Testes (Tarefa 2.7)
+ * apps-script-template.ts
  *
- * Apps Script container-bound na planilha
- * "T7 - Registro de Testes de Criativos" no Google Sheets.
+ * Template do Apps Script para sincronização do Log de Testes de Criativos.
+ * Usado por POST /api/setup/apps-script para implantar via Apps Script API.
  *
- * SETUP (fazer uma vez):
- *   1. Abrir a planilha → Extensões → Apps Script
- *   2. Colar este arquivo inteiro → Salvar
- *   3. Executar "syncAll" manualmente uma vez para autorizar permissões
- *   4. Opcional: Triggers → Adicionar trigger → syncAll · time-driven · a cada 1 hora
- *
- * O script busca dados de: https://pegasus-ads.vercel.app/api/export/test-log
- * e atualiza as três abas sem precisar de OAuth ou upload de arquivo.
+ * Placeholders substituídos em runtime:
+ *   {{SPREADSHEET_ID}}  — ID da planilha Google Sheets
+ *   {{API_KEY}}         — Valor de TEST_LOG_API_KEY (salvo em Script Properties)
+ *   {{API_BASE}}        — Base URL do app (ex: https://pegasus-ads.vercel.app)
  */
 
-// ── Configuração ──────────────────────────────────────────────────────────────
+export const APPS_SCRIPT_TEMPLATE = `
+/**
+ * sync_test_log.gs — Pegasus Ads · Log de Testes
+ * Implantado automaticamente por POST /api/setup/apps-script
+ * NÃO EDITAR MANUALMENTE — regenerar via Pegasus Ads.
+ */
 
-var API_BASE = 'https://pegasus-ads.vercel.app';
-var API_PATH = '/api/export/test-log';
-var CPL_TARGET = 25.0;
+// ── Configuração ───────────────────────────────────────────────────────────────
 
-// API key — armazenada em Script Properties para não ficar exposta no código.
-// Configurar uma vez via menu Pegasus Ads → ⚙️ Configurar API Key, ou
-// diretamente em: Projeto → Configurações do Projeto → Propriedades do script
-// Adicionar: chave = "API_KEY", valor = <seu TEST_LOG_API_KEY>
+var SPREADSHEET_ID = '{{SPREADSHEET_ID}}';
+var API_BASE       = '{{API_BASE}}';
+var API_PATH       = '/api/export/test-log';
+var CPL_TARGET     = 25.0;
+
+// API key armazenada em Script Properties (mais seguro que hardcode)
 function getApiKey_() {
-  return PropertiesService.getScriptProperties().getProperty('API_KEY') || '';
+  var key = PropertiesService.getScriptProperties().getProperty('API_KEY');
+  if (!key) {
+    // Fallback: inicializar se ainda não estiver definido
+    PropertiesService.getScriptProperties().setProperty('API_KEY', '{{API_KEY}}');
+    key = '{{API_KEY}}';
+  }
+  return key;
 }
 
 // Colunas da aba Criativos (1-indexed)
 var COL = {
-  NOME:        1,   // A
-  TIPO:        2,   // B
-  IA:          3,   // C
-  PARCERIA:    4,   // D
-  CAMPANHAS:   5,   // E
-  ADSETS:      6,   // F
-  SPEND:       7,   // G ← atualizar
-  IMPRESSOES:  8,   // H ← atualizar
-  CPM:         9,   // I ← atualizar
-  CTR:         10,  // J ← atualizar
-  CLIQUES:     11,  // K ← atualizar
-  LPV:         12,  // L   preservar
-  CONNECT:     13,  // M   preservar
-  LEADS:       14,  // N ← atualizar
-  CPL:         15,  // O ← atualizar
-  CONV:        16,  // P   preservar
-  VEREDITO:    17,  // Q ← atualizar se kill/promote (preservar se manual)
-  HIPOTESE:    18,  // R   preservar
-  APRENDIZADO: 19   // S   preservar
+  NOME:        1,
+  TIPO:        2,
+  IA:          3,
+  PARCERIA:    4,
+  CAMPANHAS:   5,
+  ADSETS:      6,
+  SPEND:       7,
+  IMPRESSOES:  8,
+  CPM:         9,
+  CTR:         10,
+  CLIQUES:     11,
+  LPV:         12,
+  CONNECT:     13,
+  LEADS:       14,
+  CPL:         15,
+  CONV:        16,
+  VEREDITO:    17,
+  HIPOTESE:    18,
+  APRENDIZADO: 19
 };
 
-// Veredictos que o script pode sobrescrever (gerados automaticamente)
-var VEREDICTOS_AUTO = ['Kill L0', 'Kill L1', 'Kill L2', 'Em teste'];
+var VEREDICTOS_AUTO = ['Kill L0', 'Kill L1', 'Kill L2', 'Kill L3', 'Kill L4', 'Em teste'];
 
-// Cores dos veredictos (hex sem #)
 var COR_VEREDITO = {
   'Vencedor':    { bg: '#C6EFCE', fg: '#276221' },
   'Kill L0':     { bg: '#FFC7CE', fg: '#9C0006' },
   'Kill L1':     { bg: '#FFC7CE', fg: '#9C0006' },
   'Kill L2':     { bg: '#FFC7CE', fg: '#9C0006' },
+  'Kill L3':     { bg: '#FFC7CE', fg: '#9C0006' },
+  'Kill L4':     { bg: '#FFC7CE', fg: '#9C0006' },
   'Ruim':        { bg: '#FFC7CE', fg: '#9C0006' },
   'Em teste':    { bg: '#BDD7EE', fg: '#1F4E79' },
   'Caro':        { bg: '#FFEB9C', fg: '#9C6500' },
@@ -68,37 +75,31 @@ var COR_VEREDITO = {
   'Em andamento':{ bg: '#BDD7EE', fg: '#1F4E79' }
 };
 
-// ── Ponto de entrada principal ────────────────────────────────────────────────
+// ── Ponto de entrada ───────────────────────────────────────────────────────────
 
 function syncAll() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
   var log = [];
 
   try {
-    // 1. Buscar dados da API
     var data = fetchApiData_();
     if (!data) {
-      SpreadsheetApp.getUi().alert('Erro ao buscar dados da API Pegasus Ads.');
+      ss.toast('Erro ao buscar dados da API Pegasus Ads.', 'Pegasus Ads — Erro', 10);
       return;
     }
 
-    log.push('✅ API: ' + data.criativos.length + ' criativos, ' + data.dados_brutos.length + ' registros diários');
+    log.push('API: ' + data.criativos.length + ' criativos');
 
-    // 2. Sincronizar aba Criativos
     var statsCriativos = syncCriativos_(ss, data.criativos, data.cpl_target);
-    log.push('📊 Criativos: ' + statsCriativos.updated + ' atualizados, ' +
+    log.push('Criativos: ' + statsCriativos.updated + ' atualizados, ' +
              statsCriativos.added + ' novos, ' +
-             statsCriativos.killApplied + ' kill rules aplicadas');
+             statsCriativos.killApplied + ' kill rules');
 
-    // 3. Sincronizar aba Dados Brutos
     var countBrutos = syncDadosBrutos_(ss, data.dados_brutos);
-    log.push('📅 Dados Brutos: ' + countBrutos + ' linhas');
+    log.push('Dados Brutos: ' + countBrutos + ' linhas');
 
-    // 4. Atualizar timestamp nos Aprendizados
     updateTimestamp_(ss, data.cpl_target);
-    log.push('🕐 Timestamp atualizado');
 
-    // 5. Mostrar resumo no título da planilha por 3s
     var summary = log.join(' | ');
     Logger.log(summary);
     ss.toast(summary, 'Pegasus Ads — Sync concluído', 5);
@@ -115,13 +116,12 @@ function syncAll() {
 function fetchApiData_() {
   var url = API_BASE + API_PATH + '?date_from=' + getDateFrom_(90);
   try {
-    var headers = { 'Accept': 'application/json' };
-    var apiKey = getApiKey_();
-    if (apiKey) headers['x-api-key'] = apiKey;
-
     var response = UrlFetchApp.fetch(url, {
       method: 'GET',
-      headers: headers,
+      headers: {
+        'Accept': 'application/json',
+        'x-api-key': getApiKey_()
+      },
       muteHttpExceptions: true
     });
     if (response.getResponseCode() !== 200) {
@@ -141,35 +141,31 @@ function syncCriativos_(ss, criativos, cplTarget) {
   var ws = ss.getSheetByName('Criativos');
   var stats = { updated: 0, added: 0, killApplied: 0 };
 
-  // Ler todas as linhas existentes de uma vez (mais eficiente que célula a célula)
   var lastRow = ws.getLastRow();
   var allData = lastRow > 1
     ? ws.getRange(2, 1, lastRow - 1, COL.APRENDIZADO).getValues()
     : [];
 
-  // Mapear nome base → índice de linha (0-based no array, row = idx+2)
   var existingMap = {};
   for (var i = 0; i < allData.length; i++) {
     var nome = String(allData[i][COL.NOME - 1] || '').trim();
     if (nome) existingMap[nome] = i;
   }
 
-  // Construir mapa de criativos da API por nome
   var apiMap = {};
   for (var j = 0; j < criativos.length; j++) {
     apiMap[criativos[j].nome] = criativos[j];
   }
 
-  // ── 1. Atualizar linhas existentes ──
+  // Atualizar linhas existentes
   for (var nome in existingMap) {
     if (!apiMap[nome]) continue;
     var m = apiMap[nome];
     if (!m.spend || m.spend === 0) continue;
 
     var rowIdx = existingMap[nome];
-    var sheetRow = rowIdx + 2; // +1 para header, +1 para 1-indexed
+    var sheetRow = rowIdx + 2;
 
-    // Atualizar métricas em batch
     ws.getRange(sheetRow, COL.SPEND).setValue(m.spend);
     ws.getRange(sheetRow, COL.IMPRESSOES).setValue(m.impressoes);
     ws.getRange(sheetRow, COL.CPM).setValue(m.cpm);
@@ -178,16 +174,12 @@ function syncCriativos_(ss, criativos, cplTarget) {
     ws.getRange(sheetRow, COL.LEADS).setValue(m.leads);
     ws.getRange(sheetRow, COL.CPL).setValue(m.cpl !== null ? m.cpl : '');
 
-    // Colorir CPL pela distância do target
     colorCplCell_(ws.getRange(sheetRow, COL.CPL), m.cpl, cplTarget);
 
-    // Aplicar kill rule se veredito está em branco ou é auto
     if (m.kill_rule) {
       var vereCell = ws.getRange(sheetRow, COL.VEREDITO);
       var vereAtual = String(vereCell.getValue() || '').trim();
       if (!vereAtual || VEREDICTOS_AUTO.indexOf(vereAtual) !== -1) {
-        var vereNovo = m.kill_rule.action === 'promote' ? 'Vencedor' : m.kill_rule.level + ' ' + m.kill_rule.name.split(' ')[0];
-        // Simplificar: usar level direto (Kill L0, Kill L1, etc.)
         var vereLabel = m.kill_rule.action === 'kill'
           ? 'Kill ' + m.kill_rule.level
           : m.kill_rule.action === 'promote'
@@ -197,14 +189,13 @@ function syncCriativos_(ss, criativos, cplTarget) {
         stats.killApplied++;
       }
     } else if (m.leads > 0 && !allData[rowIdx][COL.VEREDITO - 1]) {
-      // Tem leads mas sem kill rule → marcar Em teste se vazio
       setVeredito_(ws.getRange(sheetRow, COL.VEREDITO), 'Em teste');
     }
 
     stats.updated++;
   }
 
-  // ── 2. Adicionar novos criativos ──
+  // Adicionar novos criativos
   var nextRow = lastRow + 1;
   for (var apiNome in apiMap) {
     if (existingMap.hasOwnProperty(apiNome)) continue;
@@ -246,7 +237,6 @@ function syncCriativos_(ss, criativos, cplTarget) {
 function syncDadosBrutos_(ss, dadosBrutos) {
   var ws = ss.getSheetByName('Dados Brutos');
 
-  // Limpar dados existentes (mantém linha 1 = header)
   var lastRow = ws.getLastRow();
   if (lastRow > 1) {
     ws.getRange(2, 1, lastRow - 1, ws.getLastColumn()).clearContent();
@@ -254,27 +244,26 @@ function syncDadosBrutos_(ss, dadosBrutos) {
 
   if (!dadosBrutos || dadosBrutos.length === 0) return 0;
 
-  // Montar matriz para escrita em batch
   var rows = dadosBrutos.map(function(m) {
     return [
-      'T7__0003',            // Campanha
-      m.nome,                // Ad Name
-      m.meta_ad_id || '',    // Ad ID
-      '',                    // Status Ad
-      '',                    // Status AdSet
-      m.spend || 0,          // Spend
-      m.impressoes || 0,     // Impressões
-      m.cpm || 0,            // CPM
-      m.ctr || 0,            // CTR
-      m.cliques || 0,        // Cliques
-      '',                    // LPV (não disponível)
-      m.leads || 0,          // Leads
-      m.cpl || '',           // CPL
-      '',                    // Connect Rate
-      '',                    // Conv Rate
-      'Não',                 // Vídeo
-      'Não',                 // IA
-      'Não'                  // Parceria
+      'T7__0003',
+      m.nome,
+      m.meta_ad_id || '',
+      '',
+      '',
+      m.spend || 0,
+      m.impressoes || 0,
+      m.cpm || 0,
+      m.ctr || 0,
+      m.cliques || 0,
+      '',
+      m.leads || 0,
+      m.cpl || '',
+      '',
+      '',
+      'Não',
+      'Não',
+      'Não'
     ];
   });
 
@@ -286,6 +275,7 @@ function syncDadosBrutos_(ss, dadosBrutos) {
 
 function updateTimestamp_(ss, cplTarget) {
   var ws = ss.getSheetByName('Aprendizados');
+  if (!ws) return;
   var data = ws.getDataRange().getValues();
   var hoje = Utilities.formatDate(new Date(), 'America/Sao_Paulo', 'dd/MM/yyyy');
 
@@ -318,11 +308,11 @@ function colorCplCell_(cell, cpl, cplTarget) {
     return;
   }
   var ratio = cpl / cplTarget;
-  if (ratio <= 1.0)       { cell.setBackground('#C6EFCE').setFontColor('#276221'); } // verde
-  else if (ratio <= 1.31) { cell.setBackground('#EBFCE8').setFontColor('#276221'); } // verde claro
-  else if (ratio <= 1.97) { cell.setBackground('#FFEB9C').setFontColor('#9C6500'); } // amarelo
-  else if (ratio <= 2.62) { cell.setBackground('#FFC7CE').setFontColor('#9C0006'); } // laranja/vermelho
-  else                    { cell.setBackground('#FF0000').setFontColor('#FFFFFF'); } // vermelho forte
+  if (ratio <= 1.0)       { cell.setBackground('#C6EFCE').setFontColor('#276221'); }
+  else if (ratio <= 1.31) { cell.setBackground('#EBFCE8').setFontColor('#276221'); }
+  else if (ratio <= 1.97) { cell.setBackground('#FFEB9C').setFontColor('#9C6500'); }
+  else if (ratio <= 2.62) { cell.setBackground('#FFC7CE').setFontColor('#9C0006'); }
+  else                    { cell.setBackground('#FF0000').setFontColor('#FFFFFF'); }
 }
 
 function getDateFrom_(daysBack) {
@@ -331,28 +321,26 @@ function getDateFrom_(daysBack) {
   return Utilities.formatDate(d, 'UTC', 'yyyy-MM-dd');
 }
 
-// ── Trigger automático (instalar via menu ou manualmente) ─────────────────────
+// ── Trigger automático ────────────────────────────────────────────────────────
 
 function installTrigger() {
-  // Remove triggers existentes para este script
   var triggers = ScriptApp.getProjectTriggers();
   for (var i = 0; i < triggers.length; i++) {
     if (triggers[i].getHandlerFunction() === 'syncAll') {
       ScriptApp.deleteTrigger(triggers[i]);
     }
   }
-  // Criar trigger: todo dia às 7h (horário de São Paulo)
   ScriptApp.newTrigger('syncAll')
     .timeBased()
     .everyDays(1)
     .atHour(7)
     .inTimezone('America/Sao_Paulo')
     .create();
-  SpreadsheetApp.getActiveSpreadsheet()
+  SpreadsheetApp.openById(SPREADSHEET_ID)
     .toast('Trigger instalado: sync diário às 7h', 'Pegasus Ads', 5);
 }
 
-// ── Menu personalizado na planilha ────────────────────────────────────────────
+// ── Menu personalizado ────────────────────────────────────────────────────────
 
 function onOpen() {
   SpreadsheetApp.getUi()
@@ -360,25 +348,21 @@ function onOpen() {
     .addItem('🔄  Sincronizar agora', 'syncAll')
     .addSeparator()
     .addItem('⏰  Instalar sync diário (7h)', 'installTrigger')
-    .addSeparator()
-    .addItem('⚙️  Configurar API Key', 'promptApiKey')
     .addToUi();
 }
+`.trim();
 
-function promptApiKey() {
-  var ui = SpreadsheetApp.getUi();
-  var result = ui.prompt(
-    'Pegasus Ads — API Key',
-    'Cole o valor de TEST_LOG_API_KEY (deixe em branco para remover):',
-    ui.ButtonSet.OK_CANCEL
-  );
-  if (result.getSelectedButton() !== ui.Button.OK) return;
-  var key = result.getResponseText().trim();
-  if (key) {
-    PropertiesService.getScriptProperties().setProperty('API_KEY', key);
-    ui.alert('API Key salva com sucesso.');
-  } else {
-    PropertiesService.getScriptProperties().deleteProperty('API_KEY');
-    ui.alert('API Key removida. O endpoint ficará acessível sem autenticação (modo dev).');
-  }
+/**
+ * Injeta os placeholders no template e retorna o script final.
+ */
+export function buildAppsScript(opts: {
+  spreadsheetId: string;
+  apiKey: string;
+  apiBase?: string;
+}): string {
+  const base = opts.apiBase ?? "https://pegasus-ads.vercel.app";
+  return APPS_SCRIPT_TEMPLATE
+    .replace(/\{\{SPREADSHEET_ID\}\}/g, opts.spreadsheetId)
+    .replace(/\{\{API_KEY\}\}/g, opts.apiKey)
+    .replace(/\{\{API_BASE\}\}/g, base);
 }

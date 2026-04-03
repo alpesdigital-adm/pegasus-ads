@@ -29,7 +29,10 @@ export function generateAuthUrl(): string {
     client_id: GOOGLE_CLIENT_ID,
     redirect_uri: REDIRECT_URI,
     response_type: "code",
-    scope: "https://www.googleapis.com/auth/drive",
+    scope: [
+      "https://www.googleapis.com/auth/drive",
+      "https://www.googleapis.com/auth/script.projects",
+    ].join(" "),
     access_type: "offline",
     prompt: "consent",
   });

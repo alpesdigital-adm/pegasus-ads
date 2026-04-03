@@ -91,6 +91,11 @@ interface CarouselSpec {
   cards: CardSpec[];
 }
 
+interface PartnershipSpec {
+  sponsor_id: string;       // Instagram User ID do parceiro
+  testimonial?: boolean;    // true = branded_content ad_format 1 (depoimento)
+}
+
 interface ModelAdInfo {
   link: string;
   pageId: string;
@@ -224,6 +229,7 @@ async function createCarouselCreative(params: {
   ctaType: string;
   urlTags: string;
   displayLink: string;
+  partnership?: PartnershipSpec;
 }): Promise<{ id: string }> {
   await rateLimit();
   const token = getToken();
@@ -231,7 +237,7 @@ async function createCarouselCreative(params: {
   const {
     accountId, name, pageId, instagramUserId,
     imageHashes, body: bodyText, headline, description,
-    link, ctaType, urlTags, displayLink,
+    link, ctaType, urlTags, displayLink, partnership,
   } = params;
 
   // Build child_attachments — one per card image
@@ -277,6 +283,16 @@ async function createCarouselCreative(params: {
   };
 
   if (urlTags) formParams.url_tags = urlTags;
+
+  // Partnership / branded content fields (top-level on adcreatives)
+  if (partnership?.sponsor_id) {
+    formParams.instagram_branded_content = JSON.stringify({
+      sponsor_id: partnership.sponsor_id,
+    });
+    const brandedContent: Record<string, unknown> = { ad_format: 1 };
+    formParams.branded_content = JSON.stringify(brandedContent);
+    console.log(`[PublishCarousel] Partnership: sponsor_id=${partnership.sponsor_id}, testimonial=${!!partnership.testimonial}`);
+  }
 
   console.log(`[PublishCarousel] Creating carousel creative: ${name} with ${imageHashes.length} cards`);
 
@@ -332,10 +348,11 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
 
-    const { campaign_id, model_ad_id, carousels } = body as {
+    const { campaign_id, model_ad_id, carousels, partnership } = body as {
       campaign_id: string;
       model_ad_id: string;
       carousels: CarouselSpec[];
+      partnership?: PartnershipSpec;
     };
 
     if (!campaign_id || !model_ad_id || !carousels || carousels.length === 0) {
@@ -405,6 +422,7 @@ export async function POST(req: NextRequest) {
           ctaType: carousel.cta_type,
           urlTags: modelAd.urlTags,
           displayLink: modelAd.displayLink,
+          partnership,
         });
         result.creative_id = creative.id;
         console.log(`[PublishCarousel] Creative created: ${creative.id}`);

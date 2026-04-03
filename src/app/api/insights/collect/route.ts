@@ -145,23 +145,26 @@ export async function POST(req: NextRequest) {
 
           try {
             await db.execute({
-              sql: `INSERT INTO metrics (id, creative_id, date, spend, impressions, cpm, ctr, clicks, cpc, leads, cpl, meta_ad_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              sql: `INSERT INTO metrics (id, creative_id, date, spend, impressions, cpm, ctr, clicks, cpc, leads, cpl, landing_page_views, meta_ad_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT (creative_id, date) DO UPDATE SET
-                      spend       = EXCLUDED.spend,
-                      impressions = EXCLUDED.impressions,
-                      cpm         = EXCLUDED.cpm,
-                      ctr         = EXCLUDED.ctr,
-                      clicks      = EXCLUDED.clicks,
-                      cpc         = EXCLUDED.cpc,
-                      leads       = EXCLUDED.leads,
-                      cpl         = EXCLUDED.cpl,
-                      meta_ad_id  = COALESCE(EXCLUDED.meta_ad_id, metrics.meta_ad_id)`,
+                      spend               = EXCLUDED.spend,
+                      impressions         = EXCLUDED.impressions,
+                      cpm                 = EXCLUDED.cpm,
+                      ctr                 = EXCLUDED.ctr,
+                      clicks              = EXCLUDED.clicks,
+                      cpc                 = EXCLUDED.cpc,
+                      leads               = EXCLUDED.leads,
+                      cpl                 = EXCLUDED.cpl,
+                      landing_page_views  = EXCLUDED.landing_page_views,
+                      meta_ad_id          = COALESCE(EXCLUDED.meta_ad_id, metrics.meta_ad_id)`,
               args: [
                 uuid(), creativeId, insight.date_start,
                 insight.spend, insight.impressions, insight.cpm,
                 insight.ctr, insight.clicks, insight.cpc,
-                insight.leads, insight.cpl, insight.meta_ad_id,
+                insight.leads, insight.cpl,
+                insight.landing_page_views ?? 0,
+                insight.meta_ad_id,
               ],
             });
 

@@ -522,7 +522,16 @@ export async function getAdContentFromCampaign(
   return null;
 }
 
-// ── Utility: Extrair leads de actions ──
+// ── Utility: Extrair métricas de actions ──
+
+export function extractLPVFromInsights(
+  insights: Record<string, unknown>
+): number {
+  const actions = insights.actions as Array<{ action_type: string; value: string }> | undefined;
+  if (!actions) return 0;
+  const lpvAction = actions.find((a) => a.action_type === "landing_page_view");
+  return lpvAction ? parseInt(lpvAction.value, 10) : 0;
+}
 
 export function extractLeadsFromInsights(
   insights: Record<string, unknown>
@@ -566,10 +575,15 @@ export interface AdInsightRecord {
   cpc: number;
   leads: number;
   cpl: number | null;
+  landing_page_views: number;
   /** Presente quando breakdown inclui publisher_platform */
   publisher_platform?: string;
   /** Presente quando breakdown inclui platform_position */
   platform_position?: string;
+  /** Presente quando breakdown inclui age */
+  age?: string;
+  /** Presente quando breakdown inclui gender */
+  gender?: string;
 }
 
 /**
@@ -608,6 +622,7 @@ export async function getCampaignAdsInsights(
     "cpc",
     "actions",
     "cost_per_action_type",
+    "inline_link_clicks",
   ].join(",");
 
   const params = new URLSearchParams({
@@ -634,6 +649,7 @@ export async function getCampaignAdsInsights(
     for (const row of data.data || []) {
       const leads = extractLeadsFromInsights(row);
       const cpl = extractCPLFromInsights(row);
+      const lpv = extractLPVFromInsights(row);
       const spend = parseFloat((row.spend as string) || "0");
       const impressions = parseInt((row.impressions as string) || "0", 10);
       const cpm = parseFloat((row.cpm as string) || "0");
@@ -657,9 +673,12 @@ export async function getCampaignAdsInsights(
         cpc,
         leads,
         cpl,
+        landing_page_views: lpv,
         // Campos de breakdown (presentes quando breakdowns param é utilizado)
         publisher_platform: row.publisher_platform as string | undefined,
         platform_position: row.platform_position as string | undefined,
+        age: row.age as string | undefined,
+        gender: row.gender as string | undefined,
       });
     }
 
@@ -740,6 +759,7 @@ export async function getAccountAdsInsights(
       cpc: parseFloat((row.cpc as string) || "0"),
       leads,
       cpl,
+      landing_page_views: extractLPVFromInsights(row),
     });
   }
 

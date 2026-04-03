@@ -636,6 +636,232 @@ function TestLogButton() {
   );
 }
 
+// ── Botão: Alertas de Anomalia (sino) ────────────────────────────────────────
+
+interface AlertCounts {
+  unresolved: number;
+  critical: number;
+  warnings: number;
+  promotions: number;
+}
+
+interface AlertRow {
+  id: string;
+  creative_id?: string;
+  creative_name?: string;
+  level: string;
+  rule_name?: string;
+  message: string;
+  spend?: number;
+  cpl?: number;
+  cpl_target?: number;
+  date: string;
+  resolved: boolean;
+  created_at: string;
+}
+
+function AlertBell() {
+  const [counts, setCounts] = useState<AlertCounts | null>(null);
+  const [alerts, setAlerts] = useState<AlertRow[]>([]);
+  const [open, setOpen] = useState(false);
+  const [resolving, setResolving] = useState<string | null>(null);
+
+  const loadAlerts = useCallback(async () => {
+    try {
+      const res = await fetch("/api/alerts?limit=30");
+      if (!res.ok) return;
+      const data = await res.json();
+      setCounts(data.counts);
+      setAlerts(data.alerts || []);
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
+    loadAlerts();
+    const interval = setInterval(loadAlerts, 60_000); // refresh a cada 1 min
+    return () => clearInterval(interval);
+  }, [loadAlerts]);
+
+  const handleResolve = async (alertId: string) => {
+    setResolving(alertId);
+    try {
+      await fetch("/api/alerts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ alert_id: alertId }),
+      });
+      await loadAlerts();
+    } finally {
+      setResolving(null);
+    }
+  };
+
+  const handleResolveAll = async () => {
+    setResolving("all");
+    try {
+      await fetch("/api/alerts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resolve_all: true }),
+      });
+      await loadAlerts();
+      setOpen(false);
+    } finally {
+      setResolving(null);
+    }
+  };
+
+  const unresolved = counts?.unresolved ?? 0;
+  const critical   = counts?.critical   ?? 0;
+
+  function levelColor(level: string): string {
+    if (["L0", "L1", "L2"].includes(level)) return "#ef4444";
+    if (["L3", "L4"].includes(level)) return "#f59e0b";
+    if (level === "L5") return "#10b981";
+    return "#64748b";
+  }
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen(!open)}
+        className={`relative flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+          critical > 0
+            ? "text-red-300 bg-red-900/20 border border-red-500/30 hover:bg-red-900/30"
+            : unresolved > 0
+            ? "text-amber-300 bg-amber-900/20 border border-amber-500/30 hover:bg-amber-900/30"
+            : "text-slate-400 bg-slate-800/50 border border-slate-700/50 hover:bg-slate-700/50"
+        }`}
+        title={`${unresolved} alerta${unresolved !== 1 ? "s" : ""} não resolvido${unresolved !== 1 ? "s" : ""}`}
+      >
+        {/* Bell icon */}
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+          <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+        </svg>
+        {unresolved > 0 && (
+          <span
+            className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] rounded-full text-[10px] font-bold flex items-center justify-center px-1"
+            style={{
+              background: critical > 0 ? "#ef4444" : "#f59e0b",
+              color: "#fff",
+            }}
+          >
+            {unresolved > 99 ? "99+" : unresolved}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div
+            className="absolute right-0 top-full mt-2 w-80 max-h-[480px] flex flex-col rounded-xl overflow-hidden z-50"
+            style={{
+              background: "linear-gradient(180deg, #1e293b 0%, #0f172a 100%)",
+              border: "1px solid rgba(59,130,246,0.2)",
+              boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
+            }}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700/50 shrink-0">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-semibold text-white">Alertas</span>
+                {unresolved > 0 && (
+                  <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full"
+                    style={{ background: critical > 0 ? "rgba(239,68,68,0.2)" : "rgba(245,158,11,0.2)", color: critical > 0 ? "#ef4444" : "#f59e0b" }}>
+                    {unresolved} pendente{unresolved !== 1 ? "s" : ""}
+                  </span>
+                )}
+              </div>
+              {unresolved > 0 && (
+                <button
+                  onClick={handleResolveAll}
+                  disabled={resolving === "all"}
+                  className="text-[10px] text-slate-400 hover:text-white transition-colors disabled:opacity-50"
+                >
+                  {resolving === "all" ? "..." : "Resolver todos"}
+                </button>
+              )}
+            </div>
+
+            {/* List */}
+            <div className="flex-1 overflow-y-auto">
+              {alerts.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#334155" strokeWidth="1.5" className="mb-2">
+                    <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+                    <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+                  </svg>
+                  <p className="text-xs text-slate-500">Sem alertas pendentes</p>
+                  <p className="text-[10px] text-slate-600 mt-1">Kill rules e anomalias aparecem aqui</p>
+                </div>
+              ) : (
+                alerts.map((alert) => (
+                  <div
+                    key={alert.id}
+                    className={`flex items-start gap-3 px-4 py-3 border-b border-slate-800/50 transition-opacity ${alert.resolved ? "opacity-40" : ""}`}
+                  >
+                    {/* Level badge */}
+                    <span
+                      className="shrink-0 mt-0.5 text-[9px] font-bold px-1.5 py-0.5 rounded"
+                      style={{ background: `${levelColor(alert.level)}20`, color: levelColor(alert.level) }}
+                    >
+                      {alert.level}
+                    </span>
+
+                    {/* Content */}
+                    <div className="flex-1 min-w-0">
+                      {alert.creative_name && (
+                        <p className="text-[11px] font-semibold text-slate-200 truncate">{alert.creative_name}</p>
+                      )}
+                      <p className="text-[10px] text-slate-400 leading-relaxed mt-0.5 break-words">
+                        {alert.rule_name
+                          ? <><span className="text-slate-300">{alert.rule_name}</span> — </>
+                          : null}
+                        {alert.cpl !== null && alert.cpl !== undefined
+                          ? `CPL R$${Number(alert.cpl).toFixed(2)} / target R$${Number(alert.cpl_target).toFixed(0)}`
+                          : alert.spend !== null && alert.spend !== undefined
+                          ? `Spend R$${Number(alert.spend).toFixed(2)} sem leads`
+                          : alert.message}
+                      </p>
+                      <p className="text-[9px] text-slate-600 mt-1">
+                        {new Date(alert.created_at).toLocaleString("pt-BR", {
+                          timeZone: "America/Sao_Paulo",
+                          day: "2-digit", month: "2-digit",
+                          hour: "2-digit", minute: "2-digit",
+                        })}
+                      </p>
+                    </div>
+
+                    {/* Resolve button */}
+                    {!alert.resolved && (
+                      <button
+                        onClick={() => handleResolve(alert.id)}
+                        disabled={resolving === alert.id}
+                        className="shrink-0 text-slate-600 hover:text-slate-300 transition-colors disabled:opacity-50 mt-0.5"
+                        title="Resolver alerta"
+                      >
+                        {resolving === alert.id ? (
+                          <div className="w-3.5 h-3.5 border-2 border-slate-500 border-t-transparent rounded-full animate-spin" />
+                        ) : (
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                            <path d="M20 6L9 17l-5-5" />
+                          </svg>
+                        )}
+                      </button>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function Header() {
   const { nodes, fetchGraph, loading } = useGraphStore();
 
@@ -691,6 +917,10 @@ export function Header() {
       {/* Actions */}
       <div className="flex items-center gap-2">
         <GoogleDriveButton />
+
+        <div className="w-px h-6 bg-slate-700/50" />
+
+        <AlertBell />
 
         <div className="w-px h-6 bg-slate-700/50" />
 

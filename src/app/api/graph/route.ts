@@ -42,6 +42,7 @@ export async function GET(req: NextRequest) {
         (SELECT SUM(m.impressions) FROM metrics m WHERE m.creative_id = c.id) as total_impressions,
         (SELECT SUM(m.clicks) FROM metrics m WHERE m.creative_id = c.id) as total_clicks,
         (SELECT SUM(m.leads) FROM metrics m WHERE m.creative_id = c.id) as total_leads,
+        (SELECT COALESCE(SUM(m.landing_page_views),0) FROM metrics m WHERE m.creative_id = c.id) as total_lpv,
         (SELECT AVG(m.cpm) FROM metrics m WHERE m.creative_id = c.id) as avg_cpm,
         (SELECT AVG(m.ctr) FROM metrics m WHERE m.creative_id = c.id) as avg_ctr,
         (SELECT AVG(m.cpc) FROM metrics m WHERE m.creative_id = c.id AND m.cpc > 0) as avg_cpc,
@@ -102,6 +103,7 @@ export async function GET(req: NextRequest) {
       totalImpressions: number;
       totalClicks: number;
       totalLeads: number;
+      totalLpv: number;
       avgCpm: number;
       avgCtr: number;
       avgCpc: number;
@@ -119,6 +121,10 @@ export async function GET(req: NextRequest) {
       const feedLeads = Number(group.feed?.total_leads ?? 0);
       const storiesLeads = Number(group.stories?.total_leads ?? 0);
       const totalLeads = feedLeads + storiesLeads;
+
+      const feedLpv = Number(group.feed?.total_lpv ?? 0);
+      const storiesLpv = Number(group.stories?.total_lpv ?? 0);
+      const totalLpv = feedLpv + storiesLpv;
 
       const feedImpressions = Number(group.feed?.total_impressions ?? 0);
       const storiesImpressions = Number(group.stories?.total_impressions ?? 0);
@@ -152,6 +158,7 @@ export async function GET(req: NextRequest) {
         totalImpressions,
         totalClicks,
         totalLeads,
+        totalLpv,
         avgCpm,
         avgCtr,
         avgCpc,
@@ -230,6 +237,7 @@ export async function GET(req: NextRequest) {
               total_impressions: m.totalImpressions,
               total_clicks: m.totalClicks,
               total_leads: m.totalLeads,
+              total_lpv: m.totalLpv,
               avg_cpm: m.avgCpm,
               avg_ctr: m.avgCtr,
               avg_cpc: m.avgCpc,

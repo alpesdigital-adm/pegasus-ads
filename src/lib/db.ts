@@ -274,6 +274,52 @@ export async function initDb(): Promise<DbClient> {
       )
     `);
 
+    // ── Tarefa 2.8: LPV (Landing Page Views) na tabela metrics ──
+    await pool.query(`
+      ALTER TABLE metrics
+      ADD COLUMN IF NOT EXISTS landing_page_views INTEGER DEFAULT 0
+    `);
+
+    // ── Tarefa 2.3: Breakdowns demográficos (idade × gênero) ──
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS metrics_demographics (
+        id TEXT PRIMARY KEY,
+        creative_id TEXT NOT NULL REFERENCES creatives(id),
+        date TEXT NOT NULL,
+        age TEXT NOT NULL DEFAULT '',
+        gender TEXT NOT NULL DEFAULT '',
+        spend DOUBLE PRECISION DEFAULT 0,
+        impressions INTEGER DEFAULT 0,
+        cpm DOUBLE PRECISION DEFAULT 0,
+        ctr DOUBLE PRECISION DEFAULT 0,
+        clicks INTEGER DEFAULT 0,
+        cpc DOUBLE PRECISION DEFAULT 0,
+        leads INTEGER DEFAULT 0,
+        cpl DOUBLE PRECISION,
+        meta_ad_id TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(creative_id, date, age, gender)
+      )
+    `);
+
+    // ── Tarefa 2.9: Alertas de anomalia ──
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS alerts (
+        id TEXT PRIMARY KEY,
+        creative_id TEXT REFERENCES creatives(id),
+        campaign_key TEXT,
+        date TEXT NOT NULL,
+        level TEXT NOT NULL,
+        rule_name TEXT,
+        message TEXT NOT NULL,
+        spend DOUBLE PRECISION,
+        cpl DOUBLE PRECISION,
+        cpl_target DOUBLE PRECISION,
+        resolved BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
     // ── Indexes: existing tables ──
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_creatives_parent ON creatives(parent_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_creatives_status ON creatives(status)`);
@@ -297,6 +343,17 @@ export async function initDb(): Promise<DbClient> {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_metrics_breakdowns_creative ON metrics_breakdowns(creative_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_metrics_breakdowns_date ON metrics_breakdowns(date)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_metrics_breakdowns_platform ON metrics_breakdowns(publisher_platform)`);
+
+    // Índices metrics_demographics
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_metrics_demographics_creative ON metrics_demographics(creative_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_metrics_demographics_date ON metrics_demographics(date)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_metrics_demographics_age ON metrics_demographics(age)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_metrics_demographics_gender ON metrics_demographics(gender)`);
+
+    // Índices alerts
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_alerts_creative ON alerts(creative_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_alerts_date ON alerts(date)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_alerts_resolved ON alerts(resolved)`);
   } finally {
     await pool.end();
   }

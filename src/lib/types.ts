@@ -63,6 +63,7 @@ export interface MetricsAggregate {
   total_clicks: number;
   avg_cpc: number;
   total_leads: number;
+  total_lpv: number;
   cpl: number | null;
 }
 

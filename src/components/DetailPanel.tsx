@@ -1,7 +1,7 @@
 "use client";
 
 import { useGraphStore } from "@/store/graph";
-import type { GraphNode } from "@/lib/types";
+import type { GraphNode, MetricsAggregate } from "@/lib/types";
 
 const statusConfig: Record<string, { color: string; label: string }> = {
   generated: { color: "#64748b", label: "Gerado" },
@@ -101,6 +101,14 @@ export function DetailPanel() {
               </p>
             </div>
 
+            {/* Funil de Conversão */}
+            <div className="space-y-1">
+              <h3 className="text-[10px] uppercase tracking-widest text-slate-500 font-semibold">
+                Funil
+              </h3>
+              <FunnelChart metrics={metrics} />
+            </div>
+
             {/* Grid */}
             <div className="grid grid-cols-2 gap-2">
               <MetricCard label="Gasto" value={`R$${metrics.total_spend.toFixed(2)}`} />
@@ -137,6 +145,61 @@ export function DetailPanel() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ── Funil de Conversão ────────────────────────────────────────────────────────
+
+function FunnelChart({ metrics }: { metrics: MetricsAggregate }) {
+  const imp   = metrics.total_impressions;
+  const clicks = metrics.total_clicks;
+  const lpv   = metrics.total_lpv ?? 0;
+  const leads = metrics.total_leads;
+
+  // Taxa de conversão entre cada etapa
+  const ctrPct    = imp   > 0 ? ((clicks / imp)   * 100).toFixed(1) : null;
+  const lpvPct    = clicks > 0 ? ((lpv   / clicks) * 100).toFixed(1) : null;
+  const convPct   = lpv   > 0 ? ((leads  / lpv)   * 100).toFixed(1) : null;
+
+  // Largura relativa das barras (maior etapa = 100%)
+  const max = Math.max(imp, 1);
+  const bars = [
+    { label: "Impressões", value: imp,    width: 100,                           color: "#3b82f6", rate: null },
+    { label: "Clicks",     value: clicks, width: imp   > 0 ? (clicks / max * 100) : 0, color: "#8b5cf6", rate: ctrPct  ? `CTR ${ctrPct}%`   : null },
+    { label: "LPV",        value: lpv,    width: imp   > 0 ? (lpv    / max * 100) : 0, color: "#06b6d4", rate: lpvPct  ? `${lpvPct}% clicks` : null },
+    { label: "Leads",      value: leads,  width: imp   > 0 ? (leads  / max * 100) : 0, color: "#10b981", rate: convPct ? `${convPct}% LPV`   : null },
+  ];
+
+  return (
+    <div className="rounded-xl border border-slate-700/30 overflow-hidden">
+      {bars.map((bar, i) => (
+        <div key={bar.label} className={`px-3 py-2 ${i < bars.length - 1 ? "border-b border-slate-800/50" : ""}`}>
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[9px] text-slate-500 uppercase tracking-wider">{bar.label}</span>
+            <div className="flex items-center gap-2">
+              {bar.rate && (
+                <span className="text-[9px] text-slate-600">{bar.rate}</span>
+              )}
+              <span className="text-[11px] font-bold text-slate-300">
+                {bar.value > 1000
+                  ? (bar.value / 1000).toFixed(1) + "k"
+                  : bar.value.toLocaleString("pt-BR")}
+              </span>
+            </div>
+          </div>
+          <div className="h-1.5 rounded-full bg-slate-800/60 overflow-hidden">
+            <div
+              className="h-full rounded-full transition-all duration-500"
+              style={{
+                width: `${Math.max(bar.width, bar.value > 0 ? 2 : 0)}%`,
+                background: bar.color,
+                opacity: 0.8,
+              }}
+            />
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

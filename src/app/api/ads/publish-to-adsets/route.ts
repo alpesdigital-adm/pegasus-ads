@@ -91,6 +91,7 @@ interface ModelAdInfo {
   instagramUserId: string;
   accountId: string;
   urlTags: string;
+  displayLink: string;
 }
 
 /**
@@ -100,9 +101,9 @@ async function fetchModelAd(adId: string): Promise<ModelAdInfo> {
   await rateLimit();
   const token = getToken();
 
-  // Buscar ad com creative expandido
+  // Buscar ad com creative expandido + effective_object_story_spec (versão resolvida)
   const adData = await metaFetch<Record<string, unknown>>(
-    `${META_BASE_URL}/${adId}?fields=account_id,creative{id,object_story_spec,asset_feed_spec,url_tags}&access_token=${token}`
+    `${META_BASE_URL}/${adId}?fields=account_id,creative{id,object_story_spec,asset_feed_spec,effective_object_story_spec,url_tags}&access_token=${token}`
   );
 
   const accountId = (adData.account_id as string) || "";
@@ -112,29 +113,67 @@ async function fetchModelAd(adId: string): Promise<ModelAdInfo> {
   let pageId = "";
   let instagramUserId = "";
   let urlTags = "";
+  let displayLink = "";
 
   // Extract from asset_feed_spec
   const afs = creative?.asset_feed_spec as Record<string, unknown> | undefined;
   if (afs) {
-    const linkUrls = afs.link_urls as Array<{ website_url: string }> | undefined;
-    if (linkUrls?.[0]) link = linkUrls[0].website_url;
+    const linkUrls = afs.link_urls as Array<{ website_url: string; display_url?: string }> | undefined;
+    if (linkUrls?.[0]) {
+      link = linkUrls[0].website_url;
+      if (linkUrls[0].display_url) displayLink = linkUrls[0].display_url;
+    }
   }
 
-  // Extract page_id and instagram_user_id from object_story_spec
+  // Extract page_id and instagram from object_story_spec
+  // Meta uses instagram_actor_id in standard creatives, instagram_user_id in asset_feed_spec ones
   const oss = creative?.object_story_spec as Record<string, unknown> | undefined;
   if (oss) {
     pageId = (oss.page_id as string) || "";
-    instagramUserId = (oss.instagram_actor_id as string) || "";
+    instagramUserId =
+      (oss.instagram_actor_id as string) ||
+      (oss.instagram_user_id as string) ||
+      "";
+  }
+
+  // Fallback: effective_object_story_spec always has the resolved fields
+  const eoss = creative?.effective_object_story_spec as Record<string, unknown> | undefined;
+  if (eoss) {
+    if (!pageId) pageId = (eoss.page_id as string) || "";
+    if (!instagramUserId) {
+      instagramUserId =
+        (eoss.instagram_actor_id as string) ||
+        (eoss.instagram_user_id as string) ||
+        "";
+    }
+    // Extract display_link (caption) and link from effective link_data
+    const eLinkData = eoss.link_data as Record<string, unknown> | undefined;
+    if (eLinkData) {
+      if (!link) link = (eLinkData.link as string) || "";
+      if (!displayLink) displayLink = (eLinkData.caption as string) || "";
+    }
   }
 
   // url_tags
   urlTags = (creative?.url_tags as string) || "";
 
-  // If link not found in asset_feed_spec, try object_story_spec
+  // If link not found yet, try object_story_spec.link_data
   if (!link && oss) {
     const linkData = oss.link_data as Record<string, unknown> | undefined;
-    if (linkData) link = (linkData.link as string) || "";
+    if (linkData) {
+      link = (linkData.link as string) || "";
+      if (!displayLink) displayLink = (linkData.caption as string) || "";
+    }
   }
+
+  // Auto-generate display_link from link hostname if still empty
+  if (!displayLink && link) {
+    try {
+      displayLink = new URL(link).hostname;
+    } catch { /* ignore */ }
+  }
+
+  console.log(`[PublishToAdSets] Model ad extracted: page=${pageId}, ig=${instagramUserId}, link=${link}, displayLink=${displayLink}`);
 
   return {
     link,
@@ -142,6 +181,7 @@ async function fetchModelAd(adId: string): Promise<ModelAdInfo> {
     instagramUserId,
     accountId: accountId.startsWith("act_") ? accountId : `act_${accountId}`,
     urlTags,
+    displayLink,
   };
 }
 
@@ -206,6 +246,7 @@ async function createCreativeSingleImage(params: {
   link: string;
   ctaType: string;
   urlTags: string;
+  displayLink: string;
 }): Promise<{ id: string }> {
   await rateLimit();
   const token = getToken();
@@ -213,24 +254,38 @@ async function createCreativeSingleImage(params: {
   const {
     accountId, name, pageId, instagramUserId,
     imageHash, body: bodyText, title, description, link, ctaType, urlTags,
+    displayLink,
   } = params;
 
   // object_story_spec com link_data — formato padrão (não-dinâmico)
-  const objectStorySpec = {
-    page_id: pageId,
-    instagram_actor_id: instagramUserId,
-    link_data: {
-      image_hash: imageHash,
-      link: link,
-      message: bodyText,
-      name: title,
-      description: description,
-      call_to_action: {
-        type: ctaType,
-        value: { link: link },
-      },
+  // instagram_actor_id = conta IG vinculada
+  // caption = link de exibição (display link)
+  const linkData: Record<string, unknown> = {
+    image_hash: imageHash,
+    link: link,
+    message: bodyText,
+    name: title,
+    description: description,
+    call_to_action: {
+      type: ctaType,
+      value: { link: link },
     },
   };
+
+  // Incluir caption (display link) se disponível
+  if (displayLink) {
+    linkData.caption = displayLink;
+  }
+
+  const objectStorySpec: Record<string, unknown> = {
+    page_id: pageId,
+    link_data: linkData,
+  };
+
+  // Incluir instagram_actor_id se disponível
+  if (instagramUserId) {
+    objectStorySpec.instagram_actor_id = instagramUserId;
+  }
 
   const formParams: Record<string, string> = {
     name,
@@ -361,6 +416,7 @@ export async function POST(req: NextRequest) {
           link: modelAd.link,
           ctaType: ad.cta_type,
           urlTags: modelAd.urlTags,
+          displayLink: modelAd.displayLink,
         });
         adResult.creative_id = creative.id;
         console.log(`[PublishToAdSets] Creative created: ${creative.id}`);

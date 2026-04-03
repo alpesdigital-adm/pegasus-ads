@@ -51,7 +51,7 @@ export const KNOWN_CAMPAIGNS: Record<string, CampaignDefaults> = {
     dailyBudgetCents: "8000", // R$80/dia
     promotedObject: {
       pixel_id: "789670008816798",
-      custom_event_type: "Lead",
+      custom_event_type: "LEAD",
     },
     urlTagsTemplate: UTM_TEMPLATE,
     metaTokenEnvVar: "META_TOKEN_RAT", // Conta RAT Academy — fallback: META_SYSTEM_USER_TOKEN

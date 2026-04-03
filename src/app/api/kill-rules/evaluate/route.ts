@@ -72,6 +72,7 @@ export async function POST(req: NextRequest) {
       c.id,
       c.name,
       c.generation,
+      c.is_control,
       c.status,
       c.parent_id,
       SUM(m.spend)                                          AS total_spend,
@@ -82,8 +83,8 @@ export async function POST(req: NextRequest) {
       COUNT(DISTINCT m.date)                                AS days_count
     FROM creatives c
     JOIN metrics m ON m.creative_id = c.id
-    GROUP BY c.id, c.name, c.generation, c.status, c.parent_id
-    ORDER BY c.generation ASC, c.created_at ASC
+    GROUP BY c.id, c.name, c.generation, c.is_control, c.status, c.parent_id
+    ORDER BY c.is_control DESC NULLS LAST, c.generation ASC, c.created_at ASC
   `);
 
   if (result.rows.length === 0) {
@@ -98,15 +99,23 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // ── 2. Identificar control CPL (generation=0) ──
+  // ── 2. Identificar control CPL (is_control=true > generation=0) ──
   let controlCpl: number | null = null;
+  // Primeiro tenta is_control=true
   for (const row of result.rows) {
-    if ((row.generation as number) === 0) {
+    if (row.is_control) {
       const totalSpend = Number(row.total_spend ?? 0);
       const totalLeads = Number(row.total_leads ?? 0);
-      if (totalLeads > 0) {
-        controlCpl = totalSpend / totalLeads;
-        break;
+      if (totalLeads > 0) { controlCpl = totalSpend / totalLeads; break; }
+    }
+  }
+  // Fallback: generation=0
+  if (controlCpl === null) {
+    for (const row of result.rows) {
+      if ((row.generation as number) === 0) {
+        const totalSpend = Number(row.total_spend ?? 0);
+        const totalLeads = Number(row.total_leads ?? 0);
+        if (totalLeads > 0) { controlCpl = totalSpend / totalLeads; break; }
       }
     }
   }

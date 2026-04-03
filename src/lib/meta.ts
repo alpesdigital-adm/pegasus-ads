@@ -5,12 +5,40 @@
  * estão centralizadas aqui. Camada fina sobre HTTP, sem SDK.
  */
 
+import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
+
 const META_API_VERSION = "v25.0";
 const META_BASE_URL = `https://graph.facebook.com/${META_API_VERSION}`;
 
 // ── Helpers ──
 
-function getToken(): string {
+/**
+ * Mapa accountId → token, construído a partir de KNOWN_CAMPAIGNS.
+ * Permite usar tokens distintos por conta Meta (Tarefa 4.2).
+ */
+function buildAccountTokenMap(): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const campaign of Object.values(KNOWN_CAMPAIGNS)) {
+    const { metaAccountId, metaTokenEnvVar } = campaign;
+    if (metaTokenEnvVar && metaAccountId) {
+      const token = process.env[metaTokenEnvVar];
+      if (token) map[metaAccountId] = token;
+    }
+  }
+  return map;
+}
+
+/**
+ * Retorna o access token correto para uma conta Meta.
+ * Ordem de prioridade:
+ *  1. Token específico da conta (via metaTokenEnvVar em campaigns.ts)
+ *  2. META_SYSTEM_USER_TOKEN (token padrão / legado)
+ */
+function getToken(accountId?: string): string {
+  if (accountId) {
+    const map = buildAccountTokenMap();
+    if (map[accountId]) return map[accountId];
+  }
   const token = process.env.META_SYSTEM_USER_TOKEN;
   if (!token) throw new Error("META_SYSTEM_USER_TOKEN env var is required");
   return token;
@@ -37,9 +65,9 @@ async function metaFetch<T = Record<string, unknown>>(
   return data as T;
 }
 
-function formBody(params: Record<string, string>): URLSearchParams {
+function formBody(params: Record<string, string>, accountId?: string): URLSearchParams {
   const body = new URLSearchParams();
-  body.append("access_token", getToken());
+  body.append("access_token", getToken(accountId));
   for (const [key, value] of Object.entries(params)) {
     body.append(key, value);
   }
@@ -77,9 +105,9 @@ export async function uploadImage(
 
   const boundary = `----MetaUpload${Date.now()}`;
   const header = `--${boundary}\r\nContent-Disposition: form-data; name="filename"; filename="${fileName}"\r\nContent-Type: image/png\r\n\r\n`;
-  const tokenPart = `\r\n--${boundary}\r\nContent-Disposition: form-data; name="access_token"\r\n\r\n${getToken()}\r\n--${boundary}--`;
+  const tokenPart = `\r\n--${boundary}\r\nContent-Disposition: form-data; name="access_token"\r\n\r\n${getToken(accountId)}\r\n--${boundary}--`;
 
-  const body = Buffer.concat([
+  const bodyWithCorrectToken = Buffer.concat([
     Buffer.from(header),
     imageBuffer,
     Buffer.from(tokenPart),
@@ -90,7 +118,7 @@ export async function uploadImage(
     {
       method: "POST",
       headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
-      body,
+      body: bodyWithCorrectToken,
     }
   );
 
@@ -118,7 +146,7 @@ export async function createAdLabel(
     {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: formBody({ name }),
+      body: formBody({ name }, accountId),
     }
   );
 
@@ -237,7 +265,7 @@ export async function createCreative(params: CreateCreativeParams): Promise<Crea
     {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: formBody(formParams),
+      body: formBody(formParams, accountId),
     }
   );
 
@@ -294,7 +322,7 @@ export async function createAdSet(params: CreateAdSetParams): Promise<AdSetResul
     {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: formBody(formParams),
+      body: formBody(formParams, accountId),
     }
   );
 
@@ -328,7 +356,7 @@ export async function createAd(params: CreateAdParams): Promise<AdResult> {
         adset_id: params.adSetId,
         creative: JSON.stringify({ creative_id: params.creativeId }),
         status: params.status || "ACTIVE",
-      }),
+      }, params.accountId),
     }
   );
 
@@ -726,7 +754,7 @@ export async function getAccountAdsInsights(
     level: "ad",
     time_range: JSON.stringify({ since: dateFrom, until: dateTo }),
     time_increment: "1",
-    access_token: getToken(),
+    access_token: getToken(accountId), // token específico por conta (Tarefa 4.2)
     limit: "200",
   });
 

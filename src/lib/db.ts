@@ -274,6 +274,28 @@ export async function initDb(): Promise<DbClient> {
       )
     `);
 
+    // ── Tarefa 3.2: is_control na tabela creatives ──
+    await pool.query(`
+      ALTER TABLE creatives
+      ADD COLUMN IF NOT EXISTS is_control BOOLEAN DEFAULT FALSE
+    `);
+    // Inicializar: o primeiro AD com generation=0 que tenha métricas vira o controle
+    // (somente se nenhum criativo já tem is_control=true)
+    await pool.query(`
+      UPDATE creatives
+      SET is_control = TRUE
+      WHERE id IN (
+        SELECT c.id FROM creatives c
+        JOIN metrics m ON m.creative_id = c.id
+        WHERE c.generation = 0
+        GROUP BY c.id
+        HAVING SUM(m.leads) > 0
+        ORDER BY c.created_at ASC
+        LIMIT 2
+      )
+      AND NOT EXISTS (SELECT 1 FROM creatives WHERE is_control = TRUE)
+    `);
+
     // ── Tarefa 2.8: LPV (Landing Page Views) na tabela metrics ──
     await pool.query(`
       ALTER TABLE metrics
@@ -321,6 +343,7 @@ export async function initDb(): Promise<DbClient> {
     `);
 
     // ── Indexes: existing tables ──
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_creatives_control ON creatives(is_control) WHERE is_control = TRUE`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_creatives_parent ON creatives(parent_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_creatives_status ON creatives(status)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_edges_source ON creative_edges(source_id)`);

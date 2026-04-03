@@ -167,16 +167,18 @@ export async function GET(req: NextRequest) {
       };
     }
 
-    // ── Identificar controlCpl: nó com generation=0, que tenha métricas ──
+    // ── Identificar controlCpl: is_control=true tem prioridade; fallback para generation=0 ──
     let controlCpl: number | null = null;
     for (const [baseName, group] of Object.entries(adGroups)) {
       const primary = group.feed || group.stories;
       if (!primary) continue;
-      if ((primary.generation as number) === 0) {
+      const isControl = !!(primary.is_control);
+      const isGen0    = (primary.generation as number) === 0;
+      if (isControl || isGen0) {
         const m = nodeMetricsMap[baseName];
         if (m && m.cpl !== null) {
           controlCpl = m.cpl;
-          break;
+          if (isControl) break; // is_control explícito tem prioridade — parar aqui
         }
       }
     }
@@ -227,6 +229,7 @@ export async function GET(req: NextRequest) {
         prompt: primary.prompt as string | undefined,
         created_at: primary.created_at as string,
         placements,
+        feed_id: group.feed?.id as string | undefined,
         stories_id: group.stories?.id as string | undefined,
         stories_blob_url: group.stories?.blob_url as string | undefined,
         cpl_target: cplTarget,
@@ -244,6 +247,7 @@ export async function GET(req: NextRequest) {
               cpl: m.cpl,
             }
           : undefined,
+        is_control: !!(primary.is_control) || (primary.generation as number) === 0,
       };
 
       nodes.push(node);

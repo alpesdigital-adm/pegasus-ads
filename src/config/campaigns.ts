@@ -19,6 +19,12 @@ export interface CampaignDefaults {
   dailyBudgetCents: string;
   promotedObject: Record<string, unknown>;
   urlTagsTemplate: string;
+  /**
+   * Nome da env var que contém o access token Meta para esta conta.
+   * Se omitido, usa META_SYSTEM_USER_TOKEN como fallback.
+   * Ex: "META_TOKEN_RAT" → process.env.META_TOKEN_RAT
+   */
+  metaTokenEnvVar?: string;
 }
 
 /**
@@ -48,7 +54,16 @@ export const KNOWN_CAMPAIGNS: Record<string, CampaignDefaults> = {
       custom_event_type: "Lead",
     },
     urlTagsTemplate: UTM_TEMPLATE,
+    metaTokenEnvVar: "META_TOKEN_RAT", // Conta RAT Academy — fallback: META_SYSTEM_USER_TOKEN
   },
+
+  // ── Conta Alpes Digital (para futuras campanhas de outros produtos) ──
+  // ALPES_EXAMPLE: {
+  //   name: "ALPES__EXEMPLO",
+  //   metaAccountId: "act_XXXXXXXXXXXXXXXXX",
+  //   metaTokenEnvVar: "META_TOKEN_ALPES",
+  //   ...
+  // },
 };
 
 /**

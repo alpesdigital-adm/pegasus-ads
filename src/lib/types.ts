@@ -85,6 +85,8 @@ export interface GraphNode {
   created_at: string;
   /** Placements disponíveis para este criativo (ex: ["feed", "stories"]) */
   placements?: string[];
+  /** ID (UUID) do criativo Feed no DB */
+  feed_id?: string;
   /** ID do criativo Stories pareado (quando agrupado) */
   stories_id?: string;
   /** Blob URL da versão Stories (quando agrupado) */
@@ -93,6 +95,8 @@ export interface GraphNode {
   kill_rule?: KillRuleResult;
   /** CPL target da campanha (para colorização dinâmica) */
   cpl_target?: number;
+  /** Este AD é o controle atual da campanha */
+  is_control?: boolean;
 }
 
 export interface GraphEdge {

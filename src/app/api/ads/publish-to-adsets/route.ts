@@ -19,7 +19,11 @@
  *       "description": "Descrição...",
  *       "cta_type": "DOWNLOAD"
  *     }
- *   ]
+ *   ],
+ *   "partnership": {                          // opcional
+ *     "sponsor_id": "17841400601834755",
+ *     "testimonial": "Texto do depoimento"
+ *   }
  * }
  *
  * O endpoint:
@@ -83,6 +87,11 @@ interface AdSpec {
   title: string;
   description: string;
   cta_type: string;
+}
+
+interface PartnershipSpec {
+  sponsor_id: string;       // Instagram User ID do parceiro
+  testimonial?: string;     // Texto do depoimento (branded_content.testimonial)
 }
 
 interface ModelAdInfo {
@@ -229,6 +238,7 @@ async function createCreativeSingleImage(params: {
   ctaType: string;
   urlTags: string;
   displayLink: string;
+  partnership?: PartnershipSpec;
 }): Promise<{ id: string }> {
   await rateLimit();
   const token = getToken();
@@ -236,7 +246,7 @@ async function createCreativeSingleImage(params: {
   const {
     accountId, name, pageId, instagramUserId,
     imageHash, body: bodyText, title, description, link, ctaType, urlTags,
-    displayLink,
+    displayLink, partnership,
   } = params;
 
   // object_story_spec com link_data — formato padrão (não-dinâmico)
@@ -276,6 +286,19 @@ async function createCreativeSingleImage(params: {
   };
 
   if (urlTags) formParams.url_tags = urlTags;
+
+  // Partnership / branded content fields (top-level on adcreatives)
+  if (partnership?.sponsor_id) {
+    formParams.instagram_branded_content = JSON.stringify({
+      sponsor_id: partnership.sponsor_id,
+    });
+    const brandedContent: Record<string, unknown> = { ad_format: 1 };
+    if (partnership.testimonial) {
+      brandedContent.testimonial = partnership.testimonial;
+    }
+    formParams.branded_content = JSON.stringify(brandedContent);
+    console.log(`[PublishToAdSets] Partnership: sponsor_id=${partnership.sponsor_id}, testimonial="${partnership.testimonial || ""}"`);
+  }
 
   const data = await metaFetch<{ id: string }>(
     `${META_BASE_URL}/${accountId}/adcreatives`,
@@ -329,10 +352,11 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
 
-    const { campaign_id, model_ad_id, ads } = body as {
+    const { campaign_id, model_ad_id, ads, partnership } = body as {
       campaign_id: string;
       model_ad_id: string;
       ads: AdSpec[];
+      partnership?: PartnershipSpec;
     };
 
     if (!campaign_id || !model_ad_id || !ads || ads.length === 0) {
@@ -399,6 +423,7 @@ export async function POST(req: NextRequest) {
           ctaType: ad.cta_type,
           urlTags: modelAd.urlTags,
           displayLink: modelAd.displayLink,
+          partnership,
         });
         adResult.creative_id = creative.id;
         console.log(`[PublishToAdSets] Creative created: ${creative.id}`);

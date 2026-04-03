@@ -19,7 +19,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getValidAccessToken } from "@/lib/google-drive";
+import { getValidAccessToken, getSelectedFolderId } from "@/lib/google-drive";
 import { getDb, initDb } from "@/lib/db";
 import { evaluateKillRules } from "@/config/kill-rules";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
@@ -212,6 +212,29 @@ async function createSpreadsheet(accessToken: string, title: string): Promise<{ 
   });
   if (!res.ok) throw new Error(`Sheets create error ${res.status}: ${await res.text()}`);
   return res.json();
+}
+
+// ── Mover planilha para a pasta dos criativos ──────────────────────────────────
+
+async function moveToFolder(accessToken: string, fileId: string, folderId: string) {
+  // Primeiro obtém os parents atuais para removê-los
+  const metaRes = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?fields=parents&supportsAllDrives=true`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  const meta = metaRes.ok ? (await metaRes.json()) as { parents?: string[] } : { parents: [] };
+  const removeParents = (meta.parents ?? []).join(",");
+
+  const params = new URLSearchParams({ addParents: folderId, supportsAllDrives: "true", fields: "id" });
+  if (removeParents) params.set("removeParents", removeParents);
+
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?${params.toString()}`,
+    { method: "PATCH", headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" }, body: "{}" }
+  );
+  if (!res.ok) {
+    console.warn("[Drive] moveToFolder error:", res.status, await res.text());
+  }
 }
 
 // ── Formatar header rows ───────────────────────────────────────────────────────
@@ -464,6 +487,12 @@ export async function POST(req: NextRequest) {
       const created = await createSpreadsheet(accessToken, "T7 - Registro de Testes de Criativos");
       spreadsheetId = created.spreadsheetId;
       action = "created";
+
+      // Mover para a pasta dos criativos (se configurada)
+      const folderId = await getSelectedFolderId();
+      if (folderId) {
+        await moveToFolder(accessToken, spreadsheetId, folderId);
+      }
 
       // Formatar headers (bold + freeze)
       await formatHeaders(accessToken, spreadsheetId);

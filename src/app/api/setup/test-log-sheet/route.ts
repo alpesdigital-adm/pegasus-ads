@@ -412,8 +412,8 @@ async function deployOrUpdateScript(accessToken: string, spreadsheetId: string) 
       await setSetting("apps_script_id", scriptId);
     } else {
       const errText = await createRes.text();
-      console.warn("[Apps Script] Could not create project:", createRes.status, errText);
-      return null;
+      // Propaga o erro real para surfaçar no script_warning
+      throw new Error(`Apps Script API ${createRes.status}: ${errText}`);
     }
   }
 
@@ -424,10 +424,10 @@ async function deployOrUpdateScript(accessToken: string, spreadsheetId: string) 
   });
 
   if (!contentRes.ok) {
-    console.warn("[Apps Script] Could not update content:", contentRes.status, await contentRes.text());
+    const errText = await contentRes.text();
     // Se 404, script foi deletado — limpar ID para recriar na próxima chamada
     if (contentRes.status === 404) await setSetting("apps_script_id", "");
-    return null;
+    throw new Error(`Apps Script content ${contentRes.status}: ${errText}`);
   }
 
   return scriptId;

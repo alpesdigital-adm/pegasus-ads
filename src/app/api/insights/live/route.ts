@@ -39,7 +39,7 @@ export async function GET(req: NextRequest) {
     const fields = "ad_id,ad_name,adset_name,spend,impressions,cpm,ctr,clicks,cpc,reach,frequency,actions,cost_per_action_type";
     const timeRange = JSON.stringify({ since: dateFrom, until: dateTo });
 
-    const url = `${META_API}/act_3601611403432716/insights?level=ad&campaign_ids=["${campaignId}"]&fields=${fields}&time_range=${timeRange}&limit=200&access_token=${token}`;
+    const url = `${META_API}/${campaignId}/insights?level=ad&fields=${fields}&time_range=${timeRange}&limit=200&access_token=${token}`;
     const res = await fetch(url);
     if (!res.ok) {
       const err = await res.json();

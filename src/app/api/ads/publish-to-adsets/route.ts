@@ -191,7 +191,8 @@ async function uploadImage(accountId: string, imageBuffer: Buffer, filename: str
 }
 
 /**
- * Cria creative com asset_feed_spec para imagem única (Feed only).
+ * Cria creative com object_story_spec + link_data (formato padrão, NÃO dinâmico).
+ * Permite múltiplos ads por ad set (diferente de asset_feed_spec que força criativo dinâmico).
  */
 async function createCreativeSingleImage(params: {
   accountId: string;
@@ -214,38 +215,26 @@ async function createCreativeSingleImage(params: {
     imageHash, body: bodyText, title, description, link, ctaType, urlTags,
   } = params;
 
-  // asset_feed_spec para imagem única
-  const assetFeedSpec = {
-    ad_formats: ["AUTOMATIC_FORMAT"],
-    images: [
-      { hash: imageHash },
-    ],
-    bodies: [{ text: bodyText }],
-    titles: [{ text: title }],
-    descriptions: [{ text: description }],
-    link_urls: [{ website_url: link, display_url: new URL(link).hostname }],
-    call_to_action_types: [ctaType],
-  };
-
+  // object_story_spec com link_data — formato padrão (não-dinâmico)
   const objectStorySpec = {
     page_id: pageId,
-    instagram_user_id: instagramUserId,
-  };
-
-  const degreesOfFreedomSpec = {
-    creative_features_spec: {
-      image_templates: { enroll_status: "OPT_IN" },
-      image_touchups: { enroll_status: "OPT_IN" },
-      image_brightness_and_contrast: { enroll_status: "OPT_IN" },
-      inline_comment: { enroll_status: "OPT_IN" },
+    instagram_actor_id: instagramUserId,
+    link_data: {
+      image_hash: imageHash,
+      link: link,
+      message: bodyText,
+      name: title,
+      description: description,
+      call_to_action: {
+        type: ctaType,
+        value: { link: link },
+      },
     },
   };
 
   const formParams: Record<string, string> = {
     name,
     object_story_spec: JSON.stringify(objectStorySpec),
-    asset_feed_spec: JSON.stringify(assetFeedSpec),
-    degrees_of_freedom_spec: JSON.stringify(degreesOfFreedomSpec),
     access_token: token,
   };
 

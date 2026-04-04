@@ -7,7 +7,7 @@ export async function GET(req: NextRequest) {
   if (auth instanceof NextResponse) return auth;
 
   try {
-    const status = await getConnectionStatus();
+    const status = await getConnectionStatus(auth.workspace_id);
     return NextResponse.json(status);
   } catch (error) {
     console.error("Status error:", error);

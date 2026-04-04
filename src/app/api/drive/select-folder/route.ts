@@ -17,7 +17,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "folder_id is required" }, { status: 400 });
     }
 
-    await setSelectedFolderId(body.folder_id);
+    await setSelectedFolderId(auth.workspace_id, body.folder_id);
 
     return NextResponse.json({ success: true, folder_id: body.folder_id });
   } catch (error) {

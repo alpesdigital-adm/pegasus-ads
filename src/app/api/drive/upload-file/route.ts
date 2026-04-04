@@ -15,7 +15,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "file is required" }, { status: 400 });
     }
 
-    const folderId = await getSelectedFolderId();
+    const folderId = await getSelectedFolderId(auth.workspace_id);
     if (!folderId) {
       return NextResponse.json({ error: "No Google Drive folder selected" }, { status: 400 });
     }
@@ -24,7 +24,7 @@ export async function POST(req: NextRequest) {
     const name = fileName || file.name;
     const mimeType = file.type || "image/png";
 
-    const fileId = await uploadToGoogleDrive(name, buffer, mimeType, folderId);
+    const fileId = await uploadToGoogleDrive(auth.workspace_id, name, buffer, mimeType, folderId);
 
     return NextResponse.json({ success: true, file_id: fileId, file_name: name });
   } catch (error) {

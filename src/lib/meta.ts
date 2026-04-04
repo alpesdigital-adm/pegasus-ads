@@ -5,7 +5,6 @@
  * estão centralizadas aqui. Camada fina sobre HTTP, sem SDK.
  */
 
-import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
 import { resolveMetaToken } from "@/lib/workspace";
 
 const META_API_VERSION = "v25.0";
@@ -14,45 +13,10 @@ const META_BASE_URL = `https://graph.facebook.com/${META_API_VERSION}`;
 // ── Helpers ──
 
 /**
- * Mapa accountId → token, construído a partir de KNOWN_CAMPAIGNS.
- * Permite usar tokens distintos por conta Meta (Tarefa 4.2).
- * Fallback quando workspace não está disponível no contexto.
- */
-function buildAccountTokenMap(): Record<string, string> {
-  const map: Record<string, string> = {};
-  for (const campaign of Object.values(KNOWN_CAMPAIGNS)) {
-    const { metaAccountId, metaTokenEnvVar } = campaign;
-    if (metaTokenEnvVar && metaAccountId) {
-      const token = process.env[metaTokenEnvVar];
-      if (token) map[metaAccountId] = token;
-    }
-  }
-  return map;
-}
-
-/**
- * Retorna o access token correto para uma conta Meta.
- * Ordem de prioridade:
- *  1. Token do workspace (se workspaceId fornecido)
- *  2. Token específico da conta (via metaTokenEnvVar em campaigns.ts)
- *  3. META_SYSTEM_USER_TOKEN (token padrão / legado)
- */
-function getToken(accountId?: string): string {
-  if (accountId) {
-    const map = buildAccountTokenMap();
-    if (map[accountId]) return map[accountId];
-  }
-  const token = process.env.META_SYSTEM_USER_TOKEN;
-  if (!token) throw new Error("META_SYSTEM_USER_TOKEN env var is required");
-  return token;
-}
-
-/**
- * Versão async do getToken que suporta workspace-based tokens.
- * Usa resolveMetaToken do workspace module.
+ * Retorna o token Meta do workspace. Sem fallback para env vars.
  */
 export async function getTokenForWorkspace(
-  workspaceId: string | null,
+  workspaceId: string,
   accountId?: string
 ): Promise<string> {
   return resolveMetaToken(workspaceId, accountId);
@@ -79,9 +43,10 @@ async function metaFetch<T = Record<string, unknown>>(
   return data as T;
 }
 
-function formBody(params: Record<string, string>, accountId?: string): URLSearchParams {
+async function formBody(params: Record<string, string>, workspaceId: string, accountId?: string): Promise<URLSearchParams> {
+  const token = await getTokenForWorkspace(workspaceId, accountId);
   const body = new URLSearchParams();
-  body.append("access_token", getToken(accountId));
+  body.append("access_token", token);
   for (const [key, value] of Object.entries(params)) {
     body.append(key, value);
   }
@@ -113,13 +78,15 @@ interface ImageUploadResult {
 export async function uploadImage(
   accountId: string,
   imageBuffer: Buffer,
-  fileName: string
+  fileName: string,
+  workspaceId: string
 ): Promise<ImageUploadResult> {
   await rateLimit();
 
+  const token = await getTokenForWorkspace(workspaceId, accountId);
   const boundary = `----MetaUpload${Date.now()}`;
   const header = `--${boundary}\r\nContent-Disposition: form-data; name="filename"; filename="${fileName}"\r\nContent-Type: image/png\r\n\r\n`;
-  const tokenPart = `\r\n--${boundary}\r\nContent-Disposition: form-data; name="access_token"\r\n\r\n${getToken(accountId)}\r\n--${boundary}--`;
+  const tokenPart = `\r\n--${boundary}\r\nContent-Disposition: form-data; name="access_token"\r\n\r\n${token}\r\n--${boundary}--`;
 
   const bodyWithCorrectToken = Buffer.concat([
     Buffer.from(header),
@@ -151,7 +118,8 @@ interface AdLabelResult {
 
 export async function createAdLabel(
   accountId: string,
-  name: string
+  name: string,
+  workspaceId: string
 ): Promise<AdLabelResult> {
   await rateLimit();
 
@@ -160,7 +128,7 @@ export async function createAdLabel(
     {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: formBody({ name }, accountId),
+      body: await formBody({ name }, workspaceId, accountId),
     }
   );
 
@@ -171,6 +139,7 @@ export async function createAdLabel(
 
 interface CreateCreativeParams {
   accountId: string;
+  workspaceId: string;
   name: string;
   pageId: string;
   instagramUserId: string;
@@ -279,7 +248,7 @@ export async function createCreative(params: CreateCreativeParams): Promise<Crea
     {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: formBody(formParams, accountId),
+      body: await formBody(formParams, params.workspaceId, accountId),
     }
   );
 
@@ -290,6 +259,7 @@ export async function createCreative(params: CreateCreativeParams): Promise<Crea
 
 interface CreateAdSetParams {
   accountId: string;
+  workspaceId: string;
   campaignId: string;
   name: string;
   dailyBudgetCents: string;
@@ -336,7 +306,7 @@ export async function createAdSet(params: CreateAdSetParams): Promise<AdSetResul
     {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: formBody(formParams, accountId),
+      body: await formBody(formParams, params.workspaceId, accountId),
     }
   );
 
@@ -347,6 +317,7 @@ export async function createAdSet(params: CreateAdSetParams): Promise<AdSetResul
 
 interface CreateAdParams {
   accountId: string;
+  workspaceId: string;
   adSetId: string;
   creativeId: string;
   name: string;
@@ -365,12 +336,12 @@ export async function createAd(params: CreateAdParams): Promise<AdResult> {
     {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: formBody({
+      body: await formBody({
         name: params.name,
         adset_id: params.adSetId,
         creative: JSON.stringify({ creative_id: params.creativeId }),
         status: params.status || "ACTIVE",
-      }, params.accountId),
+      }, params.workspaceId, params.accountId),
     }
   );
 
@@ -384,13 +355,15 @@ export async function createAd(params: CreateAdParams): Promise<AdResult> {
  */
 export async function getAdSets(
   campaignId: string,
+  workspaceId: string,
   fields: string = "id,name,daily_budget,bid_strategy,billing_event,optimization_goal,targeting,promoted_object,attribution_spec,status"
 ): Promise<Record<string, unknown>[]> {
   await rateLimit();
 
+  const token = await getTokenForWorkspace(workspaceId);
   const params = new URLSearchParams({
     fields,
-    access_token: getToken(),
+    access_token: token,
     limit: "50",
   });
 
@@ -408,14 +381,16 @@ export async function getAdInsights(
   adId: string,
   dateFrom: string,
   dateTo: string,
+  workspaceId: string,
   fields: string = "spend,impressions,cpm,ctr,clicks,cpc,actions,cost_per_action_type"
 ): Promise<Record<string, unknown> | null> {
   await rateLimit();
 
+  const token = await getTokenForWorkspace(workspaceId);
   const params = new URLSearchParams({
     fields,
     time_range: JSON.stringify({ since: dateFrom, until: dateTo }),
-    access_token: getToken(),
+    access_token: token,
   });
 
   const data = await metaFetch<{ data: Record<string, unknown>[] }>(
@@ -429,9 +404,10 @@ export async function getAdInsights(
  * Busca informações de um ad set existente para servir de template.
  */
 export async function getAdSetTemplate(
-  campaignId: string
+  campaignId: string,
+  workspaceId: string
 ): Promise<Record<string, unknown> | null> {
-  const adSets = await getAdSets(campaignId);
+  const adSets = await getAdSets(campaignId, workspaceId);
   if (adSets.length === 0) return null;
 
   // Retorna o primeiro ad set ativo como template
@@ -444,7 +420,8 @@ export async function getAdSetTemplate(
  */
 export async function updateAdStatus(
   adId: string,
-  status: "ACTIVE" | "PAUSED" | "DELETED"
+  status: "ACTIVE" | "PAUSED" | "DELETED",
+  workspaceId: string
 ): Promise<boolean> {
   await rateLimit();
 
@@ -453,7 +430,7 @@ export async function updateAdStatus(
     {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: formBody({ status }),
+      body: await formBody({ status }, workspaceId),
     }
   );
 
@@ -465,7 +442,8 @@ export async function updateAdStatus(
  */
 export async function updateAdSetStatus(
   adSetId: string,
-  status: "ACTIVE" | "PAUSED" | "DELETED"
+  status: "ACTIVE" | "PAUSED" | "DELETED",
+  workspaceId: string
 ): Promise<boolean> {
   await rateLimit();
 
@@ -474,7 +452,7 @@ export async function updateAdSetStatus(
     {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: formBody({ status }),
+      body: await formBody({ status }, workspaceId),
     }
   );
 
@@ -496,20 +474,23 @@ interface AdContentResult {
  * Usado para replicar o conteúdo textual em novos criativos de teste.
  */
 export async function getAdContentFromCampaign(
-  campaignId: string
+  campaignId: string,
+  workspaceId: string
 ): Promise<AdContentResult | null> {
   await rateLimit();
 
   // 1. Buscar ads da campanha (via ad sets)
-  const adSets = await getAdSets(campaignId, "id");
+  const adSets = await getAdSets(campaignId, workspaceId, "id");
   if (adSets.length === 0) return null;
+
+  const token = await getTokenForWorkspace(workspaceId);
 
   // 2. Buscar ads do primeiro ad set ativo
   for (const adSet of adSets) {
     await rateLimit();
     const params = new URLSearchParams({
       fields: "id,name,status,creative{id,name,object_story_spec,asset_feed_spec}",
-      access_token: getToken(),
+      access_token: token,
       limit: "10",
     });
 
@@ -644,10 +625,12 @@ export async function getCampaignAdsInsights(
   campaignId: string,
   dateFrom: string,
   dateTo: string,
+  workspaceId: string,
   breakdown?: string
 ): Promise<AdInsightRecord[]> {
   await rateLimit();
 
+  const token = await getTokenForWorkspace(workspaceId);
   const fields = [
     "ad_id",
     "ad_name",
@@ -672,7 +655,7 @@ export async function getCampaignAdsInsights(
     level: "ad",
     time_range: JSON.stringify({ since: dateFrom, until: dateTo }),
     time_increment: "1",
-    access_token: getToken(),
+    access_token: token,
     limit: "200",
   });
 
@@ -740,10 +723,12 @@ export async function getAccountAdsInsights(
   accountId: string,
   dateFrom: string,
   dateTo: string,
+  workspaceId: string,
   campaignId?: string
 ): Promise<AdInsightRecord[]> {
   await rateLimit();
 
+  const token = await getTokenForWorkspace(workspaceId, accountId);
   const fields = [
     "ad_id",
     "ad_name",
@@ -768,7 +753,7 @@ export async function getAccountAdsInsights(
     level: "ad",
     time_range: JSON.stringify({ since: dateFrom, until: dateTo }),
     time_increment: "1",
-    access_token: getToken(accountId), // token específico por conta (Tarefa 4.2)
+    access_token: token,
     limit: "200",
   });
 

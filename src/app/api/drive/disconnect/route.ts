@@ -7,7 +7,7 @@ export async function POST(req: NextRequest) {
   if (auth instanceof NextResponse) return auth;
 
   try {
-    await disconnect();
+    await disconnect(auth.workspace_id);
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error("Disconnect error:", error);

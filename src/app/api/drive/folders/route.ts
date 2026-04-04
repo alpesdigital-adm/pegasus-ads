@@ -13,7 +13,7 @@ export async function POST(req: NextRequest) {
 
     // If no parent_id, list roots (My Drive + Shared Drives)
     if (!parentId) {
-      const roots = await listRoots();
+      const roots = await listRoots(auth.workspace_id);
       return NextResponse.json({
         type: "roots",
         items: roots.map((r) => ({
@@ -26,7 +26,7 @@ export async function POST(req: NextRequest) {
     }
 
     // List children of a specific folder
-    const folders = await listFoldersInParent(parentId, driveId || undefined);
+    const folders = await listFoldersInParent(auth.workspace_id, parentId, driveId || undefined);
     return NextResponse.json({
       type: "children",
       parent_id: parentId,

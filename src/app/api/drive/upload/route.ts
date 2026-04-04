@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Check if folder is selected
-    const folderId = await getSelectedFolderId();
+    const folderId = await getSelectedFolderId(auth.workspace_id);
     if (!folderId) {
       return NextResponse.json(
         { error: "No Google Drive folder selected" },
@@ -41,7 +41,7 @@ export async function POST(req: NextRequest) {
     const fileName = `creative-${body.creative_id}.${mimeType.split("/")[1]}`;
 
     // Upload to Google Drive
-    const fileId = await uploadToGoogleDrive(fileName, imageBuffer, mimeType, folderId);
+    const fileId = await uploadToGoogleDrive(auth.workspace_id, fileName, imageBuffer, mimeType, folderId);
 
     return NextResponse.json({ success: true, file_id: fileId });
   } catch (error) {

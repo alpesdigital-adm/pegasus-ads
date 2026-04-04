@@ -25,6 +25,7 @@ import type { PipelineStep } from "../types";
 
 export interface PublishPipelineInput {
   testRoundId: string;
+  workspaceId: string;
 }
 
 export interface PublishPipelineOutput {
@@ -97,7 +98,7 @@ export async function runPublishPipeline(
 
     // Buscar template de ad set
     console.log("[PublishPipeline] Fetching ad set template for campaign:", campaignId);
-    const adSetTemplate = await meta.getAdSetTemplate(campaignId);
+    const adSetTemplate = await meta.getAdSetTemplate(input.workspaceId, campaignId);
     if (!adSetTemplate) {
       throw new Error(`No ad set template found for campaign ${campaignId}`);
     }
@@ -157,7 +158,7 @@ export async function runPublishPipeline(
       const feedResponse = await fetch(pair.feed!.blobUrl);
       const feedBuffer = Buffer.from(await feedResponse.arrayBuffer());
       console.log(`[PublishPipeline] Feed image size: ${feedBuffer.length} bytes`);
-      const feedUpload = await meta.uploadImage(accountId, feedBuffer, `${adName}F.png`);
+      const feedUpload = await meta.uploadImage(accountId, feedBuffer, `${adName}F.png`, input.workspaceId);
       console.log(`[PublishPipeline] Feed upload OK: hash=${feedUpload.hash}`);
 
       // Fetch e upload Stories
@@ -165,7 +166,7 @@ export async function runPublishPipeline(
       const storiesResponse = await fetch(pair.stories!.blobUrl);
       const storiesBuffer = Buffer.from(await storiesResponse.arrayBuffer());
       console.log(`[PublishPipeline] Stories image size: ${storiesBuffer.length} bytes`);
-      const storiesUpload = await meta.uploadImage(accountId, storiesBuffer, `${adName}S.png`);
+      const storiesUpload = await meta.uploadImage(accountId, storiesBuffer, `${adName}S.png`, input.workspaceId);
       console.log(`[PublishPipeline] Stories upload OK: hash=${storiesUpload.hash}`);
 
       step3.status = "completed";
@@ -175,8 +176,8 @@ export async function runPublishPipeline(
       const step4: PipelineStep = { name: `create_labels_${adName}`, status: "running", started_at: new Date().toISOString() };
       steps.push(step4);
 
-      const feedLabel = await meta.createAdLabel(accountId, `${adName}_feed`);
-      const storiesLabel = await meta.createAdLabel(accountId, `${adName}_stories`);
+      const feedLabel = await meta.createAdLabel(accountId, `${adName}_feed`, input.workspaceId);
+      const storiesLabel = await meta.createAdLabel(accountId, `${adName}_stories`, input.workspaceId);
 
       step4.status = "completed";
       step4.completed_at = new Date().toISOString();
@@ -186,12 +187,13 @@ export async function runPublishPipeline(
       steps.push(step5);
 
       // Buscar body/title do ad controle existente na campanha (via Meta API)
-      const existingAd = await getExistingAdContentWithFallback(campaignId, accountId);
+      const existingAd = await getExistingAdContentWithFallback(campaignId, accountId, input.workspaceId);
       console.log(`[PublishPipeline] Ad content: body=${existingAd.body?.substring(0, 50)}... link=${existingAd.link} title=${existingAd.title} cta=${existingAd.callToAction}`);
       console.log(`[PublishPipeline] Creating creative: feedHash=${feedUpload.hash} storiesHash=${storiesUpload.hash} feedLabel=${feedLabel.id} storiesLabel=${storiesLabel.id}`);
 
       const metaCreative = await meta.createCreative({
         accountId,
+        workspaceId: input.workspaceId,
         name: adName,
         pageId,
         instagramUserId,
@@ -215,6 +217,7 @@ export async function runPublishPipeline(
 
       const adSetResult = await meta.createAdSet({
         accountId,
+        workspaceId: input.workspaceId,
         campaignId,
         name: adSetTemplate.name as string, // Nome idêntico aos existentes
         dailyBudgetCents: (campaignConfig.daily_budget || adSetTemplate.daily_budget || "8000") as string,
@@ -236,6 +239,7 @@ export async function runPublishPipeline(
 
       const adResult = await meta.createAd({
         accountId,
+        workspaceId: input.workspaceId,
         adSetId: adSetResult.id,
         creativeId: metaCreative.id,
         name: adName,
@@ -401,7 +405,8 @@ function groupVariantsByAd(rows: Record<string, unknown>[]): VariantPair[] {
  */
 async function getExistingAdContentWithFallback(
   campaignId: string,
-  accountId: string
+  accountId: string,
+  workspaceId: string
 ): Promise<{ body: string; title: string; link: string; callToAction: string }> {
   // 1. Tentar buscar do banco primeiro (override manual)
   try {
@@ -427,7 +432,7 @@ async function getExistingAdContentWithFallback(
 
   // 2. Buscar da Meta API — ler ad existente da campanha
   console.log("[PublishPipeline] Fetching ad content from Meta API...");
-  const metaContent = await meta.getAdContentFromCampaign(campaignId);
+  const metaContent = await meta.getAdContentFromCampaign(workspaceId, campaignId);
   if (metaContent && metaContent.link) {
     console.log("[PublishPipeline] Got ad content from Meta API");
 

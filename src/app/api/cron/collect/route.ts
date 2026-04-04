@@ -57,6 +57,16 @@ export async function GET(req: NextRequest) {
   const { from: dateFrom, to: dateTo } = getDateRange(7);
   const todayStr = today();
 
+  // Resolve workspace_id from meta account linked to this campaign
+  const wmaRow = await db.execute({
+    sql: `SELECT workspace_id FROM workspace_meta_accounts WHERE meta_account_id = ? LIMIT 1`,
+    args: [campaign.metaAccountId],
+  });
+  if (wmaRow.rows.length === 0) {
+    return NextResponse.json({ error: "No workspace linked to campaign meta account" }, { status: 500 });
+  }
+  const workspaceId = wmaRow.rows[0].workspace_id as string;
+
   const errors: string[] = [];
   let collected = 0;
   let upserted = 0;
@@ -83,7 +93,7 @@ export async function GET(req: NextRequest) {
     // ════════════════════════════════════════════════════════════════
     // PASSO 1 — Coleta padrão de insights
     // ════════════════════════════════════════════════════════════════
-    const insights = await getCampaignAdsInsights(campaign.metaCampaignId, dateFrom, dateTo);
+    const insights = await getCampaignAdsInsights(campaign.metaCampaignId, dateFrom, dateTo, workspaceId);
     collected = insights.length;
     console.log(`[CronCollect] ${collected} registros padrão (${dateFrom} → ${dateTo})`);
 
@@ -137,7 +147,7 @@ export async function GET(req: NextRequest) {
     // ════════════════════════════════════════════════════════════════
     try {
       const bkInsights = await getCampaignAdsInsights(
-        campaign.metaCampaignId, dateFrom, dateTo,
+        campaign.metaCampaignId, dateFrom, dateTo, workspaceId,
         "publisher_platform,platform_position"
       );
 

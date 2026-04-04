@@ -50,6 +50,7 @@ export async function POST(request: NextRequest) {
     // Executar pipeline
     const result = await runPublishPipeline({
       testRoundId: body.test_round_id,
+      workspaceId: auth.workspace_id,
     });
 
     return NextResponse.json(result, { status: 200 });

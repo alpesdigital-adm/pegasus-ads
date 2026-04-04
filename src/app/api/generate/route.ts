@@ -168,9 +168,10 @@ export async function POST(request: NextRequest) {
 
     // Try to auto-upload to Google Drive if connected
     try {
-      const folderId = await getSelectedFolderId();
+      const folderId = await getSelectedFolderId(auth.workspace_id);
       if (folderId) {
         await uploadToGoogleDrive(
+          auth.workspace_id,
           `creative-${creativeId}.${ext}`,
           imageBuffer,
           generatedImage.mimeType,

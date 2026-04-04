@@ -133,6 +133,7 @@ export interface GeneratePipelineInput {
   variableType: string;
   variableValue?: string;
   numVariants?: number;
+  workspaceId: string;
   /** Textos exatos do controle para evitar erros de ortografia na geração */
   controlTexts?: ControlTexts;
 }
@@ -352,10 +353,10 @@ export async function runGeneratePipeline(
 
       // Upload para Google Drive
       try {
-        const folderId = await getSelectedFolderId();
+        const folderId = await getSelectedFolderId(input.workspaceId);
         if (folderId) {
-          await uploadToGoogleDrive(feedName, feedBuffer, "image/png", folderId);
-          await uploadToGoogleDrive(storiesName, storiesBuffer, "image/png", folderId);
+          await uploadToGoogleDrive(input.workspaceId, feedName, feedBuffer, "image/png", folderId);
+          await uploadToGoogleDrive(input.workspaceId, storiesName, storiesBuffer, "image/png", folderId);
         }
       } catch (driveError) {
         console.error("[GeneratePipeline] Drive upload failed:", driveError);

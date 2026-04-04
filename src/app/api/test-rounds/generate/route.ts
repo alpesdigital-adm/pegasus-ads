@@ -55,6 +55,7 @@ export async function POST(request: NextRequest) {
       variableType: round.variable_type as string,
       variableValue: round.variable_value as string | undefined,
       numVariants: body.num_variants || 1,
+      workspaceId: auth.workspace_id,
       controlTexts: body.control_texts || undefined,
     });
 

@@ -117,7 +117,7 @@ export async function POST(req: NextRequest) {
   // ── 2. Obter access token ──
   let accessToken: string;
   try {
-    accessToken = await getValidAccessToken();
+    accessToken = await getValidAccessToken(auth.workspace_id);
   } catch (err) {
     return NextResponse.json(
       {

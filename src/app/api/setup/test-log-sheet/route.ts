@@ -465,7 +465,7 @@ export async function POST(req: NextRequest) {
   // ── 1. Auth ──
   let accessToken: string;
   try {
-    accessToken = await getValidAccessToken();
+    accessToken = await getValidAccessToken(auth.workspace_id);
   } catch (err) {
     return NextResponse.json(
       { ok: false, error: "Google não conectado. Reconecte em /api/auth/google.", details: String(err) },
@@ -496,7 +496,7 @@ export async function POST(req: NextRequest) {
       action = "created";
 
       // Mover para a pasta dos criativos (se configurada)
-      const folderId = await getSelectedFolderId();
+      const folderId = await getSelectedFolderId(auth.workspace_id);
       if (folderId) {
         await moveToFolder(accessToken, spreadsheetId, folderId);
       }

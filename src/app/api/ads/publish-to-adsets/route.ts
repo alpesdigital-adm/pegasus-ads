@@ -43,11 +43,7 @@ export const maxDuration = 300;
 const META_API_VERSION = "v25.0";
 const META_BASE_URL = `https://graph.facebook.com/${META_API_VERSION}`;
 
-function getToken(): string {
-  const token = process.env.META_SYSTEM_USER_TOKEN;
-  if (!token) throw new Error("META_SYSTEM_USER_TOKEN env var is required");
-  return token;
-}
+// Token is now fetched per-workspace via getTokenForWorkspace (imported above)
 
 async function metaFetch<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, options);
@@ -101,9 +97,8 @@ interface ModelAdInfo {
 /**
  * Busca informações do ad modelo: creative spec + account.
  */
-async function fetchModelAd(adId: string): Promise<ModelAdInfo> {
+async function fetchModelAd(adId: string, token: string): Promise<ModelAdInfo> {
   await rateLimit();
-  const token = getToken();
 
   // Buscar ad com creative expandido
   const adData = await metaFetch<Record<string, unknown>>(
@@ -174,9 +169,8 @@ async function fetchModelAd(adId: string): Promise<ModelAdInfo> {
 /**
  * Lista ad sets de uma campanha.
  */
-async function fetchAdSets(campaignId: string): Promise<Array<{ id: string; name: string; status: string }>> {
+async function fetchAdSets(campaignId: string, token: string): Promise<Array<{ id: string; name: string; status: string }>> {
   await rateLimit();
-  const token = getToken();
 
   const data = await metaFetch<{ data: Array<{ id: string; name: string; status: string }> }>(
     `${META_BASE_URL}/${campaignId}/adsets?fields=id,name,status&limit=50&access_token=${token}`
@@ -188,9 +182,8 @@ async function fetchAdSets(campaignId: string): Promise<Array<{ id: string; name
 /**
  * Upload de imagem para a conta de anúncios.
  */
-async function uploadImage(accountId: string, imageBuffer: Buffer, filename: string): Promise<{ hash: string }> {
+async function uploadImage(accountId: string, imageBuffer: Buffer, filename: string, token: string): Promise<{ hash: string }> {
   await rateLimit();
-  const token = getToken();
 
   const form = new FormData();
   form.append("access_token", token);
@@ -234,14 +227,14 @@ async function createCreativeSingleImage(params: {
   urlTags: string;
   displayLink: string;
   partnership?: PartnershipSpec;
+  token: string;
 }): Promise<{ id: string }> {
   await rateLimit();
-  const token = getToken();
 
   const {
     accountId, name, pageId, instagramUserId,
     imageHash, body: bodyText, title, description, link, ctaType, urlTags,
-    displayLink, partnership,
+    displayLink, partnership, token,
   } = params;
 
   // object_story_spec com link_data — formato padrão (não-dinâmico)
@@ -315,9 +308,10 @@ async function createAd(params: {
   adSetId: string;
   creativeId: string;
   name: string;
+  token: string;
 }): Promise<{ id: string }> {
   await rateLimit();
-  const token = getToken();
+  const token = params.token;
 
   const data = await metaFetch<{ id: string }>(
     `${META_BASE_URL}/${params.accountId}/ads`,
@@ -362,14 +356,16 @@ export async function POST(req: NextRequest) {
 
     console.log(`[PublishToAdSets] Starting: ${ads.length} ads → campaign ${campaign_id}`);
 
+    const token = await getTokenForWorkspace(auth.workspace_id);
+
     // 1. Fetch model ad info
     console.log(`[PublishToAdSets] Fetching model ad ${model_ad_id}...`);
-    const modelAd = await fetchModelAd(model_ad_id);
+    const modelAd = await fetchModelAd(model_ad_id, token);
     console.log(`[PublishToAdSets] Model ad: link=${modelAd.link}, page=${modelAd.pageId}, account=${modelAd.accountId}`);
 
     // 2. Fetch ad sets
     console.log(`[PublishToAdSets] Fetching ad sets for campaign ${campaign_id}...`);
-    const allAdSets = await fetchAdSets(campaign_id);
+    const allAdSets = await fetchAdSets(campaign_id, token);
     console.log(`[PublishToAdSets] Found ${allAdSets.length} ad sets`);
 
     if (allAdSets.length === 0) {
@@ -399,7 +395,7 @@ export async function POST(req: NextRequest) {
         // Upload image
         const imageBuffer = Buffer.from(ad.image_base64, "base64");
         console.log(`[PublishToAdSets] Uploading ${ad.image_filename} (${imageBuffer.length} bytes)...`);
-        const upload = await uploadImage(modelAd.accountId, imageBuffer, ad.image_filename);
+        const upload = await uploadImage(modelAd.accountId, imageBuffer, ad.image_filename, token);
         adResult.image_hash = upload.hash;
         console.log(`[PublishToAdSets] Uploaded: hash=${upload.hash}`);
 
@@ -418,6 +414,7 @@ export async function POST(req: NextRequest) {
           urlTags: modelAd.urlTags,
           displayLink: modelAd.displayLink,
           partnership,
+          token,
         });
         adResult.creative_id = creative.id;
         console.log(`[PublishToAdSets] Creative created: ${creative.id}`);
@@ -430,6 +427,7 @@ export async function POST(req: NextRequest) {
               adSetId: adSet.id,
               creativeId: creative.id,
               name: ad.name,
+              token,
             });
             adResult.ads_created.push({
               ad_id: adCreated.id,

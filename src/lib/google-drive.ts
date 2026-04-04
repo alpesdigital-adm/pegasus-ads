@@ -1,4 +1,4 @@
-import { getDb } from "./db";
+import { getWorkspaceSetting, setWorkspaceSetting } from "./workspace";
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
@@ -86,23 +86,18 @@ export async function refreshAccessToken(refreshToken: string): Promise<GoogleTo
 }
 
 /**
- * Get a valid access token, refreshing if necessary
+ * Get a valid access token for a workspace, refreshing if necessary.
+ * Reads from workspace_settings — no fallback to global settings.
  */
-export async function getValidAccessToken(): Promise<string> {
-  const db = getDb();
-
-  const tokenData = await db.execute({
-    sql: "SELECT value FROM settings WHERE key = 'google_tokens'",
-  });
-
-  if (tokenData.rows.length === 0) {
-    throw new Error("No Google tokens found. Please connect to Google Drive first.");
+export async function getValidAccessToken(workspaceId: string): Promise<string> {
+  const tokenJson = await getWorkspaceSetting(workspaceId, "google_tokens");
+  if (!tokenJson) {
+    throw new Error("No Google tokens found for this workspace. Please connect to Google Drive first.");
   }
 
-  const tokens = JSON.parse(tokenData.rows[0].value as string) as GoogleTokens;
-  const expiresAt = parseInt(
-    ((await db.execute({ sql: "SELECT value FROM settings WHERE key = 'google_token_expires'" })).rows[0]?.value as string) || "0"
-  );
+  const tokens = JSON.parse(tokenJson) as GoogleTokens;
+  const expiresAtStr = await getWorkspaceSetting(workspaceId, "google_token_expires");
+  const expiresAt = parseInt(expiresAtStr || "0");
 
   // If token is expired or about to expire, refresh it
   if (Date.now() >= expiresAt - 60000) {
@@ -116,101 +111,43 @@ export async function getValidAccessToken(): Promise<string> {
       tokens.expires_in = newTokens.expires_in;
     }
 
-    // Update in DB
-    await saveTokens(tokens);
+    // Update in workspace settings
+    await saveTokens(workspaceId, tokens);
   }
 
   return tokens.access_token;
 }
 
 /**
- * Save tokens to the database
+ * Save tokens to workspace_settings
  */
-export async function saveTokens(tokens: GoogleTokens): Promise<void> {
-  const db = getDb();
+export async function saveTokens(workspaceId: string, tokens: GoogleTokens): Promise<void> {
+  await setWorkspaceSetting(workspaceId, "google_tokens", JSON.stringify(tokens));
 
-  // First try to update, then insert if not exists
-  const existing = await db.execute({
-    sql: "SELECT key FROM settings WHERE key = ?",
-    args: ["google_tokens"],
-  });
-
-  if (existing.rows.length > 0) {
-    await db.execute({
-      sql: "UPDATE settings SET value = ?, updated_at = NOW() WHERE key = ?",
-      args: [JSON.stringify(tokens), "google_tokens"],
-    });
-  } else {
-    await db.execute({
-      sql: "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, NOW())",
-      args: ["google_tokens", JSON.stringify(tokens)],
-    });
-  }
-
-  // Save expiration time
   const expiresIn = tokens.expires_in || 3600;
   const expiresAt = Date.now() + expiresIn * 1000;
-
-  const existsExpires = await db.execute({
-    sql: "SELECT key FROM settings WHERE key = ?",
-    args: ["google_token_expires"],
-  });
-
-  if (existsExpires.rows.length > 0) {
-    await db.execute({
-      sql: "UPDATE settings SET value = ?, updated_at = NOW() WHERE key = ?",
-      args: [expiresAt.toString(), "google_token_expires"],
-    });
-  } else {
-    await db.execute({
-      sql: "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, NOW())",
-      args: ["google_token_expires", expiresAt.toString()],
-    });
-  }
+  await setWorkspaceSetting(workspaceId, "google_token_expires", expiresAt.toString());
 }
 
 /**
- * Get the selected Google Drive folder ID
+ * Get the selected Google Drive folder ID for a workspace
  */
-export async function getSelectedFolderId(): Promise<string | null> {
-  const db = getDb();
-
-  const result = await db.execute({
-    sql: "SELECT value FROM settings WHERE key = 'google_drive_folder_id'",
-  });
-
-  return result.rows.length > 0 ? (result.rows[0].value as string) : null;
+export async function getSelectedFolderId(workspaceId: string): Promise<string | null> {
+  return getWorkspaceSetting(workspaceId, "google_drive_folder_id");
 }
 
 /**
- * Save the selected Google Drive folder ID
+ * Save the selected Google Drive folder ID for a workspace
  */
-export async function setSelectedFolderId(folderId: string): Promise<void> {
-  const db = getDb();
-
-  const existing = await db.execute({
-    sql: "SELECT key FROM settings WHERE key = ?",
-    args: ["google_drive_folder_id"],
-  });
-
-  if (existing.rows.length > 0) {
-    await db.execute({
-      sql: "UPDATE settings SET value = ?, updated_at = NOW() WHERE key = ?",
-      args: [folderId, "google_drive_folder_id"],
-    });
-  } else {
-    await db.execute({
-      sql: "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, NOW())",
-      args: ["google_drive_folder_id", folderId],
-    });
-  }
+export async function setSelectedFolderId(workspaceId: string, folderId: string): Promise<void> {
+  await setWorkspaceSetting(workspaceId, "google_drive_folder_id", folderId);
 }
 
 /**
  * List root-level locations: My Drive + Shared Drives
  */
-export async function listRoots(): Promise<{ id: string; name: string; type: "my_drive" | "shared_drive" }[]> {
-  const accessToken = await getValidAccessToken();
+export async function listRoots(workspaceId: string): Promise<{ id: string; name: string; type: "my_drive" | "shared_drive" }[]> {
+  const accessToken = await getValidAccessToken(workspaceId);
   const roots: { id: string; name: string; type: "my_drive" | "shared_drive" }[] = [];
 
   // My Drive
@@ -235,8 +172,8 @@ export async function listRoots(): Promise<{ id: string; name: string; type: "my
 /**
  * List child folders inside a given parent folder
  */
-export async function listFoldersInParent(parentId: string, driveId?: string): Promise<GoogleDriveFolder[]> {
-  const accessToken = await getValidAccessToken();
+export async function listFoldersInParent(workspaceId: string, parentId: string, driveId?: string): Promise<GoogleDriveFolder[]> {
+  const accessToken = await getValidAccessToken(workspaceId);
 
   const params = new URLSearchParams({
     q: `mimeType='application/vnd.google-apps.folder' and '${parentId}' in parents and trashed=false`,
@@ -270,17 +207,17 @@ export async function listFoldersInParent(parentId: string, driveId?: string): P
 }
 
 /**
- * Legacy: list all folders flat (kept for backward compatibility)
+ * Legacy: list all folders flat
  */
-export async function listFolders(): Promise<GoogleDriveFolder[]> {
-  const roots = await listRoots();
+export async function listFolders(workspaceId: string): Promise<GoogleDriveFolder[]> {
+  const roots = await listRoots(workspaceId);
   const allFolders: GoogleDriveFolder[] = [];
 
   for (const root of roots) {
     if (root.type === "shared_drive") {
       allFolders.push({ id: root.id, name: root.name, mimeType: "application/vnd.google-apps.folder" });
     }
-    const children = await listFoldersInParent(root.id, root.type === "shared_drive" ? root.id : undefined);
+    const children = await listFoldersInParent(workspaceId, root.id, root.type === "shared_drive" ? root.id : undefined);
     allFolders.push(...children);
   }
 
@@ -291,17 +228,18 @@ export async function listFolders(): Promise<GoogleDriveFolder[]> {
  * Upload a file to Google Drive using multipart upload
  */
 export async function uploadToGoogleDrive(
+  workspaceId: string,
   fileName: string,
   fileBuffer: Buffer,
   mimeType: string,
   folderId?: string
 ): Promise<string> {
-  const accessToken = await getValidAccessToken();
+  const accessToken = await getValidAccessToken(workspaceId);
 
-  // Determine folder - use provided or get from settings
+  // Determine folder - use provided or get from workspace settings
   let targetFolderId: string | undefined = folderId;
   if (!targetFolderId) {
-    const selectedId = await getSelectedFolderId();
+    const selectedId = await getSelectedFolderId(workspaceId);
     targetFolderId = selectedId || undefined;
   }
 
@@ -337,39 +275,32 @@ export async function uploadToGoogleDrive(
 }
 
 /**
- * Check if Google Drive is connected
+ * Check if Google Drive is connected for a workspace
  */
-export async function isConnected(): Promise<boolean> {
-  const db = getDb();
-
-  const result = await db.execute({
-    sql: "SELECT value FROM settings WHERE key = 'google_tokens'",
-  });
-
-  return result.rows.length > 0;
+export async function isConnected(workspaceId: string): Promise<boolean> {
+  const tokenJson = await getWorkspaceSetting(workspaceId, "google_tokens");
+  return tokenJson !== null;
 }
 
 /**
- * Get connection status with folder info
+ * Get connection status with folder info for a workspace
  */
-export async function getConnectionStatus(): Promise<{
+export async function getConnectionStatus(workspaceId: string): Promise<{
   connected: boolean;
   folder_id?: string;
   folder_name?: string;
 }> {
-  const db = getDb();
-
-  const connected = await isConnected();
+  const connected = await isConnected(workspaceId);
   if (!connected) {
     return { connected: false };
   }
 
-  const folderId = await getSelectedFolderId();
+  const folderId = await getSelectedFolderId(workspaceId);
   if (!folderId) {
     return { connected: true };
   }
 
-  const accessToken = await getValidAccessToken();
+  const accessToken = await getValidAccessToken(workspaceId);
   const response = await fetch(`https://www.googleapis.com/drive/v3/files/${folderId}?fields=name&supportsAllDrives=true`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
@@ -398,13 +329,13 @@ export interface DriveFile {
 
 /**
  * List image files in a Google Drive folder.
- * Returns files with name, id, mimeType, and image dimensions.
  */
 export async function listFilesInFolder(
+  workspaceId: string,
   folderId: string,
   driveId?: string
 ): Promise<DriveFile[]> {
-  const accessToken = await getValidAccessToken();
+  const accessToken = await getValidAccessToken(workspaceId);
 
   const q = `'${folderId}' in parents and trashed=false and (mimeType='image/png' or mimeType='image/jpeg' or mimeType='image/jpg')`;
   const params = new URLSearchParams({
@@ -439,8 +370,8 @@ export async function listFilesInFolder(
 /**
  * Download a file from Google Drive as Buffer.
  */
-export async function downloadFile(fileId: string): Promise<Buffer> {
-  const accessToken = await getValidAccessToken();
+export async function downloadFile(workspaceId: string, fileId: string): Promise<Buffer> {
+  const accessToken = await getValidAccessToken(workspaceId);
 
   const response = await fetch(
     `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`,
@@ -456,12 +387,10 @@ export async function downloadFile(fileId: string): Promise<Buffer> {
 }
 
 /**
- * Clear all Google Drive settings
+ * Clear all Google Drive settings for a workspace
  */
-export async function disconnect(): Promise<void> {
-  const db = getDb();
-
-  await db.execute({
-    sql: "DELETE FROM settings WHERE key IN ('google_tokens', 'google_token_expires', 'google_drive_folder_id')",
-  });
+export async function disconnect(workspaceId: string): Promise<void> {
+  await setWorkspaceSetting(workspaceId, "google_tokens", "");
+  await setWorkspaceSetting(workspaceId, "google_token_expires", "");
+  await setWorkspaceSetting(workspaceId, "google_drive_folder_id", "");
 }

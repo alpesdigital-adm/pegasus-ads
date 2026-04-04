@@ -187,10 +187,11 @@ export async function POST(req: NextRequest) {
 
   // ── 6. Upload para Drive (opcional) ──
   try {
-    const folderId = await getSelectedFolderId();
+    const folderId = await getSelectedFolderId(auth.workspace_id);
     if (folderId) {
       const creativeName = creative.name as string;
       await uploadToGoogleDrive(
+        auth.workspace_id,
         `${creativeName}-retry.${ext}`,
         imageBuffer,
         generatedImage.mimeType,

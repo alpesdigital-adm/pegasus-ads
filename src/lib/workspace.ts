@@ -223,35 +223,47 @@ export async function getMetaToken(
 }
 
 /**
- * Retorna o token Meta usando fallback: workspace account → env var.
- * Compatível com o sistema anterior.
+ * Retorna o token Meta do workspace. Sem fallback para env vars.
+ * Cada workspace DEVE ter sua própria conta Meta configurada.
  */
 export async function resolveMetaToken(
   workspaceId: string | null,
   metaAccountId?: string
 ): Promise<string> {
-  // Try workspace account first
-  if (workspaceId && metaAccountId) {
+  if (!workspaceId) {
+    throw new Error("workspace_id is required — Meta tokens are per-workspace");
+  }
+
+  // If a specific account is requested, get its token
+  if (metaAccountId) {
     const token = await getMetaToken(workspaceId, metaAccountId);
     if (token) return token;
+    throw new Error(`No Meta token found for account ${metaAccountId} in this workspace. Configure it in workspace settings.`);
   }
 
-  // Fallback to env vars (backward compatibility)
-  if (metaAccountId) {
-    // Check KNOWN_CAMPAIGNS for env var mapping
-    const { KNOWN_CAMPAIGNS } = await import("@/config/campaigns");
-    for (const campaign of Object.values(KNOWN_CAMPAIGNS)) {
-      if (campaign.metaAccountId === metaAccountId && campaign.metaTokenEnvVar) {
-        const envToken = process.env[campaign.metaTokenEnvVar];
-        if (envToken) return envToken;
-      }
-    }
+  // No specific account — use the default account for this workspace
+  const db = getDb();
+  const result = await db.execute({
+    sql: `SELECT meta_account_id, auth_method, token_encrypted, oauth_tokens
+          FROM workspace_meta_accounts
+          WHERE workspace_id = ? AND is_default = true`,
+    args: [workspaceId],
+  });
+
+  if (result.rows.length === 0) {
+    throw new Error("No Meta account configured for this workspace. Add one in workspace settings.");
   }
 
-  // Final fallback
-  const token = process.env.META_SYSTEM_USER_TOKEN;
-  if (!token) throw new Error("No Meta token available — configure an account or set META_SYSTEM_USER_TOKEN");
-  return token;
+  const row = result.rows[0];
+  if (row.auth_method === "token" && row.token_encrypted) {
+    return decryptToken(row.token_encrypted as string);
+  }
+  if (row.auth_method === "oauth" && row.oauth_tokens) {
+    const tokens = JSON.parse(decryptToken(row.oauth_tokens as string));
+    return tokens.access_token || null;
+  }
+
+  throw new Error("Meta account found but has no valid token. Reconfigure it in workspace settings.");
 }
 
 // ── API Keys ──

@@ -1,9 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { exchangeCodeForToken, saveTokens } from "@/lib/google-drive";
 import { initDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 
 export async function GET(request: NextRequest) {
   try {
+    const auth = await requireAuth(request);
+    if (auth instanceof NextResponse) {
+      return NextResponse.redirect(new URL("/?error=not_authenticated", request.url));
+    }
+
     const searchParams = request.nextUrl.searchParams;
     const code = searchParams.get("code");
     const error = searchParams.get("error");
@@ -23,7 +29,7 @@ export async function GET(request: NextRequest) {
     const tokens = await exchangeCodeForToken(code);
 
     // Save tokens to DB
-    await saveTokens(tokens);
+    await saveTokens(auth.workspace_id, tokens);
 
     // Redirect back to app with success message
     return NextResponse.redirect(new URL("/?success=google_connected", request.url));

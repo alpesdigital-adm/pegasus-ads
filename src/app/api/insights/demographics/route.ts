@@ -49,7 +49,7 @@ export async function POST(req: NextRequest) {
   const dateTo   = body.date_to   || defaultRange.to;
   const campaignId = body.campaign_id || KNOWN_CAMPAIGNS["T7_0003_RAT"].metaCampaignId;
 
-  const insights = await getCampaignAdsInsights(campaignId, dateFrom, dateTo, "age,gender");
+  const insights = await getCampaignAdsInsights(campaignId, dateFrom, dateTo, auth.workspace_id, "age,gender");
 
   if (insights.length === 0) {
     return NextResponse.json({ collected: 0, upserted: 0, errors: [] });

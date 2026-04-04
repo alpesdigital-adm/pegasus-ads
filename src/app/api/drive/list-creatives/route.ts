@@ -138,7 +138,7 @@ export async function GET(req: NextRequest) {
     }
 
     // ── Resolver folder_id ──
-    const folderId = queryFolderId ?? (await getSelectedFolderId());
+    const folderId = queryFolderId ?? (await getSelectedFolderId(auth.workspace_id));
     if (!folderId) {
       return NextResponse.json(
         { error: "folder_id not provided and no folder selected in settings" },
@@ -150,7 +150,7 @@ export async function GET(req: NextRequest) {
     const metaToken = await getTokenForWorkspace(auth.workspace_id);
 
     // ── 1. Listar arquivos no Drive ──
-    const files = await listFilesInFolder(folderId, queryDriveId);
+    const files = await listFilesInFolder(auth.workspace_id, folderId, queryDriveId);
     const groups = groupFilesByAd(files);
 
     // ── 2. Buscar ads publicados na campanha ──

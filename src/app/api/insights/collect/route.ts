@@ -36,6 +36,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCampaignAdsInsights, getAccountAdsInsights } from "@/lib/meta";
 import { getDb, initDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
 import { v4 as uuid } from "uuid";
 
@@ -55,6 +56,9 @@ function getDateRange(daysBack = 7): { from: string; to: string } {
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   // initDb garante que metrics_breakdowns existe
   const db = await initDb();
 
@@ -128,8 +132,8 @@ export async function POST(req: NextRequest) {
     // ════════════════════════════════════════════════════════════════
     if (collectStandard) {
       const insights = campaignId
-        ? await getCampaignAdsInsights(campaignId, dateFrom, dateTo)
-        : await getAccountAdsInsights(accountId!, dateFrom, dateTo);
+        ? await getCampaignAdsInsights(campaignId, dateFrom, dateTo, auth.workspace_id)
+        : await getAccountAdsInsights(accountId!, dateFrom, dateTo, auth.workspace_id);
 
       collected = insights.length;
       console.log(`[InsightsCollect] ${collected} registros da Meta API (padrão)`);
@@ -186,8 +190,8 @@ export async function POST(req: NextRequest) {
     // ════════════════════════════════════════════════════════════════
     if (collectBreakdown) {
       const breakdownInsights = campaignId
-        ? await getCampaignAdsInsights(campaignId, dateFrom, dateTo, collectBreakdown)
-        : await getAccountAdsInsights(accountId!, dateFrom, dateTo);
+        ? await getCampaignAdsInsights(campaignId, dateFrom, dateTo, auth.workspace_id, collectBreakdown)
+        : await getAccountAdsInsights(accountId!, dateFrom, dateTo, auth.workspace_id);
 
       breakdownCollected = breakdownInsights.length;
       console.log(`[InsightsCollect] ${breakdownCollected} registros da Meta API (breakdown: ${collectBreakdown})`);

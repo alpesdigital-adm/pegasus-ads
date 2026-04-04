@@ -76,9 +76,8 @@ function groupFilesByAd(files: DriveFile[]): Map<string, { feed?: DriveFile; sto
 /**
  * Busca nomes de ads já existentes na campanha (via insights).
  */
-async function getExistingAdNames(campaignId: string): Promise<Set<string>> {
-  const token = process.env.META_SYSTEM_USER_TOKEN;
-  if (!token) return new Set();
+async function getExistingAdNames(campaignId: string, workspaceId: string): Promise<Set<string>> {
+  const token = await meta.getTokenForWorkspace(workspaceId);
 
   const url = `https://graph.facebook.com/v25.0/${campaignId}/ads?fields=name&limit=200&access_token=${token}`;
   const res = await fetch(url);
@@ -115,7 +114,7 @@ export async function POST(req: NextRequest) {
     if (body.folder_id) {
       // Modo Drive: listar arquivos, agrupar, filtrar
       console.log(`[PublishExternal] Listing files in Drive folder ${body.folder_id}...`);
-      const files = await listFilesInFolder(body.folder_id, body.drive_id);
+      const files = await listFilesInFolder(auth.workspace_id, body.folder_id, body.drive_id);
       console.log(`[PublishExternal] Found ${files.length} image files`);
 
       const groups = groupFilesByAd(files);
@@ -128,7 +127,7 @@ export async function POST(req: NextRequest) {
       }
 
       // Auto-discovery: remover ads já publicados
-      const existingNames = await getExistingAdNames(campaign.metaCampaignId);
+      const existingNames = await getExistingAdNames(campaign.metaCampaignId, auth.workspace_id);
       console.log(`[PublishExternal] Existing ads in campaign: ${existingNames.size}`);
 
       const newAds = targetAds.filter(([code, group]) => {
@@ -148,8 +147,8 @@ export async function POST(req: NextRequest) {
       // Download imagens do Drive
       for (const [code, group] of newAds) {
         console.log(`[PublishExternal] Downloading ${code} from Drive...`);
-        const feedBuffer = await downloadFile(group.feed!.id);
-        const storiesBuffer = await downloadFile(group.stories!.id);
+        const feedBuffer = await downloadFile(auth.workspace_id, group.feed!.id);
+        const storiesBuffer = await downloadFile(auth.workspace_id, group.stories!.id);
         adsToPublish.push({ name: code, feedBuffer, storiesBuffer });
       }
 
@@ -179,13 +178,13 @@ export async function POST(req: NextRequest) {
 
     // ── Buscar templates ──
     console.log("[PublishExternal] Fetching ad set template...");
-    const adSetTemplate = await meta.getAdSetTemplate(campaign.metaCampaignId);
+    const adSetTemplate = await meta.getAdSetTemplate(auth.workspace_id, campaign.metaCampaignId);
     if (!adSetTemplate) {
       return NextResponse.json({ error: "No ad set template found" }, { status: 500 });
     }
 
     console.log("[PublishExternal] Fetching ad content from campaign...");
-    const adContent = await meta.getAdContentFromCampaign(campaign.metaCampaignId);
+    const adContent = await meta.getAdContentFromCampaign(auth.workspace_id, campaign.metaCampaignId);
     if (!adContent || !adContent.link) {
       return NextResponse.json({ error: "No ad content (body/title/link) found in campaign" }, { status: 500 });
     }
@@ -199,19 +198,20 @@ export async function POST(req: NextRequest) {
 
         // 1. Upload imagens
         const feedUpload = await meta.uploadImage(
-          campaign.metaAccountId, ad.feedBuffer, `${ad.name}F.png`
+          campaign.metaAccountId, ad.feedBuffer, `${ad.name}F.png`, auth.workspace_id
         );
         const storiesUpload = await meta.uploadImage(
-          campaign.metaAccountId, ad.storiesBuffer, `${ad.name}S.png`
+          campaign.metaAccountId, ad.storiesBuffer, `${ad.name}S.png`, auth.workspace_id
         );
 
         // 2. Criar labels
-        const feedLabel = await meta.createAdLabel(campaign.metaAccountId, `${ad.name}_feed`);
-        const storiesLabel = await meta.createAdLabel(campaign.metaAccountId, `${ad.name}_stories`);
+        const feedLabel = await meta.createAdLabel(campaign.metaAccountId, `${ad.name}_feed`, auth.workspace_id);
+        const storiesLabel = await meta.createAdLabel(campaign.metaAccountId, `${ad.name}_stories`, auth.workspace_id);
 
         // 3. Criar creative
         const creative = await meta.createCreative({
           accountId: campaign.metaAccountId,
+          workspaceId: auth.workspace_id,
           name: ad.name,
           pageId: campaign.pageId,
           instagramUserId: campaign.instagramUserId,
@@ -229,6 +229,7 @@ export async function POST(req: NextRequest) {
         // 4. Criar ad set
         const adSet = await meta.createAdSet({
           accountId: campaign.metaAccountId,
+          workspaceId: auth.workspace_id,
           campaignId: campaign.metaCampaignId,
           name: adSetTemplate.name as string,
           dailyBudgetCents: campaign.dailyBudgetCents,
@@ -244,6 +245,7 @@ export async function POST(req: NextRequest) {
         // 5. Criar ad
         const adResult = await meta.createAd({
           accountId: campaign.metaAccountId,
+          workspaceId: auth.workspace_id,
           adSetId: adSet.id,
           creativeId: creative.id,
           name: ad.name,

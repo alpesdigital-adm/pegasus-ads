@@ -30,11 +30,32 @@ export async function GET(req: NextRequest) {
   }
 
   const adId = req.nextUrl.searchParams.get("ad_id");
-  if (!adId) {
-    return NextResponse.json({ error: "ad_id is required" }, { status: 400 });
+  const adsetId = req.nextUrl.searchParams.get("adset_id");
+
+  if (!adId && !adsetId) {
+    return NextResponse.json({ error: "ad_id or adset_id is required" }, { status: 400 });
   }
 
   const token = getToken();
+
+  if (adsetId) {
+    // Inspect ad set: targeting, budget, optimization, attribution
+    const adsetFields = [
+      "id", "name", "status", "effective_status",
+      "daily_budget", "lifetime_budget", "budget_remaining",
+      "bid_strategy", "bid_amount", "billing_event",
+      "optimization_goal", "optimization_sub_event",
+      "targeting", "promoted_object", "attribution_spec",
+      "start_time", "end_time", "pacing_type",
+      "destination_type", "is_dynamic_creative",
+    ].join(",");
+
+    const resp = await fetch(
+      `${META_BASE_URL}/${adsetId}?fields=${adsetFields}&access_token=${token}`
+    );
+    const data = await resp.json();
+    return NextResponse.json(data);
+  }
 
   const fields = [
     "name",

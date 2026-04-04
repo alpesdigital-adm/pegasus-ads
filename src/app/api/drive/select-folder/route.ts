@@ -1,16 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { setSelectedFolderId } from "@/lib/google-drive";
-import { initDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 
 interface SelectFolderRequest {
   folder_id: string;
 }
 
-export async function POST(request: NextRequest) {
-  try {
-    await initDb();
+export async function POST(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
 
-    const body: SelectFolderRequest = await request.json();
+  try {
+    const body: SelectFolderRequest = await req.json();
 
     if (!body.folder_id) {
       return NextResponse.json({ error: "folder_id is required" }, { status: 400 });

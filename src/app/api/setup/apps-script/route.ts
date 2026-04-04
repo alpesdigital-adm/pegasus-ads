@@ -44,6 +44,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getValidAccessToken } from "@/lib/google-drive";
 import { buildAppsScript } from "@/config/apps-script-template";
 import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 
 const SCRIPT_API_BASE = "https://script.googleapis.com/v1";
 
@@ -93,6 +94,9 @@ async function saveScriptId(scriptId: string): Promise<void> {
 }
 
 export async function POST(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   // ── 1. Parse body ──
   let body: { spreadsheet_id?: string; api_base?: string };
   try {
@@ -266,7 +270,10 @@ export async function POST(req: NextRequest) {
 }
 
 // GET: retorna status do script implantado
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   const scriptId = await getSavedScriptId();
 
   if (!scriptId) {

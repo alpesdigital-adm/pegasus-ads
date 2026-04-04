@@ -32,6 +32,8 @@
  * Protegido por x-api-key (TEST_LOG_API_KEY).
  */
 import { NextRequest, NextResponse } from "next/server";
+import { requireAuth } from "@/lib/auth";
+import { getTokenForWorkspace } from "@/lib/meta";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -43,13 +45,6 @@ function getToken(): string {
   const token = process.env.META_SYSTEM_USER_TOKEN;
   if (!token) throw new Error("META_SYSTEM_USER_TOKEN env var is required");
   return token;
-}
-
-function checkAuth(req: NextRequest): boolean {
-  const key = req.headers.get("x-api-key");
-  const expected = process.env.TEST_LOG_API_KEY;
-  if (!expected) return false;
-  return key === expected;
 }
 
 async function metaFetch<T>(url: string, options?: RequestInit): Promise<T> {
@@ -347,9 +342,8 @@ async function createAd(params: {
 // ── Main Handler ──
 
 export async function POST(req: NextRequest) {
-  if (!checkAuth(req)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
 
   try {
     const body = await req.json();

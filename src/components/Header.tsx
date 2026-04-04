@@ -1,7 +1,9 @@
 "use client";
 
 import { useGraphStore } from "@/store/graph";
+import { useAuthStore } from "@/store/auth";
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useRouter } from "next/navigation";
 
 interface DriveStatus {
   connected: boolean;
@@ -862,8 +864,144 @@ function AlertBell() {
   );
 }
 
+function UserMenu() {
+  const { user, workspace, workspaces, logout, switchWorkspace } = useAuthStore();
+  const router = useRouter();
+  const [open, setOpen] = useState(false);
+  const [switching, setSwitching] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    if (open) document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [open]);
+
+  if (!user) return null;
+
+  const initials = user.name
+    .split(" ")
+    .map((w) => w[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+
+  async function handleSwitch(wsId: string) {
+    if (wsId === workspace?.id) return;
+    setSwitching(true);
+    const ok = await switchWorkspace(wsId);
+    setSwitching(false);
+    if (ok) {
+      setOpen(false);
+      window.location.reload();
+    }
+  }
+
+  async function handleLogout() {
+    await logout();
+    router.replace("/login");
+  }
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-slate-700/50 transition-all"
+      >
+        <div
+          className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold text-white"
+          style={{ background: "linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%)" }}
+        >
+          {initials}
+        </div>
+        <div className="text-left hidden sm:block">
+          <p className="text-xs font-medium text-slate-200 leading-none">{user.name}</p>
+          <p className="text-[10px] text-slate-500 leading-tight mt-0.5">{workspace?.name}</p>
+        </div>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-slate-500">
+          <path d="M6 9l6 6 6-6" />
+        </svg>
+      </button>
+
+      {open && (
+        <div
+          className="absolute right-0 top-full mt-1 w-64 rounded-xl overflow-hidden z-50"
+          style={{
+            background: "linear-gradient(180deg, #1e293b 0%, #0f172a 100%)",
+            border: "1px solid rgba(59,130,246,0.2)",
+            boxShadow: "0 0 40px rgba(0,0,0,0.6)",
+          }}
+        >
+          {/* User info */}
+          <div className="px-4 py-3 border-b border-slate-700/50">
+            <p className="text-xs font-medium text-white">{user.name}</p>
+            <p className="text-[10px] text-slate-500 mt-0.5">{user.email}</p>
+          </div>
+
+          {/* Workspaces */}
+          {workspaces.length > 1 && (
+            <div className="px-2 py-2 border-b border-slate-700/50">
+              <p className="text-[9px] uppercase tracking-wider text-slate-500 px-2 mb-1">Workspaces</p>
+              {workspaces.map((ws) => (
+                <button
+                  key={ws.id}
+                  onClick={() => handleSwitch(ws.id)}
+                  disabled={switching}
+                  className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs transition-all ${
+                    ws.id === workspace?.id
+                      ? "bg-blue-500/10 text-blue-400"
+                      : "text-slate-300 hover:bg-slate-700/50"
+                  }`}
+                >
+                  <div
+                    className="w-5 h-5 rounded flex items-center justify-center text-[8px] font-bold"
+                    style={{
+                      background: ws.id === workspace?.id ? "rgba(59,130,246,0.2)" : "rgba(100,116,139,0.2)",
+                      color: ws.id === workspace?.id ? "#60a5fa" : "#94a3b8",
+                    }}
+                  >
+                    {ws.name[0]?.toUpperCase()}
+                  </div>
+                  <span className="flex-1 text-left truncate">{ws.name}</span>
+                  {ws.id === workspace?.id && (
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                      <path d="M20 6L9 17l-5-5" />
+                    </svg>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Logout */}
+          <div className="px-2 py-2">
+            <button
+              onClick={handleLogout}
+              className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-red-400 hover:bg-red-500/10 transition-all"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                <polyline points="16 17 21 12 16 7" />
+                <line x1="21" y1="12" x2="9" y2="12" />
+              </svg>
+              Sair
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function Header() {
   const { nodes, fetchGraph, loading } = useGraphStore();
+  const { fetchMe, initialized } = useAuthStore();
+
+  useEffect(() => {
+    if (!initialized) fetchMe();
+  }, [initialized, fetchMe]);
 
   const totalCreatives = nodes.length;
   const winners = nodes.filter((n) => n.status === "winner").length;
@@ -947,6 +1085,10 @@ export function Header() {
           </svg>
           Atualizar
         </button>
+
+        <div className="w-px h-6 bg-slate-700/50" />
+
+        <UserMenu />
       </div>
     </header>
   );

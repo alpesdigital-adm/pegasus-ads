@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getConnectionStatus } from "@/lib/google-drive";
-import { initDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 
-export async function GET(request: NextRequest) {
+export async function GET(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   try {
-    await initDb();
     const status = await getConnectionStatus();
     return NextResponse.json(status);
   } catch (error) {

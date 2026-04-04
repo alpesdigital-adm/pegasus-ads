@@ -21,18 +21,14 @@
  * Proteção: x-api-key = TEST_LOG_API_KEY
  */
 import { NextRequest, NextResponse } from "next/server";
-import { getDb, initDb } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
 
 export const runtime = "nodejs";
 
 // Budget de exploração: % do total reservada para criativos sem dados
 const EXPLORATION_BUDGET_PCT = 0.15;
-
-function checkAuth(req: NextRequest): boolean {
-  const key = req.headers.get("x-api-key");
-  return !!process.env.TEST_LOG_API_KEY && key === process.env.TEST_LOG_API_KEY;
-}
 
 interface CreativeMetric {
   id: string;
@@ -58,9 +54,9 @@ interface BudgetAllocation {
 }
 
 export async function GET(req: NextRequest) {
-  if (!checkAuth(req)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
 
-  await initDb();
   const db = getDb();
 
   const { searchParams } = new URL(req.url);

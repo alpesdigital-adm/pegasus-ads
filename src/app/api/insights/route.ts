@@ -16,6 +16,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -28,6 +29,9 @@ function getDefaultRange(): { from: string; to: string } {
 }
 
 export async function GET(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   const db = getDb();
   const { searchParams } = req.nextUrl;
 
@@ -39,14 +43,14 @@ export async function GET(req: NextRequest) {
 
   try {
     if (level === "ad" || level === "creative") {
-      // ── Nível ad/criativo — métricas por criativo agregadas no período ──
       const whereClause = [
         `m.date >= ?`,
         `m.date <= ?`,
+        `m.workspace_id = ?`,
         creativeId ? `m.creative_id = ?` : null,
       ].filter(Boolean).join(" AND ");
 
-      const args: unknown[] = [dateFrom, dateTo];
+      const args: unknown[] = [dateFrom, dateTo, auth.workspace_id];
       if (creativeId) args.push(creativeId);
 
       const result = await db.execute({
@@ -84,7 +88,6 @@ export async function GET(req: NextRequest) {
     }
 
     if (level === "campaign") {
-      // ── Nível campanha — tudo agregado ──
       const result = await db.execute({
         sql: `
           SELECT
@@ -100,9 +103,9 @@ export async function GET(req: NextRequest) {
             MIN(date)                                                     AS date_from,
             MAX(date)                                                     AS date_to
           FROM metrics
-          WHERE date >= ? AND date <= ?
+          WHERE date >= ? AND date <= ? AND workspace_id = ?
         `,
-        args: [dateFrom, dateTo],
+        args: [dateFrom, dateTo, auth.workspace_id],
       });
 
       return NextResponse.json({
@@ -129,11 +132,11 @@ export async function GET(req: NextRequest) {
           COUNT(DISTINCT m.creative_id)                             AS ads_count
         FROM metrics m
         JOIN published_ads pa ON pa.meta_ad_id = m.meta_ad_id
-        WHERE m.date >= ? AND m.date <= ?
+        WHERE m.date >= ? AND m.date <= ? AND m.workspace_id = ?
         GROUP BY pa.meta_adset_id, pa.adset_name
         ORDER BY total_spend DESC
       `,
-      args: [dateFrom, dateTo],
+      args: [dateFrom, dateTo, auth.workspace_id],
     });
 
     return NextResponse.json({

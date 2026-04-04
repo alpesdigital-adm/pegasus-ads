@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { initDb } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 import { generateImage } from "@/lib/gemini";
 import { uploadToGoogleDrive, getSelectedFolderId } from "@/lib/google-drive";
 import { put } from "@vercel/blob";
@@ -9,6 +10,9 @@ export const maxDuration = 60;
 import type { GenerateRequest } from "@/lib/types";
 
 export async function POST(request: NextRequest) {
+  const auth = await requireAuth(request);
+  if (auth instanceof NextResponse) return auth;
+
   try {
     const body: GenerateRequest = await request.json();
 
@@ -16,15 +20,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "prompt is required" }, { status: 400 });
     }
 
-    const db = await initDb();
+    const db = getDb();
 
     // Fetch reference images if provided
     const referenceImages: { base64: string; mimeType: string }[] = [];
     if (body.reference_image_ids?.length) {
       const placeholders = body.reference_image_ids.map(() => "?").join(",");
       const refs = await db.execute({
-        sql: `SELECT blob_url FROM images WHERE id IN (${placeholders})`,
-        args: body.reference_image_ids,
+        sql: `SELECT blob_url FROM images WHERE id IN (${placeholders}) AND workspace_id = ?`,
+        args: [...body.reference_image_ids, auth.workspace_id],
       });
 
       for (const row of refs.rows) {
@@ -40,8 +44,8 @@ export async function POST(request: NextRequest) {
     // If parent creative provided, also include it as reference
     if (body.parent_creative_id) {
       const parent = await db.execute({
-        sql: "SELECT blob_url FROM creatives WHERE id = ?",
-        args: [body.parent_creative_id],
+        sql: "SELECT blob_url FROM creatives WHERE id = ? AND workspace_id = ?",
+        args: [body.parent_creative_id, auth.workspace_id],
       });
       if (parent.rows.length > 0) {
         const blobUrl = parent.rows[0].blob_url as string;
@@ -86,8 +90,8 @@ export async function POST(request: NextRequest) {
     let generation = 0;
     if (body.parent_creative_id) {
       const parentRow = await db.execute({
-        sql: "SELECT generation FROM creatives WHERE id = ?",
-        args: [body.parent_creative_id],
+        sql: "SELECT generation FROM creatives WHERE id = ? AND workspace_id = ?",
+        args: [body.parent_creative_id, auth.workspace_id],
       });
       if (parentRow.rows.length > 0) {
         generation = (parentRow.rows[0].generation as number) + 1;
@@ -96,8 +100,8 @@ export async function POST(request: NextRequest) {
 
     // Save creative to DB
     await db.execute({
-      sql: `INSERT INTO creatives (id, name, blob_url, prompt, prompt_json, model, parent_id, generation, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'generated')`,
+      sql: `INSERT INTO creatives (id, name, blob_url, prompt, prompt_json, model, parent_id, generation, status, workspace_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'generated', ?)`,
       args: [
         creativeId,
         creativeName,
@@ -107,6 +111,7 @@ export async function POST(request: NextRequest) {
         result.model,
         body.parent_creative_id || null,
         generation,
+        auth.workspace_id,
       ],
     });
 

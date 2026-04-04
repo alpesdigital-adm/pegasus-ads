@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { initDb } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 import { runGeneratePipeline } from "@/lib/pipelines/generate";
 
-export const maxDuration = 300; // Vercel Pro: até 300s (2x chamadas Gemini + referência dupla)
+export const maxDuration = 300;
 
 /**
  * POST /api/test-rounds/generate — Executa o pipeline de geração para um test round.
@@ -10,8 +11,11 @@ export const maxDuration = 300; // Vercel Pro: até 300s (2x chamadas Gemini + r
  * Body: { test_round_id: string, num_variants?: number }
  */
 export async function POST(request: NextRequest) {
+  const auth = await requireAuth(request);
+  if (auth instanceof NextResponse) return auth;
+
   try {
-    const db = await initDb();
+    const db = getDb();
     const body = await request.json();
 
     if (!body.test_round_id) {
@@ -23,8 +27,8 @@ export async function POST(request: NextRequest) {
 
     // Buscar test round
     const roundRow = await db.execute({
-      sql: "SELECT * FROM test_rounds WHERE id = ?",
-      args: [body.test_round_id],
+      sql: "SELECT * FROM test_rounds WHERE id = ? AND workspace_id = ?",
+      args: [body.test_round_id, auth.workspace_id],
     });
 
     if (roundRow.rows.length === 0) {

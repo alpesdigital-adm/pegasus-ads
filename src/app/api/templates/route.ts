@@ -2,44 +2,13 @@
  * GET/POST /api/templates
  *
  * Template library de padrões visuais validados (tarefa 4.4).
- * Banco de abordagens que funcionaram → reutilizar em novos funis.
- *
- * GET params:
- *   funnel_key?    — filtrar por funil de origem (ex: T7)
- *   dimension?     — filtrar por dimensão visual
- *   status?        — 'active' | 'archived' | 'all' (default: 'active')
- *
- * POST body:
- * {
- *   name: string
- *   description: string
- *   funnel_key: string              — funil onde foi validado
- *   source_creative_id?: string     — criativo de referência
- *   dimensions: {                   — elementos visuais do template
- *     hero?: string                 — código H1-H6
- *     ebook?: string                — E1-E4
- *     copy?: string                 — C1-C4
- *     palette?: string              — P1-P3
- *     style?: string                — V1-V3
- *     layout?: string               — L1-L4
- *   }
- *   prompt_fragment?: string        — trecho de prompt reutilizável
- *   cpl_validated?: number          — CPL que levou ao status winner
- *   notes?: string
- * }
- *
- * Proteção: x-api-key = TEST_LOG_API_KEY
  */
 import { NextRequest, NextResponse } from "next/server";
-import { getDb, initDb } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 import { v4 as uuid } from "uuid";
 
 export const runtime = "nodejs";
-
-function checkAuth(req: NextRequest): boolean {
-  const key = req.headers.get("x-api-key");
-  return !!process.env.TEST_LOG_API_KEY && key === process.env.TEST_LOG_API_KEY;
-}
 
 // ── Migração da tabela templates ────────────────────────────────────────────
 
@@ -57,19 +26,24 @@ async function ensureTemplatesTable(): Promise<void> {
       cpl_validated DOUBLE PRECISION,
       status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'archived')),
       notes TEXT,
+      workspace_id TEXT REFERENCES workspaces(id),
       created_at TIMESTAMPTZ DEFAULT NOW(),
       updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_templates_funnel ON templates(funnel_key)`);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_templates_status ON templates(status)`);
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_templates_workspace ON templates(workspace_id)`);
 }
 
 // ── Seed: templates derivados dos winners validados ─────────────────────────
 
-async function seedTemplatesIfEmpty(): Promise<void> {
+async function seedTemplatesIfEmpty(workspaceId: string): Promise<void> {
   const db = getDb();
-  const { rows } = await db.execute(`SELECT COUNT(*) AS cnt FROM templates`);
+  const { rows } = await db.execute({
+    sql: `SELECT COUNT(*) AS cnt FROM templates WHERE workspace_id = ?`,
+    args: [workspaceId],
+  });
   if (Number(rows[0].cnt) > 0) return;
 
   const seeds = [
@@ -113,10 +87,10 @@ async function seedTemplatesIfEmpty(): Promise<void> {
 
   for (const t of seeds) {
     await db.execute({
-      sql: `INSERT INTO templates (id, name, description, funnel_key, dimensions, prompt_fragment, cpl_validated, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      sql: `INSERT INTO templates (id, name, description, funnel_key, dimensions, prompt_fragment, cpl_validated, notes, workspace_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (id) DO NOTHING`,
-      args: [t.id, t.name, t.description, t.funnel_key, JSON.stringify(t.dimensions), t.prompt_fragment, t.cpl_validated, t.notes],
+      args: [t.id, t.name, t.description, t.funnel_key, JSON.stringify(t.dimensions), t.prompt_fragment, t.cpl_validated, t.notes, workspaceId],
     });
   }
 }
@@ -124,11 +98,11 @@ async function seedTemplatesIfEmpty(): Promise<void> {
 // ── GET ──────────────────────────────────────────────────────────────────────
 
 export async function GET(req: NextRequest) {
-  if (!checkAuth(req)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
 
-  await initDb();
   await ensureTemplatesTable();
-  await seedTemplatesIfEmpty();
+  await seedTemplatesIfEmpty(auth.workspace_id);
 
   const { searchParams } = new URL(req.url);
   const funnelKey = searchParams.get("funnel_key");
@@ -137,24 +111,23 @@ export async function GET(req: NextRequest) {
 
   const db = getDb();
 
-  const conditions: string[] = [];
-  const params: unknown[] = [];
-  let idx = 1;
+  const conditions: string[] = ["t.workspace_id = ?"];
+  const params: unknown[] = [auth.workspace_id];
 
   if (status !== "all") {
-    conditions.push(`t.status = $${idx++}`);
+    conditions.push(`t.status = ?`);
     params.push(status);
   }
   if (funnelKey) {
-    conditions.push(`t.funnel_key = $${idx++}`);
+    conditions.push(`t.funnel_key = ?`);
     params.push(funnelKey);
   }
   if (dimension) {
-    conditions.push(`t.dimensions ? $${idx++}`);
+    conditions.push(`t.dimensions ? ?`);
     params.push(dimension);
   }
 
-  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  const where = `WHERE ${conditions.join(" AND ")}`;
 
   const { rows } = await db.execute({
     sql: `SELECT t.*,
@@ -177,9 +150,9 @@ export async function GET(req: NextRequest) {
 // ── POST ─────────────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
-  if (!checkAuth(req)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
 
-  await initDb();
   await ensureTemplatesTable();
 
   const body = await req.json().catch(() => null);
@@ -196,8 +169,8 @@ export async function POST(req: NextRequest) {
   const { rows } = await db.execute({
     sql: `INSERT INTO templates
        (id, name, description, funnel_key, source_creative_id, dimensions,
-        prompt_fragment, cpl_validated, status, notes)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        prompt_fragment, cpl_validated, status, notes, workspace_id)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT (id) DO UPDATE SET
        name = EXCLUDED.name,
        description = EXCLUDED.description,
@@ -221,6 +194,7 @@ export async function POST(req: NextRequest) {
       body.cpl_validated ?? null,
       body.status ?? "active",
       body.notes ?? null,
+      auth.workspace_id,
     ],
   });
 

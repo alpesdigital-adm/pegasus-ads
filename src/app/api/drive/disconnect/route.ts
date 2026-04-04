@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { disconnect } from "@/lib/google-drive";
-import { initDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 
-export async function POST(request: NextRequest) {
+export async function POST(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   try {
-    await initDb();
     await disconnect();
     return NextResponse.json({ success: true });
   } catch (error) {

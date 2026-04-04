@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { initDb } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 import type { GraphData, GraphNode, GraphEdge } from "@/lib/types";
 import { evaluateKillRules } from "@/config/kill-rules";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
@@ -30,13 +31,17 @@ function getAdBaseName(creativeName: string): string {
 const DEFAULT_CPL_TARGET = KNOWN_CAMPAIGNS["T7_0003_RAT"]?.cplTarget ?? 25;
 
 export async function GET(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   try {
-    const db = await initDb();
+    const db = getDb();
     const { searchParams } = req.nextUrl;
     const cplTarget = parseFloat(searchParams.get("cpl_target") || String(DEFAULT_CPL_TARGET));
 
     // Buscar todos os criativos com métricas agregadas + dias rodando
-    const creativesResult = await db.execute(`
+    const creativesResult = await db.execute({
+      sql: `
       SELECT c.*,
         (SELECT SUM(m.spend) FROM metrics m WHERE m.creative_id = c.id) as total_spend,
         (SELECT SUM(m.impressions) FROM metrics m WHERE m.creative_id = c.id) as total_impressions,
@@ -48,13 +53,17 @@ export async function GET(req: NextRequest) {
         (SELECT AVG(m.cpc) FROM metrics m WHERE m.creative_id = c.id AND m.cpc > 0) as avg_cpc,
         (SELECT COUNT(DISTINCT m.date) FROM metrics m WHERE m.creative_id = c.id) as days_count
       FROM creatives c
+      WHERE c.workspace_id = ?
       ORDER BY c.generation ASC, c.created_at ASC
-    `);
+    `,
+      args: [auth.workspace_id],
+    });
 
-    // Buscar todas as edges
-    const edgesResult = await db.execute(
-      "SELECT * FROM creative_edges ORDER BY created_at ASC"
-    );
+    // Buscar todas as edges (filtrar via criativos do workspace)
+    const edgesResult = await db.execute({
+      sql: "SELECT e.* FROM creative_edges e JOIN creatives c ON c.id = e.source_id WHERE c.workspace_id = ? ORDER BY e.created_at ASC",
+      args: [auth.workspace_id],
+    });
 
     // ── Agrupar criativos por AD (base name) ──
     // Mapa: baseName → { feed?: row, stories?: row }

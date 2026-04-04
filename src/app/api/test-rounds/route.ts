@@ -1,14 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
-import { initDb } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 import { v4 as uuid } from "uuid";
 
 /**
- * GET /api/test-rounds — Lista test rounds (filtro por campaign_id opcional).
+ * GET /api/test-rounds — Lista test rounds do workspace (filtro por campaign_id opcional).
  */
-export async function GET(request: NextRequest) {
+export async function GET(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   try {
-    const db = await initDb();
-    const campaignId = request.nextUrl.searchParams.get("campaign_id");
+    const db = getDb();
+    const campaignId = req.nextUrl.searchParams.get("campaign_id");
 
     let sql = `
       SELECT tr.*, c.name as campaign_name, c.meta_campaign_id,
@@ -16,11 +20,12 @@ export async function GET(request: NextRequest) {
       FROM test_rounds tr
       JOIN campaigns c ON tr.campaign_id = c.id
       JOIN creatives cr ON tr.control_creative_id = cr.id
+      WHERE tr.workspace_id = ?
     `;
-    const args: unknown[] = [];
+    const args: unknown[] = [auth.workspace_id];
 
     if (campaignId) {
-      sql += " WHERE tr.campaign_id = ?";
+      sql += " AND tr.campaign_id = ?";
       args.push(campaignId);
     }
 
@@ -40,10 +45,13 @@ export async function GET(request: NextRequest) {
 /**
  * POST /api/test-rounds — Cria um novo test round (draft).
  */
-export async function POST(request: NextRequest) {
+export async function POST(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   try {
-    const db = await initDb();
-    const body = await request.json();
+    const db = getDb();
+    const body = await req.json();
 
     if (!body.campaign_id || !body.control_creative_id || !body.variable_type) {
       return NextResponse.json(
@@ -52,17 +60,17 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Buscar último round_number desta campanha
+    // Buscar último round_number desta campanha no workspace
     const lastRound = await db.execute({
-      sql: "SELECT MAX(round_number) as max_round FROM test_rounds WHERE campaign_id = ?",
-      args: [body.campaign_id],
+      sql: "SELECT MAX(round_number) as max_round FROM test_rounds WHERE campaign_id = ? AND workspace_id = ?",
+      args: [body.campaign_id, auth.workspace_id],
     });
     const roundNumber = ((lastRound.rows[0]?.max_round as number) || 0) + 1;
 
     const id = uuid();
     await db.execute({
-      sql: `INSERT INTO test_rounds (id, campaign_id, control_creative_id, variable_type, variable_value, round_number, status)
-            VALUES (?, ?, ?, ?, ?, ?, 'draft')`,
+      sql: `INSERT INTO test_rounds (id, campaign_id, control_creative_id, variable_type, variable_value, round_number, status, workspace_id)
+            VALUES (?, ?, ?, ?, ?, ?, 'draft', ?)`,
       args: [
         id,
         body.campaign_id,
@@ -70,6 +78,7 @@ export async function POST(request: NextRequest) {
         body.variable_type,
         body.variable_value || null,
         roundNumber,
+        auth.workspace_id,
       ],
     });
 

@@ -6,24 +6,13 @@
  * Protegido por API key simples (header x-api-key).
  */
 import { NextRequest, NextResponse } from "next/server";
+import { requireAuth } from "@/lib/auth";
+import { getTokenForWorkspace } from "@/lib/meta";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 const META_API = "https://graph.facebook.com/v25.0";
-
-function getToken(): string {
-  const t = process.env.META_SYSTEM_USER_TOKEN;
-  if (!t) throw new Error("META_SYSTEM_USER_TOKEN not set");
-  return t;
-}
-
-function checkAuth(req: NextRequest): boolean {
-  const key = req.headers.get("x-api-key");
-  const expected = process.env.TEST_LOG_API_KEY;
-  if (!expected) return false;
-  return key === expected;
-}
 
 interface PauseResult {
   ad_id: string;
@@ -32,9 +21,8 @@ interface PauseResult {
 }
 
 export async function POST(req: NextRequest) {
-  if (!checkAuth(req)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
 
   try {
     const body = await req.json();
@@ -49,7 +37,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Max 50 ads per request" }, { status: 400 });
     }
 
-    const token = getToken();
+    const token = await getTokenForWorkspace(auth.workspace_id);
     const results: PauseResult[] = [];
 
     // Pausar cada ad via POST /{ad_id}?status=PAUSED

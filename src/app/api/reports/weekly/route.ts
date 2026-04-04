@@ -9,24 +9,14 @@
  *   weeks_back?    — semanas atrás (default: 1 = semana passada)
  *   format?        — 'html' | 'json' (default: 'html')
  *
- * Proteção: x-api-key = TEST_LOG_API_KEY
- * Também aceita CRON_SECRET para chamada automática.
+ * Proteção: requireAuth (session ou API key multi-tenant)
  */
 import { NextRequest, NextResponse } from "next/server";
-import { getDb, initDb } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
-
-function checkAuth(req: NextRequest): boolean {
-  const apiKey = req.headers.get("x-api-key");
-  const cronAuth = req.headers.get("authorization");
-  const cronSecret = process.env.CRON_SECRET;
-
-  if (process.env.TEST_LOG_API_KEY && apiKey === process.env.TEST_LOG_API_KEY) return true;
-  if (cronSecret && cronAuth === `Bearer ${cronSecret}`) return true;
-  return false;
-}
 
 function formatDate(d: Date): string {
   return d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
@@ -204,9 +194,9 @@ interface WeeklyReportData {
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 export async function GET(req: NextRequest) {
-  if (!checkAuth(req)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
 
-  await initDb();
   const db = getDb();
 
   const { searchParams } = new URL(req.url);

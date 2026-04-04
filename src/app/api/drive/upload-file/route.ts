@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { uploadToGoogleDrive, getSelectedFolderId } from "@/lib/google-drive";
-import { initDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 
-export async function POST(request: NextRequest) {
+export async function POST(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   try {
-    await initDb();
-
-    const formData = await request.formData();
+    const formData = await req.formData();
     const file = formData.get("file") as File | null;
     const fileName = formData.get("file_name") as string | null;
 

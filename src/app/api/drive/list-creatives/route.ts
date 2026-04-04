@@ -22,19 +22,13 @@
  * Protegido por x-api-key (TEST_LOG_API_KEY).
  */
 import { NextRequest, NextResponse } from "next/server";
-import { initDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
+import { getTokenForWorkspace } from "@/lib/meta";
 import { listFilesInFolder, getSelectedFolderId, DriveFile } from "@/lib/google-drive";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
-
-function checkAuth(req: NextRequest): boolean {
-  const key = req.headers.get("x-api-key");
-  const expected = process.env.TEST_LOG_API_KEY;
-  if (!expected) return false;
-  return key === expected;
-}
 
 // ── Tipos ──
 
@@ -127,12 +121,10 @@ async function getMetaAdsMap(
 // ── Handler ──
 
 export async function GET(req: NextRequest) {
-  if (!checkAuth(req)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
 
   try {
-    await initDb();
 
     const { searchParams } = new URL(req.url);
     const campaignKey = searchParams.get("campaign_key") ?? "T7_0003_RAT";
@@ -154,12 +146,8 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    // ── Resolver token Meta ──
-    const tokenEnvVar = campaign.metaTokenEnvVar ?? "META_SYSTEM_USER_TOKEN";
-    const metaToken = process.env[tokenEnvVar] ?? process.env.META_SYSTEM_USER_TOKEN ?? "";
-    if (!metaToken) {
-      return NextResponse.json({ error: "Meta token not configured" }, { status: 500 });
-    }
+    // ── Resolver token Meta via workspace ──
+    const metaToken = await getTokenForWorkspace(auth.workspace_id);
 
     // ── 1. Listar arquivos no Drive ──
     const files = await listFilesInFolder(folderId, queryDriveId);

@@ -5,29 +5,17 @@
  * para diagnóstico. Protegido por x-api-key.
  */
 import { NextRequest, NextResponse } from "next/server";
+import { requireAuth } from "@/lib/auth";
+import { getTokenForWorkspace } from "@/lib/meta";
 
 export const runtime = "nodejs";
 
 const META_API_VERSION = "v25.0";
 const META_BASE_URL = `https://graph.facebook.com/${META_API_VERSION}`;
 
-function getToken(): string {
-  const token = process.env.META_SYSTEM_USER_TOKEN;
-  if (!token) throw new Error("META_SYSTEM_USER_TOKEN env var is required");
-  return token;
-}
-
-function checkAuth(req: NextRequest): boolean {
-  const key = req.headers.get("x-api-key");
-  const expected = process.env.TEST_LOG_API_KEY;
-  if (!expected) return false;
-  return key === expected;
-}
-
 export async function GET(req: NextRequest) {
-  if (!checkAuth(req)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
 
   const adId = req.nextUrl.searchParams.get("ad_id");
   const adsetId = req.nextUrl.searchParams.get("adset_id");
@@ -36,7 +24,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "ad_id or adset_id is required" }, { status: 400 });
   }
 
-  const token = getToken();
+  const token = await getTokenForWorkspace(auth.workspace_id);
 
   if (adsetId) {
     // Inspect ad set: targeting, budget, optimization, attribution

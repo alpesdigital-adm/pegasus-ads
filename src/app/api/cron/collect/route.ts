@@ -13,7 +13,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getCampaignAdsInsights, extractLPVFromInsights, extractLeadsFromInsights, extractCPLFromInsights } from "@/lib/meta";
-import { getDb, initDb } from "@/lib/db";
+import { getDb } from "@/lib/db";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
 import { evaluateKillRules } from "@/config/kill-rules";
 import { v4 as uuid } from "uuid";
@@ -52,7 +52,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const db = await initDb();
+  const db = getDb();
   const campaign = KNOWN_CAMPAIGNS["T7_0003_RAT"];
   const { from: dateFrom, to: dateTo } = getDateRange(7);
   const todayStr = today();

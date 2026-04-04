@@ -20,6 +20,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { put } from "@vercel/blob";
 import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 import { v4 as uuid } from "uuid";
 
 export const runtime = "nodejs";
@@ -27,7 +28,10 @@ export const maxDuration = 60;
 
 // ── GET — Diagnóstico ────────────────────────────────────────────────────────
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   const db = getDb();
 
   // Criativo com URL fora do Vercel Blob = candidato a ter overlay da Meta
@@ -48,6 +52,9 @@ export async function GET() {
 // ── POST — Fix ───────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   const db = getDb();
   const contentType = req.headers.get("content-type") || "";
 

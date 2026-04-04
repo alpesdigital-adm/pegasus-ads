@@ -2,36 +2,15 @@
  * POST /api/hypotheses/generate
  *
  * Gera hipóteses de teste por IA (tarefa 3.3).
- * Analisa performance atual dos criativos + biblioteca de variáveis visuais
- * e sugere a próxima variável a testar com fundamentação.
- *
- * Body:
- * {
- *   campaign_key?: string   (default T7_0003_RAT)
- *   top_n?: number          (quantos criativos analisar, default 10)
- * }
- *
- * Resposta:
- * {
- *   hypotheses: [{
- *     dimension, variable_code, hypothesis, rationale, priority,
- *     supporting_data, suggested_prompt_delta
- *   }]
- *   saved_ids: string[]
- * }
  */
 import { NextRequest, NextResponse } from "next/server";
-import { initDb } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
 import { randomUUID } from "crypto";
 
 export const runtime = "nodejs";
 export const maxDuration = 90;
-
-function checkAuth(req: NextRequest): boolean {
-  const key = req.headers.get("x-api-key");
-  return !!process.env.TEST_LOG_API_KEY && key === process.env.TEST_LOG_API_KEY;
-}
 
 interface HypothesisResult {
   dimension: string;
@@ -43,9 +22,6 @@ interface HypothesisResult {
   suggested_prompt_delta?: string;
 }
 
-/**
- * Chama Gemini (texto) para gerar hipóteses dado o contexto.
- */
 async function callGeminiForHypotheses(
   context: string,
   campaignKey: string
@@ -82,7 +58,6 @@ Máximo 3 hipóteses. Ordene por priority decrescente (10 = mais urgente).`;
     const data = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
     const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "[]";
 
-    // Parse JSON — pode vir como array direto ou wrapper
     try {
       const parsed = JSON.parse(text);
       return Array.isArray(parsed) ? parsed : (parsed.hypotheses ?? []);
@@ -95,17 +70,18 @@ Máximo 3 hipóteses. Ordene por priority decrescente (10 = mais urgente).`;
 }
 
 export async function POST(req: NextRequest) {
-  if (!checkAuth(req)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
 
   try {
-    const db = await initDb();
+    const db = getDb();
     const body = await req.json().catch(() => ({}));
     const campaignKey = (body.campaign_key as string) ?? "T7_0003_RAT";
     const topN = (body.top_n as number) ?? 10;
 
     const campaign = KNOWN_CAMPAIGNS[campaignKey];
 
-    // ── 1. Carregar performance dos criativos ──
+    // ── 1. Carregar performance dos criativos do workspace ──
     const perfRes = await db.execute({
       sql: `
         SELECT
@@ -118,24 +94,25 @@ export async function POST(req: NextRequest) {
         FROM creatives c
         LEFT JOIN metrics m ON m.creative_id = c.id
         LEFT JOIN alerts kr ON kr.creative_id = c.id AND kr.resolved = FALSE
-        WHERE c.status NOT IN ('killed')
+        WHERE c.status NOT IN ('killed') AND c.workspace_id = ?
         GROUP BY c.id, c.name, c.status, c.generation, c.is_control
         HAVING SUM(m.spend) > 0
         ORDER BY cpl ASC NULLS LAST
         LIMIT ?
       `,
-      args: [topN],
+      args: [auth.workspace_id, topN],
     });
 
     // ── 2. Carregar biblioteca de variáveis visuais ──
-    const elemRes = await db.execute(
-      "SELECT code, dimension, name, description, active_in_meta, priority FROM visual_elements ORDER BY dimension, priority"
-    );
+    const elemRes = await db.execute({
+      sql: "SELECT code, dimension, name, description, active_in_meta, priority FROM visual_elements WHERE workspace_id = ? ORDER BY dimension, priority",
+      args: [auth.workspace_id],
+    });
 
     // ── 3. Carregar hipóteses anteriores ──
     const prevRes = await db.execute({
-      sql: "SELECT variable_dimension, variable_code, status FROM hypotheses WHERE campaign_key = ? ORDER BY created_at DESC LIMIT 20",
-      args: [campaignKey],
+      sql: "SELECT variable_dimension, variable_code, status FROM hypotheses WHERE campaign_key = ? AND workspace_id = ? ORDER BY created_at DESC LIMIT 20",
+      args: [campaignKey, auth.workspace_id],
     });
 
     // ── 4. Montar contexto para o modelo ──
@@ -189,7 +166,7 @@ Para cada hipótese inclua um suggested_prompt_delta: instrução específica pa
             dimension: "hero",
             variable_code: "H3",
             hypothesis: "Substituir hero fotográfico por médico cartoon (H3) aumenta CTR por contraste no feed",
-            rationale: "H3 foi ativado pela Meta no Advantage+ mas não foi testado manualmente com variável isolada. Contraste estilístico pode diferenciar no feed saturado.",
+            rationale: "H3 foi ativado pela Meta no Advantage+ mas não foi testado manualmente com variável isolada.",
             priority: 9,
             supporting_data: `CPL meta: R$${cplTarget}. H3 (cartoon) ativado pelo algoritmo Meta → sinal de potencial.`,
             suggested_prompt_delta: "Substituir o elemento hero por um médico ilustrado em estilo cartoon (anime/flat design), jaleco branco, expressão amigável. Manter todos os outros elementos iguais ao controle.",
@@ -198,7 +175,7 @@ Para cada hipótese inclua um suggested_prompt_delta: instrução específica pa
             dimension: "copy",
             variable_code: "C2",
             hypothesis: "Headline 'Desbloqueie o poder' (C2) vs 'Grátis e Exclusivo' (C1) — curiosidade vs exclusividade",
-            rationale: "C2 testa motivação de curiosidade vs escassez. Abordagens de 'poder' e 'segredo' tendem a performar bem em público médico por apelo ao expertise.",
+            rationale: "C2 testa motivação de curiosidade vs escassez.",
             priority: 8,
             supporting_data: "C2 foi gerado pela IA Meta mas não testado isoladamente.",
             suggested_prompt_delta: "Alterar apenas o headline principal para: 'DESBLOQUEIE O PODER DO MINOXIDIL — Guia EXCLUSIVO para Médicos, Baixe GRÁTIS!' Manter hero, ebook, paleta e layout iguais ao controle.",
@@ -207,9 +184,9 @@ Para cada hipótese inclua um suggested_prompt_delta: instrução específica pa
             dimension: "palette",
             variable_code: "P2",
             hypothesis: "Fundo escuro navy premium (P2) vs branco clean (P1) — percepção de autoridade",
-            rationale: "P2 não foi ativado pela Meta — pode ser justamente por ser muito diferente do original (alto risco percebido). Vale testar manualmente para avaliar se a percepção premium aumenta conversão.",
+            rationale: "P2 não foi ativado pela Meta — pode ser justamente por ser muito diferente do original.",
             priority: 6,
-            supporting_data: "Meta desativou P2 provavelmente por conservadorismo algorítmico. Diferença visual máxima — ideal para aprendizado.",
+            supporting_data: "Meta desativou P2 provavelmente por conservadorismo algorítmico.",
             suggested_prompt_delta: "Alterar apenas o fundo para dark navy/azul escuro premium (#0D1B2A). Elementos em branco/dourado. Manter hero, copy, ebook e layout idênticos ao controle.",
           },
         ];
@@ -219,14 +196,15 @@ Para cada hipótese inclua um suggested_prompt_delta: instrução específica pa
     for (const h of hypotheses) {
       const id = randomUUID();
       await db.execute({
-        sql: `INSERT INTO hypotheses (id, campaign_key, variable_dimension, variable_code, hypothesis, rationale, priority, ai_model)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        sql: `INSERT INTO hypotheses (id, campaign_key, variable_dimension, variable_code, hypothesis, rationale, priority, ai_model, workspace_id)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         args: [
           id, campaignKey,
           h.dimension, h.variable_code ?? null,
           h.hypothesis, h.rationale,
           h.priority ?? 5,
           aiHypotheses.length > 0 ? "gemini-2.0-flash" : "rules-based",
+          auth.workspace_id,
         ],
       });
       savedIds.push(id);

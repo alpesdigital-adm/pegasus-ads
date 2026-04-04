@@ -1,17 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
-import { initDb } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 
 export async function GET(
-  _request: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   try {
     const { id } = await params;
-    const db = await initDb();
+    const db = getDb();
 
     const result = await db.execute({
-      sql: "SELECT * FROM images WHERE id = ?",
-      args: [id],
+      sql: "SELECT * FROM images WHERE id = ? AND workspace_id = ?",
+      args: [id, auth.workspace_id],
     });
 
     if (result.rows.length === 0) {
@@ -29,14 +33,17 @@ export async function GET(
 }
 
 export async function DELETE(
-  _request: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   try {
     const { id } = await params;
-    const db = await initDb();
+    const db = getDb();
 
-    await db.execute({ sql: "DELETE FROM images WHERE id = ?", args: [id] });
+    await db.execute({ sql: "DELETE FROM images WHERE id = ? AND workspace_id = ?", args: [id, auth.workspace_id] });
     return NextResponse.json({ deleted: true });
   } catch (error) {
     console.error("Delete image error:", error);

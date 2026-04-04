@@ -1,17 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { uploadToGoogleDrive, getSelectedFolderId } from "@/lib/google-drive";
-import { initDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 
 interface UploadRequest {
   creative_id: string;
   blob_url: string;
 }
 
-export async function POST(request: NextRequest) {
-  try {
-    await initDb();
+export async function POST(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
 
-    const body: UploadRequest = await request.json();
+  try {
+    const body: UploadRequest = await req.json();
 
     if (!body.creative_id || !body.blob_url) {
       return NextResponse.json(

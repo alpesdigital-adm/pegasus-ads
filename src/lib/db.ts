@@ -91,6 +91,33 @@ export async function initDb(): Promise<DbClient> {
     `);
 
     await pool.query(`
+      CREATE TABLE IF NOT EXISTS plans (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        display_name TEXT NOT NULL,
+        max_creatives INTEGER NOT NULL DEFAULT 50,
+        max_campaigns INTEGER NOT NULL DEFAULT 3,
+        max_meta_accounts INTEGER NOT NULL DEFAULT 1,
+        max_members INTEGER NOT NULL DEFAULT 1,
+        max_api_keys INTEGER NOT NULL DEFAULT 2,
+        ai_generations_per_month INTEGER NOT NULL DEFAULT 20,
+        features JSONB NOT NULL DEFAULT '{}',
+        price_cents INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
+    // Seed default plans
+    await pool.query(`
+      INSERT INTO plans (id, name, display_name, max_creatives, max_campaigns, max_meta_accounts, max_members, max_api_keys, ai_generations_per_month, price_cents)
+      VALUES
+        ('plan_free', 'free', 'Free', 50, 3, 1, 1, 2, 20, 0),
+        ('plan_pro', 'pro', 'Pro', 500, 20, 5, 10, 10, 200, 9900),
+        ('plan_enterprise', 'enterprise', 'Enterprise', 999999, 999999, 999999, 999999, 999999, 999999, 0)
+      ON CONFLICT (name) DO NOTHING
+    `);
+
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS workspace_members (
         workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
         user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

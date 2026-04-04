@@ -17,7 +17,8 @@
  *   - period        (optional, "7d" | "30d" | "all", default "all")
  */
 import { NextRequest, NextResponse } from "next/server";
-import { initDb } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
 
 export const runtime = "nodejs";
@@ -41,11 +42,6 @@ const T4_VALIDATED = {
   mid_funnel_any_touch_multiplier: 1.65,  // média conservadora
 };
 
-function checkAuth(req: NextRequest): boolean {
-  const key = req.headers.get("x-api-key");
-  return !!process.env.TEST_LOG_API_KEY && key === process.env.TEST_LOG_API_KEY;
-}
-
 function periodFilter(period: string): string {
   if (period === "7d") return `AND m.date >= (CURRENT_DATE - INTERVAL '7 days')::TEXT`;
   if (period === "30d") return `AND m.date >= (CURRENT_DATE - INTERVAL '30 days')::TEXT`;
@@ -53,10 +49,11 @@ function periodFilter(period: string): string {
 }
 
 export async function GET(req: NextRequest) {
-  if (!checkAuth(req)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
 
   try {
-    const db = await initDb();
+    const db = getDb();
     const { searchParams } = new URL(req.url);
     const campaignKey = searchParams.get("campaign_key") ?? "T7_0003_RAT";
     const period = searchParams.get("period") ?? "all";

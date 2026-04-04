@@ -19,7 +19,8 @@
  * }
  */
 import { NextRequest, NextResponse } from "next/server";
-import { initDb } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 import { verifyOcr } from "@/lib/ai-verify";
 
 export const runtime = "nodejs";
@@ -31,16 +32,12 @@ const DEFAULT_CONTROL_TEXTS: Record<string, string[]> = {
   T4: ["GRÁTIS", "MÉDICOS", "MINOXIDIL"],
 };
 
-function checkAuth(req: NextRequest): boolean {
-  const key = req.headers.get("x-api-key");
-  return !!process.env.TEST_LOG_API_KEY && key === process.env.TEST_LOG_API_KEY;
-}
-
 export async function POST(req: NextRequest) {
-  if (!checkAuth(req)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
 
   try {
-    const db = await initDb();
+    const db = getDb();
     const body = await req.json();
 
     let imageBase64 = body.image_base64 as string | undefined;
@@ -51,7 +48,7 @@ export async function POST(req: NextRequest) {
     // ── Carregar imagem do DB por creative_id ──
     if (body.creative_id && !imageBase64) {
       creativeId = body.creative_id as string;
-      const res = await db.execute({ sql: "SELECT name, blob_url FROM creatives WHERE id = ?", args: [creativeId] });
+      const res = await db.execute({ sql: "SELECT name, blob_url FROM creatives WHERE id = ? AND workspace_id = ?", args: [creativeId, auth.workspace_id] });
       if (res.rows.length === 0) return NextResponse.json({ error: "Creative não encontrado" }, { status: 404 });
 
       creativeName = res.rows[0].name as string;

@@ -17,10 +17,11 @@ const OPENAPI_SPEC = {
   openapi: "3.1.0",
   info: {
     title: "Pegasus Ads API",
-    version: "2.0.0",
+    version: "3.0.0",
     description:
       "API da plataforma Pegasus Ads — Creative Intelligence para Meta Ads. " +
-      "Geração de criativos, publicação, análise de performance, kill rules e pipeline de testes A/B.",
+      "Multi-tenant: todos os endpoints exigem autenticação (session cookie ou workspace API key). " +
+      "Dados são isolados por workspace.",
     contact: {
       name: "Alpes Digital",
       url: "https://pegasus-ads.vercel.app",
@@ -122,7 +123,7 @@ const OPENAPI_SPEC = {
       },
     },
   },
-  security: [{ ApiKeyAuth: [] }],
+  security: [{ SessionAuth: [] }, { WorkspaceApiKey: [] }],
   paths: {
     // ── Autenticação ──────────────────────────────────────────────────────
     "/api/auth/register": {

@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { listRoots, listFoldersInParent } from "@/lib/google-drive";
-import { initDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 
-export async function POST(request: NextRequest) {
+export async function POST(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   try {
-    await initDb();
-
-    const body = await request.json().catch(() => ({}));
+    const body = await req.json().catch(() => ({}));
     const parentId = body.parent_id as string | undefined;
     const driveId = body.drive_id as string | undefined;
 
@@ -33,7 +34,7 @@ export async function POST(request: NextRequest) {
         id: f.id,
         name: f.name,
         type: "folder" as const,
-        hasChildren: true, // assume all folders can have children
+        hasChildren: true,
       })),
     });
   } catch (error) {

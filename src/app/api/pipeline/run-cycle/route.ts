@@ -19,14 +19,10 @@
  * Proteção: x-api-key = TEST_LOG_API_KEY
  */
 import { NextRequest, NextResponse } from "next/server";
+import { requireAuth } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
-
-function checkAuth(req: NextRequest): boolean {
-  const key = req.headers.get("x-api-key");
-  return !!process.env.TEST_LOG_API_KEY && key === process.env.TEST_LOG_API_KEY;
-}
 
 /** Chama um endpoint interno com x-api-key */
 async function callInternal(
@@ -61,7 +57,8 @@ async function callInternal(
 }
 
 export async function POST(req: NextRequest) {
-  if (!checkAuth(req)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
 
   const startedAt = new Date().toISOString();
   const body = await req.json().catch(() => ({}));

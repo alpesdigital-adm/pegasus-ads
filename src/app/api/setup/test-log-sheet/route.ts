@@ -20,7 +20,8 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getValidAccessToken, getSelectedFolderId } from "@/lib/google-drive";
-import { getDb, initDb } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 import { evaluateKillRules } from "@/config/kill-rules";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
 import { buildAppsScript } from "@/config/apps-script-template";
@@ -103,7 +104,7 @@ function nowBR(): string {
 // ── Buscar dados do banco ──────────────────────────────────────────────────────
 
 async function fetchData(cplTarget: number) {
-  const db = await initDb();
+  const db = getDb();
   const { from, to } = dateRange(90);
 
   const creativesResult = await db.execute(`
@@ -435,7 +436,10 @@ async function deployOrUpdateScript(accessToken: string, spreadsheetId: string) 
 
 // ── Endpoints ─────────────────────────────────────────────────────────────────
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   const spreadsheetId = await getSetting("test_log_spreadsheet_id");
   const lastSync      = await getSetting("test_log_last_sync");
 
@@ -452,6 +456,9 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   const body = await req.json().catch(() => ({})) as { cpl_target?: number };
   const cplTarget = body.cpl_target ?? DEFAULT_CPL_TARGET;
 

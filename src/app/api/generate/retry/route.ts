@@ -23,7 +23,8 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { initDb } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 import { generateImage } from "@/lib/gemini";
 import { uploadToGoogleDrive, getSelectedFolderId } from "@/lib/google-drive";
 import { put } from "@vercel/blob";
@@ -43,7 +44,10 @@ function inferAspectRatio(width?: number, height?: number): string | undefined {
 }
 
 export async function POST(req: NextRequest) {
-  const db = await initDb();
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
+  const db = getDb();
 
   interface Body {
     creative_id?: string;
@@ -83,9 +87,9 @@ export async function POST(req: NextRequest) {
              (SELECT p.prompt_text FROM prompts p WHERE p.creative_id = c.id ORDER BY p.created_at DESC LIMIT 1) AS prompt_text,
              (SELECT p.model FROM prompts p WHERE p.creative_id = c.id ORDER BY p.created_at DESC LIMIT 1) AS prompt_model
       FROM creatives c
-      WHERE c.id = ?
+      WHERE c.id = ? AND c.workspace_id = ?
     `,
-    args: [body.creative_id],
+    args: [body.creative_id, auth.workspace_id],
   });
 
   void creativeRow; // silence unused warning

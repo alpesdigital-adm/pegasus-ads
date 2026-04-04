@@ -1,18 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
-import { initDb } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 import { put } from "@vercel/blob";
 import { v4 as uuid } from "uuid";
 
-export async function GET(request: NextRequest) {
+export async function GET(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   try {
-    const db = await initDb();
-    const { searchParams } = new URL(request.url);
+    const db = getDb();
+    const { searchParams } = new URL(req.url);
 
     const category = searchParams.get("category");
     const limit = parseInt(searchParams.get("limit") || "100");
 
-    let sql = "SELECT * FROM images WHERE 1=1";
-    const args: (string | number)[] = [];
+    let sql = "SELECT * FROM images WHERE workspace_id = ?";
+    const args: (string | number)[] = [auth.workspace_id];
 
     if (category) {
       sql += " AND category = ?";
@@ -33,10 +37,13 @@ export async function GET(request: NextRequest) {
   }
 }
 
-export async function POST(request: NextRequest) {
+export async function POST(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   try {
-    const db = await initDb();
-    const formData = await request.formData();
+    const db = getDb();
+    const formData = await req.formData();
 
     const file = formData.get("file") as File | null;
     const name = formData.get("name") as string;
@@ -90,8 +97,8 @@ export async function POST(request: NextRequest) {
 
     const id = uuid();
     await db.execute({
-      sql: `INSERT INTO images (id, name, category, blob_url) VALUES (?, ?, ?, ?)`,
-      args: [id, name, category, blobUrl],
+      sql: `INSERT INTO images (id, name, category, blob_url, workspace_id) VALUES (?, ?, ?, ?, ?)`,
+      args: [id, name, category, blobUrl, auth.workspace_id],
     });
 
     const image = { id, name, category, blob_url: blobUrl, created_at: new Date().toISOString() };

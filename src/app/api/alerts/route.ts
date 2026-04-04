@@ -7,19 +7,25 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getDb, initDb } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
 // ── GET: listar alertas ──────────────────────────────────────────────────────
 
 export async function GET(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   const db = getDb();
   const { searchParams } = req.nextUrl;
   const includeResolved = searchParams.get("include_resolved") === "true";
   const limit = parseInt(searchParams.get("limit") || "50", 10);
 
-  const whereClause = includeResolved ? "" : "WHERE a.resolved = false";
+  const whereClause = includeResolved
+    ? "WHERE a.workspace_id = ?"
+    : "WHERE a.resolved = false AND a.workspace_id = ?";
 
   const result = await db.execute({
     sql: `
@@ -43,18 +49,22 @@ export async function GET(req: NextRequest) {
       ORDER BY a.created_at DESC
       LIMIT ?
     `,
-    args: [limit],
+    args: [auth.workspace_id, limit],
   });
 
   // Contagem por severidade (para badge no bell)
-  const counts = await db.execute(`
-    SELECT
-      COUNT(*) FILTER (WHERE NOT resolved)               AS unresolved,
-      COUNT(*) FILTER (WHERE NOT resolved AND level IN ('L0','L1','L2')) AS critical,
-      COUNT(*) FILTER (WHERE NOT resolved AND level IN ('L3','L4'))      AS warnings,
-      COUNT(*) FILTER (WHERE NOT resolved AND level = 'L5')              AS promotions
-    FROM alerts
-  `);
+  const counts = await db.execute({
+    sql: `
+      SELECT
+        COUNT(*) FILTER (WHERE NOT resolved)               AS unresolved,
+        COUNT(*) FILTER (WHERE NOT resolved AND level IN ('L0','L1','L2')) AS critical,
+        COUNT(*) FILTER (WHERE NOT resolved AND level IN ('L3','L4'))      AS warnings,
+        COUNT(*) FILTER (WHERE NOT resolved AND level = 'L5')              AS promotions
+      FROM alerts
+      WHERE workspace_id = ?
+    `,
+    args: [auth.workspace_id],
+  });
 
   return NextResponse.json({
     alerts: result.rows,
@@ -65,7 +75,10 @@ export async function GET(req: NextRequest) {
 // ── POST: resolver alerta ────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
-  const db = await initDb();
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
+  const db = getDb();
 
   interface Body {
     alert_id?: string;
@@ -78,7 +91,10 @@ export async function POST(req: NextRequest) {
   } catch { /* ok */ }
 
   if (body.resolve_all) {
-    await db.execute(`UPDATE alerts SET resolved = true WHERE resolved = false`);
+    await db.execute({
+      sql: `UPDATE alerts SET resolved = true WHERE resolved = false AND workspace_id = ?`,
+      args: [auth.workspace_id],
+    });
     return NextResponse.json({ ok: true, action: "resolve_all" });
   }
 
@@ -87,8 +103,8 @@ export async function POST(req: NextRequest) {
   }
 
   await db.execute({
-    sql: `UPDATE alerts SET resolved = true WHERE id = ?`,
-    args: [body.alert_id],
+    sql: `UPDATE alerts SET resolved = true WHERE id = ? AND workspace_id = ?`,
+    args: [body.alert_id, auth.workspace_id],
   });
 
   return NextResponse.json({ ok: true, alert_id: body.alert_id });

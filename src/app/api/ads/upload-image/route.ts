@@ -15,6 +15,8 @@
  * { "hash": "abc123...", "filename": "T7EBMX-CA-038A.png" }
  */
 import { NextRequest, NextResponse } from "next/server";
+import { requireAuth } from "@/lib/auth";
+import { getTokenForWorkspace } from "@/lib/meta";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -22,23 +24,9 @@ export const maxDuration = 120;
 const META_API_VERSION = "v25.0";
 const META_BASE_URL = `https://graph.facebook.com/${META_API_VERSION}`;
 
-function getToken(): string {
-  const token = process.env.META_SYSTEM_USER_TOKEN;
-  if (!token) throw new Error("META_SYSTEM_USER_TOKEN env var is required");
-  return token;
-}
-
-function checkAuth(req: NextRequest): boolean {
-  const key = req.headers.get("x-api-key");
-  const expected = process.env.TEST_LOG_API_KEY;
-  if (!expected) return false;
-  return key === expected;
-}
-
 export async function POST(req: NextRequest) {
-  if (!checkAuth(req)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
 
   try {
     const body = await req.json();
@@ -55,7 +43,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const token = getToken();
+    const token = await getTokenForWorkspace(auth.workspace_id);
     const imageBuffer = Buffer.from(image_base64, "base64");
     console.log(`[UploadImage] Uploading ${filename} (${imageBuffer.length} bytes) to ${account_id}`);
 

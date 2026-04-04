@@ -9,25 +9,14 @@
  * Protegido por x-api-key.
  */
 import { NextRequest, NextResponse } from "next/server";
+import { requireAuth } from "@/lib/auth";
+import { getTokenForWorkspace } from "@/lib/meta";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
 const META_API = "https://graph.facebook.com/v25.0";
 const CPL_META = 32.77; // T7 cenário realista
-
-function getToken(): string {
-  const t = process.env.META_SYSTEM_USER_TOKEN;
-  if (!t) throw new Error("META_SYSTEM_USER_TOKEN not set");
-  return t;
-}
-
-function checkAuth(req: NextRequest): boolean {
-  const key = req.headers.get("x-api-key");
-  const expected = process.env.TEST_LOG_API_KEY;
-  if (!expected) return false;
-  return key === expected;
-}
 
 interface AdInsight {
   ad_id: string;
@@ -69,9 +58,8 @@ async function fetchAllPages<T>(url: string): Promise<T[]> {
 }
 
 export async function GET(req: NextRequest) {
-  if (!checkAuth(req)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
 
   const campaignId = req.nextUrl.searchParams.get("campaign_id");
   if (!campaignId) {
@@ -79,7 +67,7 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const token = getToken();
+    const token = await getTokenForWorkspace(auth.workspace_id);
 
     // 1. Get all ads from campaign (all statuses for context)
     const adsUrl = `${META_API}/${campaignId}/ads?fields=id,name,status,adset_id,adset{name}&limit=200&access_token=${token}`;

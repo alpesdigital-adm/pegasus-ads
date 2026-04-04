@@ -36,7 +36,8 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { initDb } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 import { evaluateKillRules, evaluateAllKillRules } from "@/config/kill-rules";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
 
@@ -45,7 +46,10 @@ export const runtime = "nodejs";
 const DEFAULT_CPL_TARGET = KNOWN_CAMPAIGNS["T7_0003_RAT"]?.cplTarget ?? 25;
 
 export async function POST(req: NextRequest) {
-  const db = await initDb();
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
+  const db = getDb();
 
   interface EvaluateBody {
     cpl_target?: number;

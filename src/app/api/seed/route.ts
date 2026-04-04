@@ -1,9 +1,13 @@
-import { NextResponse } from "next/server";
-import { initDb } from "@/lib/db";
+import { NextRequest, NextResponse } from "next/server";
+import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 
-export async function POST() {
+export async function POST(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   try {
-    const db = await initDb();
+    const db = getDb();
     return NextResponse.json({ message: "Database initialized successfully" });
   } catch (error) {
     console.error("Seed error:", error);

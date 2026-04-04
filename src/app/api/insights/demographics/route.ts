@@ -3,33 +3,12 @@
  *
  * POST — Coleta insights com breakdown age × gender e faz upsert em metrics_demographics
  * GET  — Lê métricas demográficas agregadas por criativo
- *
- * POST body:
- * {
- *   campaign_id?: string   // Meta campaign ID (padrão: T7_0003_RAT)
- *   creative_id?: string   // Filtrar por criativo específico (GET)
- *   date_from?:   string   // YYYY-MM-DD (padrão: 7 dias atrás)
- *   date_to?:     string   // YYYY-MM-DD (padrão: hoje)
- * }
- *
- * GET response:
- * [
- *   {
- *     creative_id: string,
- *     creative_name: string,
- *     age: string,
- *     gender: string,
- *     spend: number,
- *     leads: number,
- *     cpl: number | null,
- *     impressions: number,
- *   }
- * ]
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { getCampaignAdsInsights } from "@/lib/meta";
-import { getDb, initDb } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
 import { v4 as uuid } from "uuid";
 
@@ -47,7 +26,10 @@ function getDateRange(daysBack = 7): { from: string; to: string } {
 // ── POST: Coleta demographics ─────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
-  const db = await initDb();
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
+  const db = getDb();
 
   interface Body {
     campaign_id?: string;
@@ -67,8 +49,6 @@ export async function POST(req: NextRequest) {
   const dateTo   = body.date_to   || defaultRange.to;
   const campaignId = body.campaign_id || KNOWN_CAMPAIGNS["T7_0003_RAT"].metaCampaignId;
 
-  // Meta API aceita apenas um breakdown por chamada: age e gender separados
-  // Fazemos age + gender num único breakdown "age,gender" (suportado pela API)
   const insights = await getCampaignAdsInsights(campaignId, dateFrom, dateTo, "age,gender");
 
   if (insights.length === 0) {
@@ -78,8 +58,8 @@ export async function POST(req: NextRequest) {
   // Mapa meta_ad_id → creative_id
   const adIds = [...new Set(insights.map((r) => r.meta_ad_id).filter(Boolean))];
   const adMapRows = await db.execute({
-    sql: `SELECT meta_ad_id, creative_id FROM published_ads WHERE meta_ad_id = ANY(ARRAY[${adIds.map(() => "?").join(",")}]::text[])`,
-    args: adIds,
+    sql: `SELECT meta_ad_id, creative_id FROM published_ads WHERE meta_ad_id = ANY(ARRAY[${adIds.map(() => "?").join(",")}]::text[]) AND workspace_id = ?`,
+    args: [...adIds, auth.workspace_id],
   });
   const adMap = new Map<string, string>();
   for (const row of adMapRows.rows) {
@@ -101,8 +81,8 @@ export async function POST(req: NextRequest) {
       await db.execute({
         sql: `INSERT INTO metrics_demographics
                 (id, creative_id, date, age, gender,
-                 spend, impressions, cpm, ctr, clicks, cpc, leads, cpl, meta_ad_id)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 spend, impressions, cpm, ctr, clicks, cpc, leads, cpl, meta_ad_id, workspace_id)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT (creative_id, date, age, gender) DO UPDATE SET
                 spend       = EXCLUDED.spend,
                 impressions = EXCLUDED.impressions,
@@ -118,6 +98,7 @@ export async function POST(req: NextRequest) {
           insight.spend, insight.impressions, insight.cpm,
           insight.ctr, insight.clicks, insight.cpc,
           insight.leads, insight.cpl, insight.meta_ad_id,
+          auth.workspace_id,
         ],
       });
       upserted++;
@@ -138,15 +119,17 @@ export async function POST(req: NextRequest) {
 // ── GET: Lê métricas demográficas ────────────────────────────────────────────
 
 export async function GET(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   const db = getDb();
   const { searchParams } = req.nextUrl;
   const creativeId = searchParams.get("creative_id");
   const dateFrom   = searchParams.get("date_from");
   const dateTo     = searchParams.get("date_to");
 
-  // Construir filtros dinâmicos
-  const conditions: string[] = [];
-  const args: unknown[] = [];
+  const conditions: string[] = ["md.workspace_id = ?"];
+  const args: unknown[] = [auth.workspace_id];
 
   if (creativeId) {
     conditions.push(`md.creative_id = ?`);
@@ -161,7 +144,7 @@ export async function GET(req: NextRequest) {
     args.push(dateTo);
   }
 
-  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  const whereClause = `WHERE ${conditions.join(" AND ")}`;
 
   const result = await db.execute({
     sql: `
@@ -188,7 +171,6 @@ export async function GET(req: NextRequest) {
     args,
   });
 
-  // Agrupar por criativo para facilitar consumo no frontend
   type DemoRow = {
     creative_id: string;
     creative_name: string;

@@ -6,18 +6,14 @@
  * do sistema ou antes do Pegasus existir.
  */
 import { NextRequest, NextResponse } from "next/server";
+import { requireAuth } from "@/lib/auth";
+import { getTokenForWorkspace } from "@/lib/meta";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
 const META_API = "https://graph.facebook.com/v25.0";
 const DEFAULT_CAMPAIGN = "120242407847250521"; // T7__0003
-
-function getToken(): string {
-  const t = process.env.META_SYSTEM_USER_TOKEN;
-  if (!t) throw new Error("META_SYSTEM_USER_TOKEN not set");
-  return t;
-}
 
 interface MetaAction { action_type: string; value: string }
 interface MetaInsight {
@@ -27,13 +23,16 @@ interface MetaInsight {
 }
 
 export async function GET(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   const sp = req.nextUrl.searchParams;
   const campaignId = sp.get("campaign_id") || DEFAULT_CAMPAIGN;
   const dateFrom = sp.get("date_from") || "2026-03-01";
   const dateTo = sp.get("date_to") || new Date().toISOString().slice(0, 10);
 
   try {
-    const token = getToken();
+    const token = await getTokenForWorkspace(auth.workspace_id);
 
     // 1. Buscar todos os ads da campanha (via level=ad no insight da campanha)
     const fields = "ad_id,ad_name,adset_name,spend,impressions,cpm,ctr,clicks,cpc,reach,frequency,actions,cost_per_action_type";
@@ -57,7 +56,6 @@ export async function GET(req: NextRequest) {
       const clicks = parseInt((r.clicks as string) || "0");
 
       const actions = (r.actions as MetaAction[]) || [];
-      const costs = (r.cost_per_action_type as MetaAction[]) || [];
 
       const leads = parseInt(actions.find(a => a.action_type === "lead")?.value || "0");
       const linkClicks = parseInt(actions.find(a => a.action_type === "link_click")?.value || "0");

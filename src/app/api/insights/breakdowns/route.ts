@@ -12,33 +12,11 @@
  *   date_to?        - YYYY-MM-DD (padrão: hoje)
  *   group_by?       - "platform" | "position" | "both" (padrão: "both")
  *   cpl_target?     - número (padrão: 25)
- *
- * Resposta:
- * {
- *   period: { from, to }
- *   total_records: number
- *   breakdowns: [
- *     {
- *       publisher_platform: string       // ex: "instagram", "facebook"
- *       platform_position:  string       // ex: "feed", "reels", "story"
- *       total_spend:        number
- *       total_impressions:  number
- *       total_clicks:       number
- *       total_leads:        number
- *       avg_cpm:            number
- *       avg_ctr:            number
- *       cpl:                number | null
- *       spend_share:        number       // % do total gasto
- *       lead_share:         number       // % do total de leads
- *       cpl_vs_target:      number | null // CPL / cpl_target
- *     }
- *   ]
- *   by_creative?: [...]  // Se creative_id informado: detalhado por criativo
- * }
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
 
 const DEFAULT_CPL_TARGET = KNOWN_CAMPAIGNS["T7_0003_RAT"]?.cplTarget ?? 25;
@@ -52,6 +30,9 @@ function getDateRange(daysBack = 30): { from: string; to: string } {
 }
 
 export async function GET(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   const db = getDb();
   const { searchParams } = req.nextUrl;
 
@@ -63,13 +44,13 @@ export async function GET(req: NextRequest) {
   const cplTarget = parseFloat(searchParams.get("cpl_target") || String(DEFAULT_CPL_TARGET));
 
   // ── 1. Verificar se há dados de breakdowns ──
-  const countArgs: unknown[] = [dateFrom, dateTo];
+  const countArgs: unknown[] = [dateFrom, dateTo, auth.workspace_id];
   if (creativeId) countArgs.push(creativeId);
 
   const countRow = await db.execute({
     sql: `
       SELECT COUNT(*) AS total FROM metrics_breakdowns
-      WHERE date BETWEEN ? AND ?
+      WHERE date BETWEEN ? AND ? AND workspace_id = ?
       ${creativeId ? "AND creative_id = ?" : ""}
     `,
     args: countArgs,
@@ -102,7 +83,7 @@ export async function GET(req: NextRequest) {
     groupCols = "publisher_platform, platform_position";
   }
 
-  const filterArgs: unknown[] = [dateFrom, dateTo];
+  const filterArgs: unknown[] = [dateFrom, dateTo, auth.workspace_id];
   if (creativeId) filterArgs.push(creativeId);
 
   // ── 3. Aggregação por plataforma/posição ──
@@ -119,7 +100,7 @@ export async function GET(req: NextRequest) {
         COUNT(DISTINCT creative_id)                                   AS creative_count,
         COUNT(DISTINCT date)                                          AS days_count
       FROM metrics_breakdowns
-      WHERE date BETWEEN ? AND ?
+      WHERE date BETWEEN ? AND ? AND workspace_id = ?
       ${creativeId ? "AND creative_id = ?" : ""}
       GROUP BY ${groupCols}
       ORDER BY total_spend DESC
@@ -182,10 +163,11 @@ export async function GET(req: NextRequest) {
         JOIN creatives c ON c.id = mb.creative_id
         WHERE mb.creative_id = ?
           AND mb.date BETWEEN ? AND ?
+          AND mb.workspace_id = ?
         GROUP BY c.name, mb.publisher_platform, mb.platform_position
         ORDER BY total_spend DESC
       `,
-      args: [creativeId, dateFrom, dateTo],
+      args: [creativeId, dateFrom, dateTo, auth.workspace_id],
     });
 
     byCreative = creativeResult.rows.map((row) => {

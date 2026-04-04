@@ -24,20 +24,14 @@
  * Protegido por x-api-key (TEST_LOG_API_KEY).
  */
 import { NextRequest, NextResponse } from "next/server";
-import { initDb } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 import * as meta from "@/lib/meta";
 import { listFilesInFolder, downloadFile, DriveFile } from "@/lib/google-drive";
 import { KNOWN_CAMPAIGNS, UTM_TEMPLATE } from "@/config/campaigns";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
-
-function checkAuth(req: NextRequest): boolean {
-  const key = req.headers.get("x-api-key");
-  const expected = process.env.TEST_LOG_API_KEY;
-  if (!expected) return false;
-  return key === expected;
-}
 
 interface PublishResult {
   ad_name: string;
@@ -101,12 +95,11 @@ async function getExistingAdNames(campaignId: string): Promise<Set<string>> {
 }
 
 export async function POST(req: NextRequest) {
-  if (!checkAuth(req)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
 
   try {
-    await initDb();
+    const db = getDb();
     const body = await req.json();
     const campaignKey = body.campaign_key || "T7_0003_RAT";
 

@@ -78,8 +78,9 @@ async function rateLimit() {
 }
 
 interface CardSpec {
-  image_base64: string;
+  image_base64?: string;
   image_filename: string;
+  image_hash?: string; // Se fornecido, pula o upload e usa o hash diretamente
 }
 
 interface CarouselSpec {
@@ -89,6 +90,7 @@ interface CarouselSpec {
   description: string;
   cta_type: string;
   cards: CardSpec[];
+  partnership?: PartnershipSpec; // Partnership por carrossel (sobrescreve o global se presente)
 }
 
 interface PartnershipSpec {
@@ -401,14 +403,22 @@ export async function POST(req: NextRequest) {
       };
 
       try {
-        // Upload all card images
+        // Upload all card images (or use pre-uploaded hashes)
         const imageHashes: string[] = [];
         for (const card of carousel.cards) {
-          const imageBuffer = Buffer.from(card.image_base64, "base64");
-          console.log(`[PublishCarousel] Uploading ${card.image_filename} (${imageBuffer.length} bytes)...`);
-          const upload = await uploadImage(modelAd.accountId, imageBuffer, card.image_filename);
-          imageHashes.push(upload.hash);
-          console.log(`[PublishCarousel] Uploaded: hash=${upload.hash}`);
+          if (card.image_hash) {
+            // Hash já fornecido (upload prévio via /api/ads/upload-image)
+            imageHashes.push(card.image_hash);
+            console.log(`[PublishCarousel] Using pre-uploaded hash for ${card.image_filename}: ${card.image_hash}`);
+          } else if (card.image_base64) {
+            const imageBuffer = Buffer.from(card.image_base64, "base64");
+            console.log(`[PublishCarousel] Uploading ${card.image_filename} (${imageBuffer.length} bytes)...`);
+            const upload = await uploadImage(modelAd.accountId, imageBuffer, card.image_filename);
+            imageHashes.push(upload.hash);
+            console.log(`[PublishCarousel] Uploaded: hash=${upload.hash}`);
+          } else {
+            throw new Error(`Card ${card.image_filename}: either image_base64 or image_hash is required`);
+          }
         }
         result.image_hashes = imageHashes;
 
@@ -426,7 +436,7 @@ export async function POST(req: NextRequest) {
           ctaType: carousel.cta_type,
           urlTags: modelAd.urlTags,
           displayLink: modelAd.displayLink,
-          partnership,
+          partnership: carousel.partnership || partnership, // Per-carousel partnership takes precedence
         });
         result.creative_id = creative.id;
         console.log(`[PublishCarousel] Creative created: ${creative.id}`);

@@ -1,5 +1,6 @@
 export interface Image {
   id: string;
+  workspace_id?: string;
   name: string;
   category: "dra-priscila" | "marca" | "produto" | "referencia";
   blob_url: string;
@@ -12,6 +13,7 @@ export interface Image {
 
 export interface Creative {
   id: string;
+  workspace_id?: string;
   name: string;
   blob_url: string;
   thumbnail_url?: string;
@@ -148,6 +150,7 @@ export interface UpdateMetricsRequest {
 
 export interface Campaign {
   id: string;
+  workspace_id?: string;
   name: string;
   meta_campaign_id: string;
   meta_account_id: string;

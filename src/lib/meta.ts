@@ -6,6 +6,7 @@
  */
 
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
+import { resolveMetaToken } from "@/lib/workspace";
 
 const META_API_VERSION = "v25.0";
 const META_BASE_URL = `https://graph.facebook.com/${META_API_VERSION}`;
@@ -15,6 +16,7 @@ const META_BASE_URL = `https://graph.facebook.com/${META_API_VERSION}`;
 /**
  * Mapa accountId → token, construído a partir de KNOWN_CAMPAIGNS.
  * Permite usar tokens distintos por conta Meta (Tarefa 4.2).
+ * Fallback quando workspace não está disponível no contexto.
  */
 function buildAccountTokenMap(): Record<string, string> {
   const map: Record<string, string> = {};
@@ -31,8 +33,9 @@ function buildAccountTokenMap(): Record<string, string> {
 /**
  * Retorna o access token correto para uma conta Meta.
  * Ordem de prioridade:
- *  1. Token específico da conta (via metaTokenEnvVar em campaigns.ts)
- *  2. META_SYSTEM_USER_TOKEN (token padrão / legado)
+ *  1. Token do workspace (se workspaceId fornecido)
+ *  2. Token específico da conta (via metaTokenEnvVar em campaigns.ts)
+ *  3. META_SYSTEM_USER_TOKEN (token padrão / legado)
  */
 function getToken(accountId?: string): string {
   if (accountId) {
@@ -42,6 +45,17 @@ function getToken(accountId?: string): string {
   const token = process.env.META_SYSTEM_USER_TOKEN;
   if (!token) throw new Error("META_SYSTEM_USER_TOKEN env var is required");
   return token;
+}
+
+/**
+ * Versão async do getToken que suporta workspace-based tokens.
+ * Usa resolveMetaToken do workspace module.
+ */
+export async function getTokenForWorkspace(
+  workspaceId: string | null,
+  accountId?: string
+): Promise<string> {
+  return resolveMetaToken(workspaceId, accountId);
 }
 
 async function metaFetch<T = Record<string, unknown>>(

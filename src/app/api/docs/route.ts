@@ -32,11 +32,23 @@ const OPENAPI_SPEC = {
   ],
   components: {
     securitySchemes: {
+      SessionAuth: {
+        type: "apiKey",
+        in: "cookie",
+        name: "pegasus_session",
+        description: "Cookie de sessão — obtido via POST /api/auth/login ou /api/auth/register",
+      },
+      WorkspaceApiKey: {
+        type: "apiKey",
+        in: "header",
+        name: "x-api-key",
+        description: "API key do workspace — criada via POST /api/workspaces/api-keys. Formato: pgs_xxxx",
+      },
       ApiKeyAuth: {
         type: "apiKey",
         in: "header",
         name: "x-api-key",
-        description: "TEST_LOG_API_KEY definida nas variáveis de ambiente do projeto",
+        description: "(Legacy) TEST_LOG_API_KEY — mantida para compatibilidade",
       },
       CronAuth: {
         type: "http",
@@ -112,6 +124,172 @@ const OPENAPI_SPEC = {
   },
   security: [{ ApiKeyAuth: [] }],
   paths: {
+    // ── Autenticação ──────────────────────────────────────────────────────
+    "/api/auth/register": {
+      post: {
+        tags: ["Auth"],
+        summary: "Registrar novo usuário",
+        description: "Cria usuário + workspace padrão. Retorna session cookie.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["email", "password", "name"],
+                properties: {
+                  email: { type: "string", format: "email", example: "user@example.com" },
+                  password: { type: "string", minLength: 8, example: "s3cur3pass" },
+                  name: { type: "string", example: "João Silva" },
+                  workspace_name: { type: "string", example: "Minha Agência" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "201": { description: "Usuário criado. Session cookie setado." },
+          "400": { description: "VALIDATION_ERROR — campos ausentes, email inválido ou senha <8 chars" },
+          "409": { description: "EMAIL_EXISTS — email já cadastrado" },
+        },
+      },
+    },
+    "/api/auth/login": {
+      post: {
+        tags: ["Auth"],
+        summary: "Login com email/senha",
+        description: "Autentica e retorna session cookie.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["email", "password"],
+                properties: {
+                  email: { type: "string", format: "email" },
+                  password: { type: "string" },
+                  workspace_id: { type: "string", description: "Opcional — seleciona workspace" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "Login OK. Session cookie setado." },
+          "401": { description: "INVALID_CREDENTIALS — email ou senha incorretos" },
+          "403": { description: "NO_WORKSPACE_ACCESS — sem acesso ao workspace" },
+        },
+      },
+    },
+    "/api/auth/me": {
+      get: {
+        tags: ["Auth"],
+        summary: "Usuário e workspace atual",
+        security: [{ SessionAuth: [] }, { WorkspaceApiKey: [] }],
+        responses: {
+          "200": { description: "Dados do usuário, workspace ativo e lista de workspaces" },
+          "401": { description: "UNAUTHORIZED" },
+        },
+      },
+    },
+    "/api/workspaces": {
+      get: {
+        tags: ["Workspaces"],
+        summary: "Listar workspaces",
+        security: [{ SessionAuth: [] }, { WorkspaceApiKey: [] }],
+        responses: { "200": { description: "Lista de workspaces do usuário" } },
+      },
+      post: {
+        tags: ["Workspaces"],
+        summary: "Criar workspace",
+        security: [{ SessionAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["name", "slug"],
+                properties: {
+                  name: { type: "string", example: "Agência XYZ" },
+                  slug: { type: "string", pattern: "^[a-z0-9-]+$", example: "agencia-xyz" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "201": { description: "Workspace criado" },
+          "409": { description: "SLUG_EXISTS — slug já em uso" },
+        },
+      },
+    },
+    "/api/workspaces/meta-accounts": {
+      get: {
+        tags: ["Meta Accounts"],
+        summary: "Listar contas Meta do workspace",
+        security: [{ SessionAuth: [] }, { WorkspaceApiKey: [] }],
+        responses: { "200": { description: "Lista de contas (tokens nunca expostos)" } },
+      },
+      post: {
+        tags: ["Meta Accounts"],
+        summary: "Adicionar conta Meta (token manual ou OAuth)",
+        description: "Token criptografado em repouso (AES-256-GCM).",
+        security: [{ SessionAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["label", "meta_account_id", "auth_method"],
+                properties: {
+                  label: { type: "string" },
+                  meta_account_id: { type: "string", example: "act_1234567890" },
+                  auth_method: { type: "string", enum: ["token", "oauth"] },
+                  token: { type: "string", description: "Quando auth_method='token'" },
+                  page_id: { type: "string" },
+                  pixel_id: { type: "string" },
+                  instagram_user_id: { type: "string" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "201": { description: "Conta adicionada" },
+          "400": { description: "VALIDATION_ERROR" },
+          "409": { description: "ACCOUNT_EXISTS — conta já vinculada" },
+        },
+      },
+    },
+    "/api/workspaces/api-keys": {
+      get: {
+        tags: ["API Keys"],
+        summary: "Listar API keys (apenas prefixo)",
+        security: [{ SessionAuth: [] }, { WorkspaceApiKey: [] }],
+        responses: { "200": { description: "Lista de API keys ativas" } },
+      },
+      post: {
+        tags: ["API Keys"],
+        summary: "Criar API key (exibida uma única vez)",
+        security: [{ SessionAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["name"],
+                properties: { name: { type: "string", example: "n8n Integration" } },
+              },
+            },
+          },
+        },
+        responses: { "201": { description: "API key criada com key completa" } },
+      },
+    },
     // ── Criativos ──────────────────────────────────────────────────────────
     "/api/creatives": {
       get: {

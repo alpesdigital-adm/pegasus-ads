@@ -66,6 +66,102 @@ export async function initDb(): Promise<DbClient> {
   const pool = new Pool({ connectionString: getConnectionString() });
 
   try {
+    // ── Multi-tenant: Core tables ──
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        avatar_url TEXT,
+        password_hash TEXT,
+        google_id TEXT UNIQUE,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS workspaces (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        slug TEXT NOT NULL UNIQUE,
+        plan TEXT DEFAULT 'free' CHECK(plan IN ('free', 'pro', 'enterprise')),
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS workspace_members (
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        role TEXT NOT NULL DEFAULT 'member' CHECK(role IN ('owner', 'admin', 'member')),
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (workspace_id, user_id)
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        token TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        expires_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS api_keys (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        name TEXT NOT NULL,
+        key_hash TEXT NOT NULL UNIQUE,
+        key_prefix TEXT NOT NULL,
+        last_used_at TIMESTAMPTZ,
+        revoked_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS workspace_meta_accounts (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        label TEXT NOT NULL,
+        meta_account_id TEXT NOT NULL,
+        auth_method TEXT NOT NULL CHECK(auth_method IN ('token', 'oauth')),
+        token_encrypted TEXT,
+        oauth_tokens TEXT,
+        page_id TEXT,
+        pixel_id TEXT,
+        instagram_user_id TEXT,
+        is_default BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(workspace_id, meta_account_id)
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS workspace_settings (
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (workspace_id, key)
+      )
+    `);
+
+    // Indexes for multi-tenant tables
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_api_keys_workspace ON api_keys(workspace_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_workspace_meta_accounts_ws ON workspace_meta_accounts(workspace_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_workspace_settings_ws ON workspace_settings(workspace_id)`);
+
+    // ── Existing tables (with workspace_id support) ──
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS images (
         id TEXT PRIMARY KEY,
@@ -414,6 +510,34 @@ export async function initDb(): Promise<DbClient> {
         ('funnel-t7', 'T7', 'Turma 7 — RAT Academy', 'T7EBMX', 'RAT Academy', 25.00)
       ON CONFLICT (key) DO NOTHING
     `);
+
+    // ── Multi-tenant: Add workspace_id to existing tables ──
+
+    await pool.query(`ALTER TABLE images ADD COLUMN IF NOT EXISTS workspace_id TEXT REFERENCES workspaces(id)`);
+    await pool.query(`ALTER TABLE creatives ADD COLUMN IF NOT EXISTS workspace_id TEXT REFERENCES workspaces(id)`);
+    await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS workspace_id TEXT REFERENCES workspaces(id)`);
+    await pool.query(`ALTER TABLE test_rounds ADD COLUMN IF NOT EXISTS workspace_id TEXT REFERENCES workspaces(id)`);
+    await pool.query(`ALTER TABLE published_ads ADD COLUMN IF NOT EXISTS workspace_id TEXT REFERENCES workspaces(id)`);
+    await pool.query(`ALTER TABLE metrics ADD COLUMN IF NOT EXISTS workspace_id TEXT REFERENCES workspaces(id)`);
+    await pool.query(`ALTER TABLE metrics_breakdowns ADD COLUMN IF NOT EXISTS workspace_id TEXT REFERENCES workspaces(id)`);
+    await pool.query(`ALTER TABLE metrics_demographics ADD COLUMN IF NOT EXISTS workspace_id TEXT REFERENCES workspaces(id)`);
+    await pool.query(`ALTER TABLE alerts ADD COLUMN IF NOT EXISTS workspace_id TEXT REFERENCES workspaces(id)`);
+    await pool.query(`ALTER TABLE visual_elements ADD COLUMN IF NOT EXISTS workspace_id TEXT REFERENCES workspaces(id)`);
+    await pool.query(`ALTER TABLE hypotheses ADD COLUMN IF NOT EXISTS workspace_id TEXT REFERENCES workspaces(id)`);
+    await pool.query(`ALTER TABLE funnels ADD COLUMN IF NOT EXISTS workspace_id TEXT REFERENCES workspaces(id)`);
+    await pool.query(`ALTER TABLE pipeline_executions ADD COLUMN IF NOT EXISTS workspace_id TEXT REFERENCES workspaces(id)`);
+
+    // Workspace indexes on existing tables
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_images_workspace ON images(workspace_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_creatives_workspace ON creatives(workspace_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_campaigns_workspace ON campaigns(workspace_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_test_rounds_workspace ON test_rounds(workspace_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_published_ads_workspace ON published_ads(workspace_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_metrics_workspace ON metrics(workspace_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_alerts_workspace ON alerts(workspace_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_visual_elements_workspace ON visual_elements(workspace_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_hypotheses_workspace ON hypotheses(workspace_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_funnels_workspace ON funnels(workspace_id)`);
 
     // Índices para novas tabelas
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_visual_elements_dimension ON visual_elements(dimension)`);

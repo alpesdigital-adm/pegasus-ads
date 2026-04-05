@@ -113,3 +113,31 @@ export async function POST(req: NextRequest) {
     { status: 201 }
   );
 }
+
+export async function DELETE(req: NextRequest) {
+  await initDb();
+  const authResult = await requireAuth(req);
+  if (authResult instanceof NextResponse) return authResult;
+  const ctx = authResult as AuthContext;
+
+  if (ctx.role === "member") {
+    return NextResponse.json(
+      { error: "FORBIDDEN", message: "Only owner or admin can manage Meta accounts" },
+      { status: 403 }
+    );
+  }
+
+  const { searchParams } = new URL(req.url);
+  const id = searchParams.get("id");
+  if (!id) {
+    return NextResponse.json({ error: "VALIDATION_ERROR", message: "id is required" }, { status: 400 });
+  }
+
+  const db = getDb();
+  await db.execute({
+    sql: `DELETE FROM workspace_meta_accounts WHERE id = ? AND workspace_id = ?`,
+    args: [id, ctx.workspace_id],
+  });
+
+  return NextResponse.json({ ok: true });
+}

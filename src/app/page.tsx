@@ -1,15 +1,16 @@
 "use client";
 
-import { GraphCanvas } from "@/components/GraphCanvas";
-import { Header } from "@/components/Header";
+import AppShell from "@/components/AppShell";
 
-export default function Home() {
+export default function DashboardPage() {
   return (
-    <div className="flex flex-col h-screen" style={{ background: "#080c14" }}>
-      <Header />
-      <main className="flex-1 relative overflow-hidden">
-        <GraphCanvas />
-      </main>
-    </div>
+    <AppShell>
+      <div>
+        <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
+        <p className="text-[var(--text-secondary)] mt-1">
+          Welcome to Pegasus Ads. Configure your ad accounts in Settings to get started.
+        </p>
+      </div>
+    </AppShell>
   );
 }

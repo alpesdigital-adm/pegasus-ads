@@ -24,6 +24,8 @@ interface AdInsight {
   adset_id: string;
   adset_name: string;
   status: string;
+  effective_status: string;
+  adset_status: string;
   spend: number;
   leads: number;
   cpl: number;
@@ -70,7 +72,8 @@ export async function GET(req: NextRequest) {
     const token = await getTokenForWorkspace(auth.workspace_id);
 
     // 1. Get all ads from campaign (all statuses for context)
-    const adsUrl = `${META_API}/${campaignId}/ads?fields=id,name,status,adset_id,adset{name}&limit=200&access_token=${token}`;
+    // effective_status reflects ad + adset + campaign status combined
+    const adsUrl = `${META_API}/${campaignId}/ads?fields=id,name,status,effective_status,adset_id,adset{name,status,effective_status}&limit=200&access_token=${token}`;
     const allAds = await fetchAllPages<Record<string, unknown>>(adsUrl);
 
     console.log(`[KillRule] Found ${allAds.length} total ads in campaign`);
@@ -140,9 +143,11 @@ export async function GET(req: NextRequest) {
       const adId = ad.id as string;
       const adName = ad.name as string;
       const adStatus = (ad.status as string) || "UNKNOWN";
-      const adset = ad.adset as Record<string, string> | undefined;
+      const adEffectiveStatus = (ad.effective_status as string) || adStatus;
+      const adset = ad.adset as Record<string, unknown> | undefined;
       const adsetId = (ad.adset_id as string) || "";
-      const adsetName = adset?.name || "";
+      const adsetName = (adset?.name as string) || "";
+      const adsetStatus = (adset?.effective_status as string) || (adset?.status as string) || "";
 
       const lt = lifetimeMap.get(adId);
       const spend = parseFloat((lt?.spend as string) || "0");
@@ -163,11 +168,11 @@ export async function GET(req: NextRequest) {
       const leads7d = getLeads(d7Row?.actions as Array<Record<string, string>> | undefined);
       const cpl7d = leads7d > 0 ? spend7d / leads7d : (spend7d > 0 ? Infinity : 0);
 
-      // Apply kill rule (only for ACTIVE ads)
+      // Apply kill rule (only for effectively ACTIVE ads)
       let killLayer: string | null = null;
       let killReason: string | null = null;
 
-      if (adStatus === "ACTIVE" && spend > 0) {
+      if (adEffectiveStatus === "ACTIVE" && spend > 0) {
         // L0 — No leads
         if (leads === 0) {
           if (spend >= CPL_META && cpm >= 60) {
@@ -228,6 +233,8 @@ export async function GET(req: NextRequest) {
         adset_id: adsetId,
         adset_name: adsetName,
         status: adStatus,
+        effective_status: adEffectiveStatus,
+        adset_status: adsetStatus,
         spend,
         leads,
         cpl: leads > 0 ? cpl : -1,
@@ -254,7 +261,7 @@ export async function GET(req: NextRequest) {
     });
 
     const killCount = results.filter((r) => r.kill_layer).length;
-    const activeCount = results.filter((r) => r.status === "ACTIVE").length;
+    const activeCount = results.filter((r) => r.effective_status === "ACTIVE").length;
     const totalSpend = results.reduce((s, r) => s + r.spend, 0);
     const totalLeads = results.reduce((s, r) => s + r.leads, 0);
 

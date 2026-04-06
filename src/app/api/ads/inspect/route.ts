@@ -48,6 +48,9 @@ export async function GET(req: NextRequest) {
   const fields = [
     "name",
     "status",
+    "campaign_id",
+    "adset_id",
+    "effective_status",
     "creative{id,name,object_story_spec,asset_feed_spec,url_tags,instagram_branded_content,branded_content}",
   ].join(",");
 

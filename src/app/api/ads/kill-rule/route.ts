@@ -6,6 +6,7 @@
  *
  * O parâmetro `window` controla a janela temporal usada para decisão:
  *   - lifetime (default): usa dados acumulados desde o início
+ *   - 2d: usa apenas dados dos últimos 2 dias (hoje + ontem)
  *   - 3d: usa apenas dados dos últimos 3 dias
  *   - 7d: usa apenas dados dos últimos 7 dias
  *
@@ -38,7 +39,10 @@ interface AdInsight {
   impressions: number;
   ctr: number;
   clicks: number;
-  // 3d and 7d windows
+  // 2d, 3d and 7d windows
+  spend_2d: number;
+  leads_2d: number;
+  cpl_2d: number;
   spend_3d: number;
   leads_3d: number;
   cpl_3d: number;
@@ -74,8 +78,8 @@ export async function GET(req: NextRequest) {
   }
 
   const windowParam = req.nextUrl.searchParams.get("window") || "lifetime";
-  if (!["lifetime", "3d", "7d"].includes(windowParam)) {
-    return NextResponse.json({ error: "window must be lifetime, 3d, or 7d" }, { status: 400 });
+  if (!["lifetime", "2d", "3d", "7d"].includes(windowParam)) {
+    return NextResponse.json({ error: "window must be lifetime, 2d, 3d, or 7d" }, { status: 400 });
   }
 
   try {
@@ -92,15 +96,21 @@ export async function GET(req: NextRequest) {
     const insightsUrl = `${META_API}/${campaignId}/insights?fields=ad_id,ad_name,adset_id,adset_name,spend,impressions,clicks,ctr,cpm,actions&level=ad&limit=500&time_range={"since":"2026-01-01","until":"2026-12-31"}&access_token=${token}`;
     const lifetimeInsights = await fetchAllPages<Record<string, unknown>>(insightsUrl);
 
-    // 3. Get 3-day insights
+    // 3. Get 2-day, 3-day and 7-day insights
     const now = new Date();
+    const d2 = new Date(now);
+    d2.setDate(d2.getDate() - 2);
     const d3 = new Date(now);
     d3.setDate(d3.getDate() - 3);
     const d7 = new Date(now);
     d7.setDate(d7.getDate() - 7);
     const today = now.toISOString().split("T")[0];
+    const since2d = d2.toISOString().split("T")[0];
     const since3d = d3.toISOString().split("T")[0];
     const since7d = d7.toISOString().split("T")[0];
+
+    const insights2dUrl = `${META_API}/${campaignId}/insights?fields=ad_id,spend,actions&level=ad&limit=500&time_range={"since":"${since2d}","until":"${today}"}&access_token=${token}`;
+    const insights2d = await fetchAllPages<Record<string, unknown>>(insights2dUrl);
 
     const insights3dUrl = `${META_API}/${campaignId}/insights?fields=ad_id,spend,actions&level=ad&limit=500&time_range={"since":"${since3d}","until":"${today}"}&access_token=${token}`;
     const insights3d = await fetchAllPages<Record<string, unknown>>(insights3dUrl);
@@ -125,6 +135,10 @@ export async function GET(req: NextRequest) {
     const lifetimeMap = new Map<string, Record<string, unknown>>();
     for (const row of lifetimeInsights) {
       lifetimeMap.set(row.ad_id as string, row);
+    }
+    const d2Map = new Map<string, Record<string, unknown>>();
+    for (const row of insights2d) {
+      d2Map.set(row.ad_id as string, row);
     }
     const d3Map = new Map<string, Record<string, unknown>>();
     for (const row of insights3d) {
@@ -168,6 +182,11 @@ export async function GET(req: NextRequest) {
       const leads = getLeads(lt?.actions as Array<Record<string, string>> | undefined);
       const cpl = leads > 0 ? spend / leads : (spend > 0 ? Infinity : 0);
 
+      const d2Row = d2Map.get(adId);
+      const spend2d = parseFloat((d2Row?.spend as string) || "0");
+      const leads2d = getLeads(d2Row?.actions as Array<Record<string, string>> | undefined);
+      const cpl2d = leads2d > 0 ? spend2d / leads2d : (spend2d > 0 ? Infinity : 0);
+
       const d3Row = d3Map.get(adId);
       const spend3d = parseFloat((d3Row?.spend as string) || "0");
       const leads3d = getLeads(d3Row?.actions as Array<Record<string, string>> | undefined);
@@ -184,8 +203,8 @@ export async function GET(req: NextRequest) {
 
       if (adEffectiveStatus === "ACTIVE" && spend > 0) {
         // Select data window for kill rule evaluation
-        const wSpend = windowParam === "3d" ? spend3d : windowParam === "7d" ? spend7d : spend;
-        const wLeads = windowParam === "3d" ? leads3d : windowParam === "7d" ? leads7d : leads;
+        const wSpend = windowParam === "2d" ? spend2d : windowParam === "3d" ? spend3d : windowParam === "7d" ? spend7d : spend;
+        const wLeads = windowParam === "2d" ? leads2d : windowParam === "3d" ? leads3d : windowParam === "7d" ? leads7d : leads;
         const wCpl = wLeads > 0 ? wSpend / wLeads : (wSpend > 0 ? Infinity : 0);
         // CPM: estimate from window ratio if not lifetime
         const wCpm = windowParam === "lifetime" ? cpm : (
@@ -262,6 +281,9 @@ export async function GET(req: NextRequest) {
         impressions,
         ctr,
         clicks,
+        spend_2d: spend2d,
+        leads_2d: leads2d,
+        cpl_2d: leads2d > 0 ? cpl2d : -1,
         spend_3d: spend3d,
         leads_3d: leads3d,
         cpl_3d: leads3d > 0 ? cpl3d : -1,

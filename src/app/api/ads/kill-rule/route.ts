@@ -1,8 +1,13 @@
 /**
- * GET /api/ads/kill-rule?campaign_id=XXX
+ * GET /api/ads/kill-rule?campaign_id=XXX[&window=lifetime|3d|7d]
  *
  * Puxa TODOS os ads ativos de uma campanha com métricas (spend, leads, CPL, CPM,
  * impressions) e aplica as 6 camadas de kill rule automaticamente.
+ *
+ * O parâmetro `window` controla a janela temporal usada para decisão:
+ *   - lifetime (default): usa dados acumulados desde o início
+ *   - 3d: usa apenas dados dos últimos 3 dias
+ *   - 7d: usa apenas dados dos últimos 7 dias
  *
  * Retorna lista de ads com veredito por camada.
  *
@@ -66,6 +71,11 @@ export async function GET(req: NextRequest) {
   const campaignId = req.nextUrl.searchParams.get("campaign_id");
   if (!campaignId) {
     return NextResponse.json({ error: "campaign_id required" }, { status: 400 });
+  }
+
+  const windowParam = req.nextUrl.searchParams.get("window") || "lifetime";
+  if (!["lifetime", "3d", "7d"].includes(windowParam)) {
+    return NextResponse.json({ error: "window must be lifetime, 3d, or 7d" }, { status: 400 });
   }
 
   try {
@@ -173,27 +183,37 @@ export async function GET(req: NextRequest) {
       let killReason: string | null = null;
 
       if (adEffectiveStatus === "ACTIVE" && spend > 0) {
+        // Select data window for kill rule evaluation
+        const wSpend = windowParam === "3d" ? spend3d : windowParam === "7d" ? spend7d : spend;
+        const wLeads = windowParam === "3d" ? leads3d : windowParam === "7d" ? leads7d : leads;
+        const wCpl = wLeads > 0 ? wSpend / wLeads : (wSpend > 0 ? Infinity : 0);
+        // CPM: estimate from window ratio if not lifetime
+        const wCpm = windowParam === "lifetime" ? cpm : (
+          (spend > 0 && impressions > 0) ? ((wSpend / spend) * impressions > 0 ? (wSpend / ((wSpend / spend) * impressions)) * 1000 : 0) : 0
+        );
+        const wLabel = windowParam === "lifetime" ? "" : `[${windowParam}] `;
+
         // L0 — No leads
-        if (leads === 0) {
-          if (spend >= CPL_META && cpm >= 60) {
+        if (wLeads === 0 && wSpend > 0) {
+          if (wSpend >= CPL_META && wCpm >= 60) {
             killLayer = "L0a";
-            killReason = `spend R$${spend.toFixed(2)} ≥ 1×CPL_meta + 0 leads + CPM R$${cpm.toFixed(2)} ≥ 60`;
-          } else if (spend >= 1.5 * CPL_META) {
+            killReason = `${wLabel}spend R$${wSpend.toFixed(2)} ≥ 1×CPL_meta + 0 leads + CPM R$${wCpm.toFixed(2)} ≥ 60`;
+          } else if (wSpend >= 1.5 * CPL_META) {
             killLayer = "L0b";
-            killReason = `spend R$${spend.toFixed(2)} ≥ 1.5×CPL_meta + 0 leads`;
+            killReason = `${wLabel}spend R$${wSpend.toFixed(2)} ≥ 1.5×CPL_meta + 0 leads`;
           }
         }
         // L1 — Clearly bad (with leads)
-        else if (spend > 4 * CPL_META && cpl > 1.5 * CPL_META) {
+        else if (wSpend > 4 * CPL_META && wCpl > 1.5 * CPL_META) {
           killLayer = "L1";
-          killReason = `spend R$${spend.toFixed(2)} > 4×CPL + CPL R$${cpl.toFixed(2)} > 1.5×meta`;
+          killReason = `${wLabel}spend R$${wSpend.toFixed(2)} > 4×CPL + CPL R$${wCpl.toFixed(2)} > 1.5×meta`;
         }
         // L2 — Above target with evidence
-        else if (spend > 6 * CPL_META && cpl > 1.3 * CPL_META) {
+        else if (wSpend > 6 * CPL_META && wCpl > 1.3 * CPL_META) {
           killLayer = "L2";
-          killReason = `spend R$${spend.toFixed(2)} > 6×CPL + CPL R$${cpl.toFixed(2)} > 1.3×meta`;
+          killReason = `${wLabel}spend R$${wSpend.toFixed(2)} > 6×CPL + CPL R$${wCpl.toFixed(2)} > 1.3×meta`;
         }
-        // L3 — Acute 3d deterioration
+        // L3 — Acute 3d deterioration (always uses 3d data regardless of window)
         else if (
           hasBenchmark &&
           spend3d > 5 * CPL_META &&
@@ -204,7 +224,7 @@ export async function GET(req: NextRequest) {
           killLayer = "L3";
           killReason = `3d: spend R$${spend3d.toFixed(2)} > 5×CPL + CPL3d R$${cpl3d.toFixed(2)} > 1.7×meta + CPL_acum > meta + rolling5d > 1.15×meta`;
         }
-        // L4 — Slow 7d deterioration
+        // L4 — Slow 7d deterioration (always uses 7d data regardless of window)
         else if (
           hasBenchmark &&
           spend7d > 5 * CPL_META &&
@@ -215,7 +235,7 @@ export async function GET(req: NextRequest) {
           killLayer = "L4";
           killReason = `7d: spend R$${spend7d.toFixed(2)} > 5×CPL + CPL7d R$${cpl7d.toFixed(2)} > 1.7×meta + CPL_acum > meta + rolling5d > 1.15×meta`;
         }
-        // L5 — Persistent mediocrity
+        // L5 — Persistent mediocrity (always uses lifetime)
         else if (
           hasBenchmark &&
           spend > 10 * CPL_META &&
@@ -267,6 +287,7 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({
       campaign_id: campaignId,
+      window: windowParam,
       cpl_meta: CPL_META,
       has_benchmark: hasBenchmark,
       rolling_5d_cpl: rolling5dCpl === Infinity ? -1 : Number(rolling5dCpl.toFixed(2)),

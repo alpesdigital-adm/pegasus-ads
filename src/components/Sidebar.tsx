@@ -71,12 +71,15 @@ const BOTTOM_ITEMS: NavItem[] = [
 export default function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
-  const { user, workspace, logout } = useAuthStore();
+  const { user, workspace, workspaces, switchWorkspace, logout } = useAuthStore();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [wsDropdownOpen, setWsDropdownOpen] = useState(false);
+  const [switching, setSwitching] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const navItemsRef = useRef<HTMLDivElement>(null);
-  const logoRef = useRef<HTMLDivElement>(null);
+  const logoRef = useRef<HTMLButtonElement>(null);
+  const wsDropdownRef = useRef<HTMLDivElement>(null);
 
   // Animate sidebar items on mount
   useEffect(() => {
@@ -107,7 +110,7 @@ export default function Sidebar() {
   useEffect(() => {
     if (!overlayRef.current || !sidebarRef.current) return;
     const isDesktop = window.matchMedia("(min-width: 1024px)").matches;
-    if (isDesktop) return; // Don't animate on desktop — Tailwind handles it
+    if (isDesktop) return;
 
     if (mobileOpen) {
       gsap.to(overlayRef.current, { opacity: 1, display: "block", duration: 0.3 });
@@ -120,6 +123,17 @@ export default function Sidebar() {
     }
   }, [mobileOpen]);
 
+  // Close workspace dropdown on outside click
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (wsDropdownRef.current && !wsDropdownRef.current.contains(e.target as Node)) {
+        setWsDropdownOpen(false);
+      }
+    }
+    if (wsDropdownOpen) document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [wsDropdownOpen]);
+
   const handleNav = (href: string) => {
     router.push(href);
     setMobileOpen(false);
@@ -128,6 +142,20 @@ export default function Sidebar() {
   const handleLogout = async () => {
     await logout();
     router.push("/login");
+  };
+
+  const handleSwitchWorkspace = async (wsId: string) => {
+    if (wsId === workspace?.id) {
+      setWsDropdownOpen(false);
+      return;
+    }
+    setSwitching(true);
+    const ok = await switchWorkspace(wsId);
+    setSwitching(false);
+    if (ok) {
+      setWsDropdownOpen(false);
+      window.location.reload();
+    }
   };
 
   const isActive = (href: string) => {
@@ -161,29 +189,101 @@ export default function Sidebar() {
         className="fixed left-0 top-0 bottom-0 w-[var(--sidebar-width)] bg-[var(--bg-secondary)] border-r border-[var(--border-default)] z-50 flex flex-col
                    max-lg:-translate-x-full lg:translate-x-0 sidebar-transition"
       >
-        {/* Logo */}
-        <div ref={logoRef} className="px-5 py-5 flex items-center gap-3 border-b border-[var(--border-default)]">
-          <div className="w-8 h-8 rounded-lg bg-[var(--accent)] flex items-center justify-center">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <path d="M9 2L15 6V12L9 16L3 12V6L9 2Z" fill="white" fillOpacity="0.9" />
-            </svg>
-          </div>
-          <div>
-            <div className="text-sm font-semibold text-[var(--text-primary)]">Pegasus Ads</div>
-            <div className="text-[11px] text-[var(--text-tertiary)] truncate max-w-[160px]">
-              {workspace?.name || "Loading..."}
-            </div>
-          </div>
-
-          {/* Mobile close */}
+        {/* Workspace Switcher */}
+        <div ref={wsDropdownRef} className="relative">
           <button
-            onClick={() => setMobileOpen(false)}
-            className="lg:hidden ml-auto p-1.5 rounded-md hover:bg-[var(--bg-hover)] transition-colors"
+            ref={logoRef}
+            onClick={() => setWsDropdownOpen(!wsDropdownOpen)}
+            className="w-full px-4 py-4 flex items-center gap-3 border-b border-[var(--border-default)] hover:bg-[var(--bg-hover)] transition-colors"
           >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-              <path d="M4 4l8 8M12 4l-8 8" />
+            <div className="w-8 h-8 rounded-lg bg-[var(--accent)] flex items-center justify-center text-xs font-bold text-white shrink-0">
+              {workspace?.name?.[0]?.toUpperCase() || "W"}
+            </div>
+            <div className="flex-1 min-w-0 text-left">
+              <div className="text-sm font-semibold text-[var(--text-primary)] truncate">
+                {workspace?.name || "Workspace"}
+              </div>
+              <div className="text-[10px] text-[var(--text-tertiary)]">
+                Pegasus Ads
+              </div>
+            </div>
+            <svg
+              width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+              className={`text-[var(--text-muted)] shrink-0 transition-transform ${wsDropdownOpen ? "rotate-180" : ""}`}
+            >
+              <path d="M6 9l6 6 6-6" />
             </svg>
+
+            {/* Mobile close */}
+            <span
+              onClick={(e) => { e.stopPropagation(); setMobileOpen(false); }}
+              className="lg:hidden p-1 rounded-md hover:bg-[var(--bg-hover)] transition-colors"
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                <path d="M4 4l8 8M12 4l-8 8" />
+              </svg>
+            </span>
           </button>
+
+          {/* Workspace dropdown */}
+          {wsDropdownOpen && (
+            <div
+              className="absolute left-3 right-3 top-full mt-1 rounded-xl overflow-hidden z-50"
+              style={{
+                background: "linear-gradient(180deg, #1e293b 0%, #0f172a 100%)",
+                border: "1px solid rgba(59,130,246,0.2)",
+                boxShadow: "0 8px 30px rgba(0,0,0,0.5)",
+              }}
+            >
+              <div className="px-3 py-2">
+                <p className="text-[9px] uppercase tracking-wider text-slate-500 mb-1">Workspaces</p>
+                {workspaces.map((ws) => (
+                  <button
+                    key={ws.id}
+                    onClick={() => handleSwitchWorkspace(ws.id)}
+                    disabled={switching}
+                    className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs transition-all ${
+                      ws.id === workspace?.id
+                        ? "bg-blue-500/10 text-blue-400"
+                        : "text-slate-300 hover:bg-slate-700/50"
+                    }`}
+                  >
+                    <div
+                      className="w-6 h-6 rounded flex items-center justify-center text-[10px] font-bold shrink-0"
+                      style={{
+                        background: ws.id === workspace?.id ? "rgba(59,130,246,0.2)" : "rgba(100,116,139,0.2)",
+                        color: ws.id === workspace?.id ? "#60a5fa" : "#94a3b8",
+                      }}
+                    >
+                      {ws.name[0]?.toUpperCase()}
+                    </div>
+                    <span className="flex-1 text-left truncate">{ws.name}</span>
+                    {ws.id === workspace?.id && (
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="shrink-0">
+                        <path d="M20 6L9 17l-5-5" />
+                      </svg>
+                    )}
+                  </button>
+                ))}
+              </div>
+
+              {/* Create new workspace */}
+              <div className="px-3 py-2 border-t border-slate-700/50">
+                <button
+                  onClick={() => {
+                    setWsDropdownOpen(false);
+                    router.push("/settings?tab=workspaces");
+                  }}
+                  className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs text-slate-400 hover:bg-slate-700/50 hover:text-slate-200 transition-all"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                    <path d="M12 5v14M5 12h14" />
+                  </svg>
+                  Criar workspace
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Navigation */}
@@ -228,7 +328,7 @@ export default function Sidebar() {
               onClick={handleLogout}
               className="mt-2.5 w-full text-xs text-[var(--text-muted)] hover:text-[var(--error)] py-1.5 rounded-md hover:bg-[var(--error-bg)] transition-all"
             >
-              Sign out
+              Sair
             </button>
           </div>
         </nav>

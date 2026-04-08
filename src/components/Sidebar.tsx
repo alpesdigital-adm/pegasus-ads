@@ -75,6 +75,10 @@ export default function Sidebar() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [wsDropdownOpen, setWsDropdownOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
+  const [showCreateWs, setShowCreateWs] = useState(false);
+  const [newWsName, setNewWsName] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
   const sidebarRef = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const navItemsRef = useRef<HTMLDivElement>(null);
@@ -156,6 +160,36 @@ export default function Sidebar() {
       setWsDropdownOpen(false);
       window.location.reload();
     }
+  };
+
+  const handleCreateWorkspace = async () => {
+    if (!newWsName.trim()) return;
+    setCreating(true);
+    setCreateError(null);
+    try {
+      const slug = newWsName.trim().toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").slice(0, 30) + "-" + Date.now().toString(36);
+      const res = await fetch("/api/workspaces", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newWsName.trim(), slug }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        setCreateError(data.message || "Erro ao criar workspace");
+        setCreating(false);
+        return;
+      }
+      const data = await res.json();
+      // Switch to new workspace
+      await switchWorkspace(data.id);
+      setWsDropdownOpen(false);
+      setShowCreateWs(false);
+      setNewWsName("");
+      window.location.reload();
+    } catch {
+      setCreateError("Erro de conexao");
+    }
+    setCreating(false);
   };
 
   const isActive = (href: string) => {
@@ -269,18 +303,47 @@ export default function Sidebar() {
 
               {/* Create new workspace */}
               <div className="px-3 py-2 border-t border-slate-700/50">
-                <button
-                  onClick={() => {
-                    setWsDropdownOpen(false);
-                    router.push("/settings?tab=workspaces");
-                  }}
-                  className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs text-slate-400 hover:bg-slate-700/50 hover:text-slate-200 transition-all"
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                    <path d="M12 5v14M5 12h14" />
-                  </svg>
-                  Criar workspace
-                </button>
+                {!showCreateWs ? (
+                  <button
+                    onClick={() => setShowCreateWs(true)}
+                    className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs text-slate-400 hover:bg-slate-700/50 hover:text-slate-200 transition-all"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                      <path d="M12 5v14M5 12h14" />
+                    </svg>
+                    Criar workspace
+                  </button>
+                ) : (
+                  <div className="space-y-2">
+                    <input
+                      type="text"
+                      value={newWsName}
+                      onChange={(e) => setNewWsName(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && handleCreateWorkspace()}
+                      placeholder="Nome do workspace"
+                      autoFocus
+                      className="w-full px-2.5 py-1.5 rounded-lg text-xs bg-slate-800/60 border border-slate-700/50 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500/50"
+                    />
+                    {createError && (
+                      <p className="text-[10px] text-red-400 px-1">{createError}</p>
+                    )}
+                    <div className="flex gap-1.5">
+                      <button
+                        onClick={handleCreateWorkspace}
+                        disabled={creating || !newWsName.trim()}
+                        className="flex-1 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50 transition-all"
+                      >
+                        {creating ? "Criando..." : "Criar"}
+                      </button>
+                      <button
+                        onClick={() => { setShowCreateWs(false); setNewWsName(""); setCreateError(null); }}
+                        className="px-2.5 py-1.5 rounded-lg text-xs text-slate-400 hover:bg-slate-700/50 transition-all"
+                      >
+                        Cancelar
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}

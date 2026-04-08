@@ -103,9 +103,11 @@ export default function Sidebar() {
     });
   }, []);
 
-  // Mobile overlay animation
+  // Mobile overlay animation (only on small screens)
   useEffect(() => {
     if (!overlayRef.current || !sidebarRef.current) return;
+    const isDesktop = window.matchMedia("(min-width: 1024px)").matches;
+    if (isDesktop) return; // Don't animate on desktop — Tailwind handles it
 
     if (mobileOpen) {
       gsap.to(overlayRef.current, { opacity: 1, display: "block", duration: 0.3 });

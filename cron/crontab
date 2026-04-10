@@ -1,0 +1,6 @@
+# Pegasus Ads cron jobs
+# Sync all T7 insights + kill rules — every hour
+0 * * * * wget -qO- http://0.0.0.0:3000/api/cron/sync-all 2>&1 | tail -1 >> /tmp/cron-sync.log
+
+# Original collect (pipeline creatives only) — every 6 hours
+0 */6 * * * wget -qO- http://0.0.0.0:3000/api/cron/collect 2>&1 | tail -1 >> /tmp/cron-collect.log

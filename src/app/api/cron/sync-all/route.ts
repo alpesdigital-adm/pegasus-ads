@@ -20,6 +20,7 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 
 const ACCOUNT_ID = "act_3601611403432716";
+const ACCOUNT_ID_NUM = 3601611403432716; // integer for classified_insights.account_id column
 const CPL_TARGET = 30;
 
 function isAuthorized(req: NextRequest): boolean {
@@ -102,7 +103,7 @@ export async function GET(req: NextRequest) {
                   adset_name = EXCLUDED.adset_name,
                   ad_name = EXCLUDED.ad_name`,
           args: [
-            ACCOUNT_ID,
+            ACCOUNT_ID_NUM,
             row.date_start,
             row.meta_campaign_id || row.campaign_id || "",
             row.campaign_name || "",

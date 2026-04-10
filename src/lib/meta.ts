@@ -588,6 +588,7 @@ export interface AdInsightRecord {
   meta_campaign_id?: string;
   ad_name?: string;
   adset_name?: string;
+  campaign_name?: string;
   date_start: string;
   date_stop: string;
   spend: number;
@@ -776,6 +777,7 @@ export async function getAccountAdsInsights(
       meta_campaign_id: row.campaign_id as string | undefined,
       ad_name: row.ad_name as string | undefined,
       adset_name: row.adset_name as string | undefined,
+      campaign_name: row.campaign_name as string | undefined,
       date_start: row.date_start as string,
       date_stop: row.date_stop as string,
       spend: parseFloat((row.spend as string) || "0"),

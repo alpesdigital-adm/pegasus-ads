@@ -104,11 +104,11 @@ export async function GET(req: NextRequest) {
           args: [
             ACCOUNT_ID,
             row.date_start,
-            row.campaign_id,
+            row.meta_campaign_id || row.campaign_id || "",
             row.campaign_name || "",
-            row.adset_id,
+            row.meta_adset_id || row.adset_id || "",
             row.adset_name || "",
-            row.ad_id || row.meta_ad_id,
+            row.meta_ad_id || row.ad_id || "",
             row.ad_name || "",
             row.spend || 0,
             row.impressions || 0,
@@ -128,7 +128,7 @@ export async function GET(req: NextRequest) {
     }
 
     // ── 3. Also upsert into metrics for mapped creatives ──
-    const adIds = [...new Set(t7Insights.map((r: any) => r.ad_id || r.meta_ad_id).filter(Boolean))];
+    const adIds = [...new Set(t7Insights.map((r: any) => r.meta_ad_id || r.ad_id).filter(Boolean))];
     if (adIds.length > 0) {
       // Build ad->creative map
       const placeholders = adIds.map(() => "?").join(",");
@@ -213,9 +213,10 @@ export async function GET(req: NextRequest) {
         killsTriggered++;
 
         // Check existing alert
+        const campaignKey = `${row.campaign_name}::${row.ad_id}`;
         const existing = await db.execute({
-          sql: `SELECT id FROM alerts WHERE creative_id = ? AND level = ? AND date = ? AND resolved = false LIMIT 1`,
-          args: [row.ad_id as string, triggered.level, todayStr],
+          sql: `SELECT id FROM alerts WHERE campaign_key = ? AND level = ? AND date = ? AND resolved = false LIMIT 1`,
+          args: [campaignKey, triggered.level, todayStr],
         });
         if (existing.rows.length > 0) continue;
 
@@ -225,10 +226,10 @@ export async function GET(req: NextRequest) {
         const message = `[${triggered.level}] ${triggered.name} — ${row.ad_name} — ${cplStr}`;
 
         await db.execute({
-          sql: `INSERT INTO alerts (id, creative_id, campaign_key, date, level, rule_name, message, spend, cpl, cpl_target, resolved)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false)`,
+          sql: `INSERT INTO alerts (id, campaign_key, date, level, rule_name, message, spend, cpl, cpl_target, resolved)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, false)`,
           args: [
-            uuid(), row.ad_id as string, row.campaign_name as string, todayStr,
+            uuid(), `${row.campaign_name}::${row.ad_id}`, todayStr,
             triggered.level, triggered.name, message, spend, cpl, CPL_TARGET,
           ],
         });

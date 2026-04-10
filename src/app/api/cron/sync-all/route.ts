@@ -88,10 +88,10 @@ export async function GET(req: NextRequest) {
       try {
         await db.execute({
           sql: `INSERT INTO classified_insights (
-                  account_id, date, campaign_id, campaign_name, adset_id, adset_name,
+                  insight_id, account_id, date, campaign_id, campaign_name, adset_id, adset_name,
                   ad_id, ad_name, spend, impressions, link_clicks, landing_page_views,
                   leads, effective_status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (date, ad_id) DO UPDATE SET
                   spend = EXCLUDED.spend,
                   impressions = EXCLUDED.impressions,

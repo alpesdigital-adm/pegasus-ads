@@ -1,28 +1,37 @@
 /**
- * GET /api/ads/kill-rule?campaign_id=XXX[&window=lifetime|3d|7d]
+ * GET /api/ads/kill-rule?campaign_id=XXX[&window=lifetime|7d|5d|4d|3d|2d|today]
  *
- * Puxa TODOS os ads ativos de uma campanha com métricas (spend, leads, CPL, CPM,
- * impressions) e aplica as 6 camadas de kill rule automaticamente.
+ * Avalia L0-L5 para todos os ads de uma campanha.
+ * Janelas disponíveis: lifetime (default), 7d, 5d, 4d, 3d, 2d, today.
  *
- * O parâmetro `window` controla a janela temporal usada para decisão:
- *   - lifetime (default): usa dados acumulados desde o início
- *   - 2d: usa apenas dados dos últimos 2 dias (hoje + ontem)
- *   - 3d: usa apenas dados dos últimos 3 dias
- *   - 7d: usa apenas dados dos últimos 7 dias
+ * Fonte de leads (prioridade):
+ * 1. CRM (crm_leads) — quando existem registros importados para a campanha
+ * 2. Meta Ads pixel — fallback quando CRM não disponível
  *
- * Retorna lista de ads com veredito por camada.
- *
- * Protegido por x-api-key.
+ * Lookup CRM usa chave COMPOSTA: (utm_content, utm_term) = (ad name, adset name)
+ * garantindo que o mesmo criativo em adsets diferentes tenha leads separados.
+ * Fallback: (ad_id, adset_id) quando UTMs resolvidos na importação.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
 import { getTokenForWorkspace } from "@/lib/meta";
+import { getDb } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
 const META_API = "https://graph.facebook.com/v25.0";
-const CPL_META = 32.77; // T7 cenário realista
+const CPL_META = 32.77;
+
+type Window = "lifetime" | "7d" | "5d" | "4d" | "3d" | "2d" | "today";
+
+interface WindowMetrics {
+  spend: number;
+  leads: number;
+  qualified_leads: number;
+  cpl: number;
+  source: "crm" | "meta";
+}
 
 interface AdInsight {
   ad_id: string;
@@ -32,302 +41,49 @@ interface AdInsight {
   status: string;
   effective_status: string;
   adset_status: string;
+  // Lifetime
   spend: number;
   leads: number;
+  qualified_leads: number;
   cpl: number;
   cpm: number;
   impressions: number;
   ctr: number;
   clicks: number;
-  // 2d, 3d and 7d windows
-  spend_2d: number;
-  leads_2d: number;
-  cpl_2d: number;
-  spend_3d: number;
-  leads_3d: number;
-  cpl_3d: number;
-  spend_7d: number;
-  leads_7d: number;
-  cpl_7d: number;
-  // Kill rule result
+  leads_source: "crm" | "meta";
+  // Windows
+  today: WindowMetrics;
+  w2d: WindowMetrics;
+  w3d: WindowMetrics;
+  w4d: WindowMetrics;
+  w5d: WindowMetrics;
+  w7d: WindowMetrics;
+  // Kill rule
   kill_layer: string | null;
   kill_reason: string | null;
+  kill_window: string;
+}
+
+/** Chave composta para lookup CRM */
+function crmKey(adName: string, adsetName: string): string {
+  return `${adName.toUpperCase()}||${adsetName.toUpperCase()}`;
+}
+
+/** Chave composta por IDs resolvidos */
+function crmIdKey(adId: string, adsetId: string): string {
+  return `${adId}||${adsetId}`;
 }
 
 async function fetchAllPages<T>(url: string): Promise<T[]> {
   const results: T[] = [];
   let nextUrl: string | null = url;
-
   while (nextUrl) {
-    const response: Response = await fetch(nextUrl);
-    const data: { data?: T[]; paging?: { next?: string } } = await response.json();
+    const r = await fetch(nextUrl);
+    const data: { data?: T[]; paging?: { next?: string } } = await r.json();
     if (data.data) results.push(...data.data);
     nextUrl = data.paging?.next || null;
   }
-
   return results;
-}
-
-export async function GET(req: NextRequest) {
-  const auth = await requireAuth(req);
-  if (auth instanceof NextResponse) return auth;
-
-  const campaignId = req.nextUrl.searchParams.get("campaign_id");
-  if (!campaignId) {
-    return NextResponse.json({ error: "campaign_id required" }, { status: 400 });
-  }
-
-  const windowParam = req.nextUrl.searchParams.get("window") || "lifetime";
-  if (!["lifetime", "2d", "3d", "7d"].includes(windowParam)) {
-    return NextResponse.json({ error: "window must be lifetime, 2d, 3d, or 7d" }, { status: 400 });
-  }
-
-  try {
-    const token = await getTokenForWorkspace(auth.workspace_id);
-
-    // 1. Get all ads from campaign (all statuses for context)
-    // effective_status reflects ad + adset + campaign status combined
-    const adsUrl = `${META_API}/${campaignId}/ads?fields=id,name,status,effective_status,adset_id,adset{name,status,effective_status}&limit=200&access_token=${token}`;
-    const allAds = await fetchAllPages<Record<string, unknown>>(adsUrl);
-
-    console.log(`[KillRule] Found ${allAds.length} total ads in campaign`);
-
-    // 2. Get lifetime insights for all ads
-    const insightsUrl = `${META_API}/${campaignId}/insights?fields=ad_id,ad_name,adset_id,adset_name,spend,impressions,clicks,ctr,cpm,actions&level=ad&limit=500&time_range={"since":"2026-01-01","until":"2026-12-31"}&access_token=${token}`;
-    const lifetimeInsights = await fetchAllPages<Record<string, unknown>>(insightsUrl);
-
-    // 3. Get 2-day, 3-day and 7-day insights
-    const now = new Date();
-    const d2 = new Date(now);
-    d2.setDate(d2.getDate() - 2);
-    const d3 = new Date(now);
-    d3.setDate(d3.getDate() - 3);
-    const d7 = new Date(now);
-    d7.setDate(d7.getDate() - 7);
-    const today = now.toISOString().split("T")[0];
-    const since2d = d2.toISOString().split("T")[0];
-    const since3d = d3.toISOString().split("T")[0];
-    const since7d = d7.toISOString().split("T")[0];
-
-    const insights2dUrl = `${META_API}/${campaignId}/insights?fields=ad_id,spend,actions&level=ad&limit=500&time_range={"since":"${since2d}","until":"${today}"}&access_token=${token}`;
-    const insights2d = await fetchAllPages<Record<string, unknown>>(insights2dUrl);
-
-    const insights3dUrl = `${META_API}/${campaignId}/insights?fields=ad_id,spend,actions&level=ad&limit=500&time_range={"since":"${since3d}","until":"${today}"}&access_token=${token}`;
-    const insights3d = await fetchAllPages<Record<string, unknown>>(insights3dUrl);
-
-    // 4. Get 7-day insights
-    const insights7dUrl = `${META_API}/${campaignId}/insights?fields=ad_id,spend,actions&level=ad&limit=500&time_range={"since":"${since7d}","until":"${today}"}&access_token=${token}`;
-    const insights7d = await fetchAllPages<Record<string, unknown>>(insights7dUrl);
-
-    // 5. Get 5-day rolling for campaign level (for benchmark)
-    const d5 = new Date(now);
-    d5.setDate(d5.getDate() - 5);
-    const since5d = d5.toISOString().split("T")[0];
-    const rolling5dUrl = `${META_API}/${campaignId}/insights?fields=spend,actions&time_range={"since":"${since5d}","until":"${today}"}&access_token=${token}`;
-    const rolling5dResp = await fetch(rolling5dUrl);
-    const rolling5dData = await rolling5dResp.json();
-    const rolling5dRow = rolling5dData.data?.[0];
-    const rolling5dSpend = parseFloat(rolling5dRow?.spend || "0");
-    const rolling5dLeads = getLeads(rolling5dRow?.actions);
-    const rolling5dCpl = rolling5dLeads > 0 ? rolling5dSpend / rolling5dLeads : Infinity;
-
-    // Build lookup maps
-    const lifetimeMap = new Map<string, Record<string, unknown>>();
-    for (const row of lifetimeInsights) {
-      lifetimeMap.set(row.ad_id as string, row);
-    }
-    const d2Map = new Map<string, Record<string, unknown>>();
-    for (const row of insights2d) {
-      d2Map.set(row.ad_id as string, row);
-    }
-    const d3Map = new Map<string, Record<string, unknown>>();
-    for (const row of insights3d) {
-      d3Map.set(row.ad_id as string, row);
-    }
-    const d7Map = new Map<string, Record<string, unknown>>();
-    for (const row of insights7d) {
-      d7Map.set(row.ad_id as string, row);
-    }
-
-    // Check for benchmark ads (spend > 20× CPL meta & CPL ≤ CPL meta)
-    let hasBenchmark = false;
-    for (const [, row] of lifetimeMap) {
-      const spend = parseFloat((row.spend as string) || "0");
-      const leads = getLeads(row.actions as Array<Record<string, string>> | undefined);
-      if (spend > 20 * CPL_META && leads > 0 && spend / leads <= CPL_META) {
-        hasBenchmark = true;
-        break;
-      }
-    }
-
-    // Process each ad
-    const results: AdInsight[] = [];
-
-    for (const ad of allAds) {
-      const adId = ad.id as string;
-      const adName = ad.name as string;
-      const adStatus = (ad.status as string) || "UNKNOWN";
-      const adEffectiveStatus = (ad.effective_status as string) || adStatus;
-      const adset = ad.adset as Record<string, unknown> | undefined;
-      const adsetId = (ad.adset_id as string) || "";
-      const adsetName = (adset?.name as string) || "";
-      const adsetStatus = (adset?.effective_status as string) || (adset?.status as string) || "";
-
-      const lt = lifetimeMap.get(adId);
-      const spend = parseFloat((lt?.spend as string) || "0");
-      const impressions = parseFloat((lt?.impressions as string) || "0");
-      const clicks = parseFloat((lt?.clicks as string) || "0");
-      const ctr = parseFloat((lt?.ctr as string) || "0");
-      const cpm = parseFloat((lt?.cpm as string) || "0");
-      const leads = getLeads(lt?.actions as Array<Record<string, string>> | undefined);
-      const cpl = leads > 0 ? spend / leads : (spend > 0 ? Infinity : 0);
-
-      const d2Row = d2Map.get(adId);
-      const spend2d = parseFloat((d2Row?.spend as string) || "0");
-      const leads2d = getLeads(d2Row?.actions as Array<Record<string, string>> | undefined);
-      const cpl2d = leads2d > 0 ? spend2d / leads2d : (spend2d > 0 ? Infinity : 0);
-
-      const d3Row = d3Map.get(adId);
-      const spend3d = parseFloat((d3Row?.spend as string) || "0");
-      const leads3d = getLeads(d3Row?.actions as Array<Record<string, string>> | undefined);
-      const cpl3d = leads3d > 0 ? spend3d / leads3d : (spend3d > 0 ? Infinity : 0);
-
-      const d7Row = d7Map.get(adId);
-      const spend7d = parseFloat((d7Row?.spend as string) || "0");
-      const leads7d = getLeads(d7Row?.actions as Array<Record<string, string>> | undefined);
-      const cpl7d = leads7d > 0 ? spend7d / leads7d : (spend7d > 0 ? Infinity : 0);
-
-      // Apply kill rule (only for effectively ACTIVE ads)
-      let killLayer: string | null = null;
-      let killReason: string | null = null;
-
-      if (adEffectiveStatus === "ACTIVE" && spend > 0) {
-        // Select data window for kill rule evaluation
-        const wSpend = windowParam === "2d" ? spend2d : windowParam === "3d" ? spend3d : windowParam === "7d" ? spend7d : spend;
-        const wLeads = windowParam === "2d" ? leads2d : windowParam === "3d" ? leads3d : windowParam === "7d" ? leads7d : leads;
-        const wCpl = wLeads > 0 ? wSpend / wLeads : (wSpend > 0 ? Infinity : 0);
-        // CPM: estimate from window ratio if not lifetime
-        const wCpm = windowParam === "lifetime" ? cpm : (
-          (spend > 0 && impressions > 0) ? ((wSpend / spend) * impressions > 0 ? (wSpend / ((wSpend / spend) * impressions)) * 1000 : 0) : 0
-        );
-        const wLabel = windowParam === "lifetime" ? "" : `[${windowParam}] `;
-
-        // L0 — No leads
-        if (wLeads === 0 && wSpend > 0) {
-          if (wSpend >= CPL_META && wCpm >= 60) {
-            killLayer = "L0a";
-            killReason = `${wLabel}spend R$${wSpend.toFixed(2)} ≥ 1×CPL_meta + 0 leads + CPM R$${wCpm.toFixed(2)} ≥ 60`;
-          } else if (wSpend >= 1.5 * CPL_META) {
-            killLayer = "L0b";
-            killReason = `${wLabel}spend R$${wSpend.toFixed(2)} ≥ 1.5×CPL_meta + 0 leads`;
-          }
-        }
-        // L1 — Clearly bad (with leads)
-        else if (wSpend > 4 * CPL_META && wCpl > 1.5 * CPL_META) {
-          killLayer = "L1";
-          killReason = `${wLabel}spend R$${wSpend.toFixed(2)} > 4×CPL + CPL R$${wCpl.toFixed(2)} > 1.5×meta`;
-        }
-        // L2 — Above target with evidence
-        else if (wSpend > 6 * CPL_META && wCpl > 1.3 * CPL_META) {
-          killLayer = "L2";
-          killReason = `${wLabel}spend R$${wSpend.toFixed(2)} > 6×CPL + CPL R$${wCpl.toFixed(2)} > 1.3×meta`;
-        }
-        // L3 — Acute 3d deterioration (always uses 3d data regardless of window)
-        else if (
-          hasBenchmark &&
-          spend3d > 5 * CPL_META &&
-          cpl3d > 1.7 * CPL_META &&
-          cpl > CPL_META &&
-          rolling5dCpl > 1.15 * CPL_META
-        ) {
-          killLayer = "L3";
-          killReason = `3d: spend R$${spend3d.toFixed(2)} > 5×CPL + CPL3d R$${cpl3d.toFixed(2)} > 1.7×meta + CPL_acum > meta + rolling5d > 1.15×meta`;
-        }
-        // L4 — Slow 7d deterioration (always uses 7d data regardless of window)
-        else if (
-          hasBenchmark &&
-          spend7d > 5 * CPL_META &&
-          cpl7d > 1.7 * CPL_META &&
-          cpl > CPL_META &&
-          rolling5dCpl > 1.15 * CPL_META
-        ) {
-          killLayer = "L4";
-          killReason = `7d: spend R$${spend7d.toFixed(2)} > 5×CPL + CPL7d R$${cpl7d.toFixed(2)} > 1.7×meta + CPL_acum > meta + rolling5d > 1.15×meta`;
-        }
-        // L5 — Persistent mediocrity (always uses lifetime)
-        else if (
-          hasBenchmark &&
-          spend > 10 * CPL_META &&
-          cpl > 1.15 * CPL_META &&
-          rolling5dCpl > 1.15 * CPL_META
-        ) {
-          killLayer = "L5";
-          killReason = `spend R$${spend.toFixed(2)} > 10×CPL + CPL R$${cpl.toFixed(2)} > 1.15×meta + rolling5d > 1.15×meta`;
-        }
-      }
-
-      results.push({
-        ad_id: adId,
-        ad_name: adName,
-        adset_id: adsetId,
-        adset_name: adsetName,
-        status: adStatus,
-        effective_status: adEffectiveStatus,
-        adset_status: adsetStatus,
-        spend,
-        leads,
-        cpl: leads > 0 ? cpl : -1,
-        cpm,
-        impressions,
-        ctr,
-        clicks,
-        spend_2d: spend2d,
-        leads_2d: leads2d,
-        cpl_2d: leads2d > 0 ? cpl2d : -1,
-        spend_3d: spend3d,
-        leads_3d: leads3d,
-        cpl_3d: leads3d > 0 ? cpl3d : -1,
-        spend_7d: spend7d,
-        leads_7d: leads7d,
-        cpl_7d: leads7d > 0 ? cpl7d : -1,
-        kill_layer: killLayer,
-        kill_reason: killReason,
-      });
-    }
-
-    // Sort: kill candidates first, then by spend desc
-    results.sort((a, b) => {
-      if (a.kill_layer && !b.kill_layer) return -1;
-      if (!a.kill_layer && b.kill_layer) return 1;
-      return b.spend - a.spend;
-    });
-
-    const killCount = results.filter((r) => r.kill_layer).length;
-    const activeCount = results.filter((r) => r.effective_status === "ACTIVE").length;
-    const totalSpend = results.reduce((s, r) => s + r.spend, 0);
-    const totalLeads = results.reduce((s, r) => s + r.leads, 0);
-
-    return NextResponse.json({
-      campaign_id: campaignId,
-      window: windowParam,
-      cpl_meta: CPL_META,
-      has_benchmark: hasBenchmark,
-      rolling_5d_cpl: rolling5dCpl === Infinity ? -1 : Number(rolling5dCpl.toFixed(2)),
-      total_ads: allAds.length,
-      active_ads: activeCount,
-      kill_candidates: killCount,
-      total_spend: Number(totalSpend.toFixed(2)),
-      total_leads: totalLeads,
-      campaign_cpl: totalLeads > 0 ? Number((totalSpend / totalLeads).toFixed(2)) : -1,
-      ads: results,
-    });
-  } catch (err) {
-    console.error("[KillRule]", err);
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
-    );
-  }
 }
 
 function getLeads(actions: Array<Record<string, string>> | undefined): number {
@@ -338,4 +94,399 @@ function getLeads(actions: Array<Record<string, string>> | undefined): number {
     }
   }
   return 0;
+}
+
+function sinceDate(daysAgo: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - daysAgo);
+  return d.toISOString().split("T")[0];
+}
+
+/** Monta mapa CRM com chave composta (adName||adsetName) e (adId||adsetId) */
+function buildCrmMap(rows: Record<string, unknown>[]): Map<string, { total: number; qualified: number }> {
+  const map = new Map<string, { total: number; qualified: number }>();
+  for (const r of rows) {
+    const entry = { total: Number(r.total_leads), qualified: Number(r.qualified_leads) };
+    // Chave por IDs resolvidos (mais precisa)
+    if (r.ad_id && r.adset_id) {
+      map.set(crmIdKey(r.ad_id as string, r.adset_id as string), entry);
+    }
+    // Chave por nomes UTM (principal)
+    if (r.utm_content && r.utm_term) {
+      map.set(crmKey(r.utm_content as string, r.utm_term as string), entry);
+    }
+    // Fallbacks parciais (só utm_content sem adset — menor precisão)
+    if (r.utm_content && !r.utm_term) {
+      map.set(`${(r.utm_content as string).toUpperCase()}||__ANY__`, entry);
+    }
+    if (r.ad_id && !r.adset_id) {
+      map.set(`${r.ad_id as string}||__ANY__`, entry);
+    }
+  }
+  return map;
+}
+
+/** Resolve leads de um ad específico dentro de um adset */
+function resolveLeads(
+  adId: string,
+  adName: string,
+  adsetId: string,
+  adsetName: string,
+  crmMap: Map<string, { total: number; qualified: number }>,
+  metaRow: Record<string, unknown> | undefined,
+  useCrm: boolean
+): { leads: number; qualified: number; source: "crm" | "meta" } {
+  if (useCrm) {
+    // Tentativa 1: (adName, adsetName) — principal
+    const byName = crmMap.get(crmKey(adName, adsetName));
+    if (byName) return { leads: byName.total, qualified: byName.qualified, source: "crm" };
+    // Tentativa 2: (adId, adsetId) — IDs resolvidos
+    if (adId && adsetId) {
+      const byId = crmMap.get(crmIdKey(adId, adsetId));
+      if (byId) return { leads: byId.total, qualified: byId.qualified, source: "crm" };
+    }
+    // Tentativa 3: fallback parcial (utm_content sem adset)
+    const byNameOnly = crmMap.get(`${adName.toUpperCase()}||__ANY__`);
+    if (byNameOnly) return { leads: byNameOnly.total, qualified: byNameOnly.qualified, source: "crm" };
+    if (adId) {
+      const byIdOnly = crmMap.get(`${adId}||__ANY__`);
+      if (byIdOnly) return { leads: byIdOnly.total, qualified: byIdOnly.qualified, source: "crm" };
+    }
+    // Nenhum match CRM — retorna 0 (não cai no Meta, porque hasCrmData=true significa
+    // que a campanha tem dados CRM; ausência de match = ad sem leads mesmo)
+    return { leads: 0, qualified: 0, source: "crm" };
+  }
+  // Fallback Meta
+  const leads = getLeads(metaRow?.actions as Array<Record<string, string>> | undefined);
+  return { leads, qualified: 0, source: "meta" };
+}
+
+export async function GET(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
+  const campaignId = req.nextUrl.searchParams.get("campaign_id");
+  if (!campaignId) return NextResponse.json({ error: "campaign_id required" }, { status: 400 });
+
+  const windowParam = (req.nextUrl.searchParams.get("window") || "lifetime") as Window;
+  const validWindows: Window[] = ["lifetime", "7d", "5d", "4d", "3d", "2d", "today"];
+  if (!validWindows.includes(windowParam)) {
+    return NextResponse.json({ error: `window inválido. Use: ${validWindows.join(", ")}` }, { status: 400 });
+  }
+
+  try {
+    const token = await getTokenForWorkspace(auth.workspace_id);
+    const db = getDb();
+    const today = new Date().toISOString().split("T")[0];
+    const since7d = sinceDate(7);
+    const since5d = sinceDate(5);
+    const since4d = sinceDate(4);
+    const since3d = sinceDate(3);
+    const since2d = sinceDate(2);
+
+    // ── 1. Meta: All ads ──
+    const adsUrl = `${META_API}/${campaignId}/ads?fields=id,name,status,effective_status,adset_id,adset{name,status,effective_status}&limit=200&access_token=${token}`;
+    const allAds = await fetchAllPages<Record<string, unknown>>(adsUrl);
+    console.log(`[KillRule] ${allAds.length} ads | campaign=${campaignId} | window=${windowParam}`);
+
+    // ── 2. Meta: Lifetime insights ──
+    const lifetimeUrl = `${META_API}/${campaignId}/insights?fields=ad_id,ad_name,adset_id,adset_name,spend,impressions,clicks,ctr,cpm,actions&level=ad&limit=500&time_range={"since":"2026-01-01","until":"${today}"}&access_token=${token}`;
+    const lifetimeInsights = await fetchAllPages<Record<string, unknown>>(lifetimeUrl);
+
+    // ── 3. Meta: Window insights (parallel) ──
+    const windowRanges: Record<string, [string, string]> = {
+      "7d": [since7d, today], "5d": [since5d, today], "4d": [since4d, today],
+      "3d": [since3d, today], "2d": [since2d, today], "today": [today, today],
+    };
+    const windowFetches = Object.entries(windowRanges).map(([key, [since, until]]) => {
+      const url = `${META_API}/${campaignId}/insights?fields=ad_id,spend,actions&level=ad&limit=500&time_range={"since":"${since}","until":"${until}"}&access_token=${token}`;
+      return fetchAllPages<Record<string, unknown>>(url).then(rows => [key, rows] as [string, Record<string, unknown>[]]);
+    });
+    const windowResults = await Promise.all(windowFetches);
+
+    // ── 4. Meta: Rolling 5d campaign-level benchmark ──
+    const r5dResp = await fetch(`${META_API}/${campaignId}/insights?fields=spend,actions&time_range={"since":"${since5d}","until":"${today}"}&access_token=${token}`);
+    const r5dData = await r5dResp.json();
+    const r5dRow = r5dData.data?.[0];
+    const r5dSpend = parseFloat(r5dRow?.spend || "0");
+    const r5dLeads = getLeads(r5dRow?.actions);
+    const rolling5dCpl = r5dLeads > 0 ? r5dSpend / r5dLeads : Infinity;
+
+    // ── 5. CRM leads para esta campanha ──
+    // Query agrupa por (utm_content, utm_term, ad_id, adset_id) para permitir
+    // lookup por (criativo × adset) — essencial para kill rules por adset
+    const crmGroupBy = `utm_content, utm_term, ad_id, adset_id`;
+    const crmSelect = `SELECT utm_content, utm_term, ad_id, adset_id,
+        COUNT(*) AS total_leads,
+        SUM(CASE WHEN is_qualified THEN 1 ELSE 0 END) AS qualified_leads
+      FROM crm_leads`;
+
+    // ── Resolve campaign code for CRM lookup ──
+    // 1. Tenta pelo meta_campaign_id exato (campaign_id resolvido no import)
+    // 2. Tenta LIKE no ID numérico (primeiros 12 chars)
+    // 3. Busca nome da campanha na Meta API e extrai código T-XX__XXXX
+    // 4. Fallback: tabela campaigns local
+    let crmCampaignWhere = `workspace_id = ? AND (campaign_id = ? OR utm_campaign LIKE ?)`;
+    let crmCampaignArgs: unknown[] = [auth.workspace_id, campaignId, `%${campaignId.slice(0,12)}%`];
+
+    // Tenta obter nome real da campanha na Meta API
+    let metaCampaignCode: string | null = null;
+    try {
+      const metaCampResp = await fetch(`${META_API}/${campaignId}?fields=name&access_token=${token}`);
+      const metaCampJson = await metaCampResp.json();
+      const metaCampName: string = metaCampJson.name || "";
+      // Usa o nome completo da campanha para match exato no utm_campaign
+      // Ex: "T7__0006__CAP__LP__EB" → match exato evita colisões com nomes similares
+      if (metaCampName) {
+        metaCampaignCode = metaCampName; // nome completo
+      }
+    } catch (_) { /* ignora erro — usa fallback */ }
+
+    // Se encontrou código, amplia o WHERE para incluir LIKE no utm_campaign
+    if (metaCampaignCode) {
+      crmCampaignWhere = `workspace_id = ? AND (campaign_id = ? OR utm_campaign LIKE ? OR utm_campaign LIKE ?)`;
+      crmCampaignArgs = [
+        auth.workspace_id,
+        campaignId,
+        `%${campaignId.slice(0,12)}%`,
+        `%${metaCampaignCode}%`,
+      ];
+    } else {
+      // Fallback: tabela campaigns local
+      const campNameRes = await db.execute({
+        sql: "SELECT name FROM campaigns WHERE workspace_id = ? AND meta_campaign_id = ?",
+        args: [auth.workspace_id, campaignId],
+      });
+      const campName = campNameRes.rows[0]?.name as string | undefined;
+      if (campName) {
+        crmCampaignWhere = `workspace_id = ? AND (campaign_id = ? OR utm_campaign LIKE ? OR utm_campaign LIKE ?)`;
+        crmCampaignArgs = [auth.workspace_id, campaignId, `%${campaignId.slice(0,12)}%`, `%${campName}%`];
+      }
+    }
+
+    // Lifetime CRM
+    const crmLifetimeRes = await db.execute({
+      sql: `${crmSelect} WHERE ${crmCampaignWhere} GROUP BY ${crmGroupBy}`,
+      args: crmCampaignArgs,
+    });
+    let crmAllRows = crmLifetimeRes.rows;
+
+    const hasCrmData = crmAllRows.length > 0;
+    const crmLifetimeMap = buildCrmMap(crmAllRows as Record<string, unknown>[]);
+
+    // CRM windowed queries — só executa se há dados CRM
+    const crmWindowMaps: Record<string, Map<string, { total: number; qualified: number }>> = {};
+    if (hasCrmData) {
+      const windowDays: Record<string, string> = {
+        "today": today, "2d": since2d, "3d": since3d, "4d": since4d, "5d": since5d, "7d": since7d,
+      };
+      await Promise.all(Object.entries(windowDays).map(async ([key, since]) => {
+        const isToday = key === "today";
+        const res = await db.execute({
+          sql: `${crmSelect}
+            WHERE ${crmCampaignWhere}
+              AND subscribed_at >= ?
+              ${isToday ? "AND subscribed_at < ?" : ""}
+            GROUP BY ${crmGroupBy}`,
+          args: isToday
+            ? [...crmCampaignArgs, since + "T00:00:00Z", since + "T23:59:59Z"]
+            : [...crmCampaignArgs, since + "T00:00:00Z"],
+        });
+        crmWindowMaps[key] = buildCrmMap(res.rows as Record<string, unknown>[]);
+      }));
+    }
+
+    // ── Build lookup maps (Meta) ──
+    const lifetimeMap = new Map<string, Record<string, unknown>>();
+    for (const row of lifetimeInsights) lifetimeMap.set(row.ad_id as string, row);
+
+    const windowMaps: Record<string, Map<string, Record<string, unknown>>> = {};
+    for (const [key, rows] of windowResults) {
+      const map = new Map<string, Record<string, unknown>>();
+      for (const row of rows) map.set(row.ad_id as string, row);
+      windowMaps[key] = map;
+    }
+
+    // ── Benchmark ──
+    let hasBenchmark = false;
+    if (hasCrmData) {
+      for (const ad of allAds) {
+        const adId = ad.id as string;
+        const adName = ad.name as string;
+        const adsetObj = ad.adset as Record<string, unknown> | undefined;
+        const adsetId = (ad.adset_id as string) || "";
+        const adsetName = (adsetObj?.name as string) || "";
+        const lt = lifetimeMap.get(adId);
+        const spend = parseFloat((lt?.spend as string) || "0");
+        const res = resolveLeads(adId, adName, adsetId, adsetName, crmLifetimeMap, lt, true);
+        if (spend > 20 * CPL_META && res.leads > 0 && spend / res.leads <= CPL_META) {
+          hasBenchmark = true; break;
+        }
+      }
+    } else {
+      for (const [, row] of lifetimeMap) {
+        const spend = parseFloat((row.spend as string) || "0");
+        const leads = getLeads(row.actions as Array<Record<string, string>> | undefined);
+        if (spend > 20 * CPL_META && leads > 0 && spend / leads <= CPL_META) {
+          hasBenchmark = true; break;
+        }
+      }
+    }
+
+    // ── Process each ad ──
+    const results: AdInsight[] = [];
+
+    for (const ad of allAds) {
+      const adId = ad.id as string;
+      const adName = ad.name as string;
+      const adStatus = (ad.status as string) || "UNKNOWN";
+      const adEffectiveStatus = (ad.effective_status as string) || adStatus;
+      const adsetObj = ad.adset as Record<string, unknown> | undefined;
+      const adsetId = (ad.adset_id as string) || "";
+      const adsetName = (adsetObj?.name as string) || "";
+      const adsetStatus = (adsetObj?.effective_status as string) || (adsetObj?.status as string) || "";
+
+      const lt = lifetimeMap.get(adId);
+      const ltSpend = parseFloat((lt?.spend as string) || "0");
+      const ltImpressions = parseFloat((lt?.impressions as string) || "0");
+      const ltClicks = parseFloat((lt?.clicks as string) || "0");
+      const ltCtr = parseFloat((lt?.ctr as string) || "0");
+      const ltCpm = parseFloat((lt?.cpm as string) || "0");
+
+      // Lifetime leads com chave composta (adName × adsetName)
+      const ltResolved = resolveLeads(adId, adName, adsetId, adsetName, crmLifetimeMap, lt, hasCrmData);
+      const ltLeads = ltResolved.leads;
+      const ltQual = ltResolved.qualified;
+      const ltCpl = ltLeads > 0 ? ltSpend / ltLeads : ltSpend > 0 ? Infinity : -1;
+
+      // Window metrics
+      const calcWindow = (key: string): WindowMetrics => {
+        const metaRow = windowMaps[key]?.get(adId);
+        const metaSpend = parseFloat((metaRow?.spend as string) || "0");
+        if (hasCrmData && crmWindowMaps[key]) {
+          const crmRes = resolveLeads(adId, adName, adsetId, adsetName, crmWindowMaps[key], metaRow, true);
+          const cpl = crmRes.leads > 0 ? metaSpend / crmRes.leads : metaSpend > 0 ? Infinity : -1;
+          return {
+            spend: metaSpend,
+            leads: crmRes.leads,
+            qualified_leads: crmRes.qualified,
+            cpl: cpl === Infinity ? -1 : cpl,
+            source: crmRes.source,
+          };
+        }
+        const leads = getLeads(metaRow?.actions as Array<Record<string, string>> | undefined);
+        const cpl = leads > 0 ? metaSpend / leads : metaSpend > 0 ? Infinity : -1;
+        return { spend: metaSpend, leads, qualified_leads: 0, cpl: cpl === Infinity ? -1 : cpl, source: "meta" };
+      };
+
+      const wToday = calcWindow("today");
+      const w2d = calcWindow("2d");
+      const w3d = calcWindow("3d");
+      const w4d = calcWindow("4d");
+      const w5d = calcWindow("5d");
+      const w7d = calcWindow("7d");
+
+      const winMap: Record<Window, { spend: number; leads: number; cpl: number }> = {
+        lifetime: { spend: ltSpend, leads: ltLeads, cpl: ltCpl === Infinity ? -1 : ltCpl },
+        today: wToday, "2d": w2d, "3d": w3d, "4d": w4d, "5d": w5d, "7d": w7d,
+      };
+      const evalM = winMap[windowParam];
+
+      // ── Kill rules ──
+      let killLayer: string | null = null;
+      let killReason: string | null = null;
+
+      if (adEffectiveStatus === "ACTIVE" && ltSpend > 0) {
+        const evalSpend = evalM.spend;
+        const evalLeads = evalM.leads;
+        const evalCpl = evalM.cpl;
+        const src = hasCrmData ? "CRM" : "Meta";
+
+        // L0: sem leads após gasto mínimo
+        if (ltLeads === 0) {
+          if (ltSpend >= CPL_META && ltCpm >= 60) {
+            killLayer = "L0a";
+            killReason = `spend R$${ltSpend.toFixed(2)} ≥ 1×CPL + 0 leads + CPM R$${ltCpm.toFixed(2)} ≥ 60 [${src}]`;
+          } else if (ltSpend >= 1.5 * CPL_META) {
+            killLayer = "L0b";
+            killReason = `spend R$${ltSpend.toFixed(2)} ≥ 1.5×CPL + 0 leads [${src}]`;
+          }
+        // L1/L2: CPL alto na janela de avaliação
+        } else if (evalSpend > 4 * CPL_META && evalCpl !== -1 && evalCpl > 1.5 * CPL_META) {
+          killLayer = "L1";
+          killReason = `[${windowParam}/${src}] spend R$${evalSpend.toFixed(2)} > 4×CPL + CPL R$${evalCpl.toFixed(2)} > 1.5×meta`;
+        } else if (evalSpend > 6 * CPL_META && evalCpl !== -1 && evalCpl > 1.3 * CPL_META) {
+          killLayer = "L2";
+          killReason = `[${windowParam}/${src}] spend R$${evalSpend.toFixed(2)} > 6×CPL + CPL R$${evalCpl.toFixed(2)} > 1.3×meta`;
+        // L3: performance 3d ruim com benchmark existente
+        } else if (
+          hasBenchmark && w3d.spend > 5 * CPL_META && w3d.cpl !== -1 && w3d.cpl > 1.7 * CPL_META
+          && ltCpl !== -1 && ltCpl > CPL_META && rolling5dCpl > 1.15 * CPL_META
+        ) {
+          killLayer = "L3";
+          killReason = `3d/${src}: spend R$${w3d.spend.toFixed(2)} > 5×CPL + CPL3d R$${w3d.cpl.toFixed(2)} > 1.7×meta`;
+        // L4: performance 7d ruim com benchmark existente
+        } else if (
+          hasBenchmark && w7d.spend > 5 * CPL_META && w7d.cpl !== -1 && w7d.cpl > 1.7 * CPL_META
+          && ltCpl !== -1 && ltCpl > CPL_META && rolling5dCpl > 1.15 * CPL_META
+        ) {
+          killLayer = "L4";
+          killReason = `7d/${src}: spend R$${w7d.spend.toFixed(2)} > 5×CPL + CPL7d R$${w7d.cpl.toFixed(2)} > 1.7×meta`;
+        // L5: lifetime ruim com benchmark existente
+        } else if (
+          hasBenchmark && ltSpend > 10 * CPL_META && ltCpl !== -1 && ltCpl > 1.15 * CPL_META
+          && rolling5dCpl > 1.15 * CPL_META
+        ) {
+          killLayer = "L5";
+          killReason = `spend R$${ltSpend.toFixed(2)} > 10×CPL + CPL R$${ltCpl.toFixed(2)} > 1.15×meta [${src}]`;
+        }
+      }
+
+      results.push({
+        ad_id: adId, ad_name: adName, adset_id: adsetId, adset_name: adsetName,
+        status: adStatus, effective_status: adEffectiveStatus, adset_status: adsetStatus,
+        spend: ltSpend, leads: ltLeads, qualified_leads: ltQual,
+        cpl: ltCpl === Infinity ? -1 : ltCpl,
+        cpm: ltCpm, impressions: ltImpressions, ctr: ltCtr, clicks: ltClicks,
+        leads_source: ltResolved.source,
+        today: wToday, w2d, w3d, w4d, w5d, w7d,
+        kill_layer: killLayer, kill_reason: killReason, kill_window: windowParam,
+      });
+    }
+
+    results.sort((a, b) => {
+      if (a.kill_layer && !b.kill_layer) return -1;
+      if (!a.kill_layer && b.kill_layer) return 1;
+      return b.spend - a.spend;
+    });
+
+    const killCount = results.filter((r) => r.kill_layer).length;
+    const activeCount = results.filter((r) => r.effective_status === "ACTIVE").length;
+    const totalSpend = results.reduce((s, r) => s + r.spend, 0);
+    const totalLeads = results.reduce((s, r) => s + r.leads, 0);
+    const totalQual = results.reduce((s, r) => s + r.qualified_leads, 0);
+
+    return NextResponse.json({
+      campaign_id: campaignId,
+      cpl_meta: CPL_META,
+      window: windowParam,
+      leads_source: hasCrmData ? "crm" : "meta",
+      has_benchmark: hasBenchmark,
+      rolling_5d_cpl: rolling5dCpl === Infinity ? -1 : Number(rolling5dCpl.toFixed(2)),
+      total_ads: allAds.length,
+      active_ads: activeCount,
+      kill_candidates: killCount,
+      total_spend: Number(totalSpend.toFixed(2)),
+      total_leads: totalLeads,
+      total_qualified_leads: totalQual,
+      campaign_cpl: totalLeads > 0 ? Number((totalSpend / totalLeads).toFixed(2)) : -1,
+      ads: results,
+    });
+  } catch (err) {
+    console.error("[KillRule]", err);
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      { status: 500 }
+    );
+  }
 }

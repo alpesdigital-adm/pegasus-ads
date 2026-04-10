@@ -177,28 +177,32 @@ export async function authenticate(req: NextRequest): Promise<AuthContext | null
     if (ctx) return ctx;
   }
 
-  // 2. Try API key
+  // 2. Try API key (standard, then legacy TEST_LOG_API_KEY)
   const apiKey = req.headers.get("x-api-key");
   if (apiKey) {
-    return authenticateApiKey(apiKey);
-  }
+    // 2a. Standard API key (hashed, from api_keys table)
+    const ctx = await authenticateApiKey(apiKey);
+    if (ctx) return ctx;
 
-  // 3. Try legacy API key (backward compat with TEST_LOG_API_KEY)
-  const legacyKey = req.headers.get("x-api-key");
-  if (legacyKey && legacyKey === process.env.TEST_LOG_API_KEY) {
-    // Legacy mode: use default workspace
-    const db = getDb();
-    const result = await db.execute({
-      sql: `SELECT id FROM workspaces ORDER BY created_at ASC LIMIT 1`,
-      args: [],
-    });
-    if (result.rows.length > 0) {
-      return {
-        user_id: "legacy",
-        workspace_id: result.rows[0].id as string,
-        role: "admin",
-        auth_method: "api_key",
-      };
+    // 2b. Legacy TEST_LOG_API_KEY (backward compat)
+    if (apiKey === process.env.TEST_LOG_API_KEY) {
+      const db = getDb();
+      // Prefer workspace with Meta account configured (for kill rules etc.)
+      const result = await db.execute({
+        sql: `SELECT w.id FROM workspaces w
+              LEFT JOIN workspace_meta_accounts wma ON wma.workspace_id = w.id
+              ORDER BY (wma.meta_account_id IS NOT NULL) DESC, w.created_at ASC
+              LIMIT 1`,
+        args: [],
+      });
+      if (result.rows.length > 0) {
+        return {
+          user_id: "legacy",
+          workspace_id: result.rows[0].id as string,
+          role: "admin",
+          auth_method: "api_key",
+        };
+      }
     }
   }
 

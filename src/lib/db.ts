@@ -608,6 +608,69 @@ export async function initDb(): Promise<DbClient> {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_alerts_creative ON alerts(creative_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_alerts_date ON alerts(date)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_alerts_resolved ON alerts(resolved)`);
+
+    // ── CRM Leads ──
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS crm_leads (
+        crm_id         TEXT NOT NULL,
+        workspace_id   TEXT REFERENCES workspaces(id),
+        email          TEXT,
+        phone          TEXT,
+        full_name      TEXT,
+        -- UTMs (raw, direto do CRM)
+        utm_source     TEXT,
+        utm_medium     TEXT,
+        utm_campaign   TEXT,
+        utm_term       TEXT,
+        utm_content    TEXT,
+        fbclid         TEXT,
+        -- IDs resolvidos via lookup (enriquecimento)
+        ad_id          TEXT,
+        adset_id       TEXT,
+        campaign_id    TEXT,
+        -- Qualificação (calculada no import pela regra do projeto)
+        is_qualified   BOOLEAN DEFAULT FALSE,
+        qualification_data JSONB DEFAULT '{}',
+        -- Data principal para janelas temporais
+        subscribed_at  TIMESTAMPTZ,
+        first_subscribed_at TIMESTAMPTZ,
+        -- Origem
+        source_file    TEXT,
+        raw_data       JSONB DEFAULT '{}',
+        imported_at    TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (workspace_id, crm_id)
+      )
+    `);
+
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_crm_leads_workspace ON crm_leads(workspace_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_crm_leads_campaign_id ON crm_leads(campaign_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_crm_leads_utm_campaign ON crm_leads(utm_campaign)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_crm_leads_utm_content ON crm_leads(utm_content)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_crm_leads_ad_id ON crm_leads(ad_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_crm_leads_subscribed ON crm_leads(subscribed_at)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_crm_leads_qualified ON crm_leads(is_qualified)`);
+
+    // ── Lead Qualification Rules ──
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS lead_qualification_rules (
+        id           TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+        project_key  TEXT NOT NULL,
+        -- Regras: array de { column, values[], operator? }
+        -- Semântica: AND entre regras, OR entre values[] de cada regra
+        -- Ex RAT: [{"column": "Médico", "values": ["Sim"]}]
+        -- Ex multi: [{"column": "Médico", "values": ["Sim"]}, {"column": "CRM", "values": ["", null], "negate": true}]
+        rules        JSONB NOT NULL DEFAULT '[]',
+        created_at   TIMESTAMPTZ DEFAULT NOW(),
+        updated_at   TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(workspace_id, project_key)
+      )
+    `);
+
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_qual_rules_workspace ON lead_qualification_rules(workspace_id)`);
+
   } finally {
     await pool.end();
   }

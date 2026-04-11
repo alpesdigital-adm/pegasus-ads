@@ -9,8 +9,16 @@
  *   "source_adset_id": "120242521315670521",
  *   "new_adset_name": "PA__LAL0-1p - VIDEO TEST 9:16",
  *   "daily_budget_cents": 50000,
- *   "model_ad_id": "120242521326410521",
+ *   "model_ad_id": "120242521326410521",    // opcional se page_id+ig_user_id+account_id fornecidos (G9)
+ *   "page_id": "...",                        // G9
+ *   "instagram_user_id": "...",              // G9
+ *   "account_id": "act_...",               // G9
+ *   "link": "https://...",                   // G1: override do link do model_ad
  *   "start_paused": false,
+ *   "partnership": {                         // G4: branded content para videos
+ *     "sponsor_id": "17841400601834755",
+ *     "testimonial": "..."
+ *   },
  *   "ads": [
  *     {
  *       "name": "T7EBMX-AD026VD",
@@ -35,14 +43,28 @@ export const maxDuration = 300;
 const META_API_VERSION = "v25.0";
 const META_BASE_URL = `https://graph.facebook.com/${META_API_VERSION}`;
 
-async function metaFetch<T>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(url, options);
-  const data = await response.json();
-  if (!response.ok || (data as Record<string, unknown>).error) {
-    const err = (data as Record<string, unknown>).error;
-    throw new Error(`Meta API error: ${JSON.stringify(err)}`);
+// ── G8: metaFetch com retry para rate limit (código 17) ──
+async function metaFetch<T>(url: string, options?: RequestInit, retries = 4): Promise<T> {
+  let lastErr: Error | null = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (attempt > 0) {
+      const wait = Math.min(60000, 5000 * Math.pow(2, attempt - 1));
+      console.warn(`[PublishVideos] Rate limit retry ${attempt}/${retries} — waiting ${wait}ms`);
+      await new Promise((r) => setTimeout(r, wait));
+    }
+    const response = await fetch(url, options);
+    const data = await response.json();
+    if (!response.ok || (data as Record<string, unknown>).error) {
+      const err = (data as Record<string, unknown>).error as Record<string, unknown> | undefined;
+      if (err && Number(err.code) === 17 && attempt < retries) {
+        lastErr = new Error(`Meta API rate limit (code 17): ${JSON.stringify(err)}`);
+        continue;
+      }
+      throw new Error(`Meta API error: ${JSON.stringify(err)}`);
+    }
+    return data as T;
   }
-  return data as T;
+  throw lastErr ?? new Error("metaFetch failed after retries");
 }
 
 function formBody(params: Record<string, string>): string {
@@ -59,6 +81,8 @@ async function rateLimit() {
   lastCall = Date.now();
 }
 
+// ── Interfaces ──
+
 interface VideoAdSpec {
   name: string;
   video_url: string;
@@ -66,6 +90,11 @@ interface VideoAdSpec {
   title: string;
   description: string;
   cta_type: string;
+}
+
+interface PartnershipSpec {
+  sponsor_id: string;
+  testimonial?: string;
 }
 
 interface ModelAdInfo {
@@ -76,6 +105,8 @@ interface ModelAdInfo {
   urlTags: string;
   displayLink: string;
 }
+
+// ── Helpers ──
 
 async function fetchModelAd(adId: string, token: string): Promise<ModelAdInfo> {
   await rateLimit();
@@ -98,8 +129,7 @@ async function fetchModelAd(adId: string, token: string): Promise<ModelAdInfo> {
   const oss = creative?.object_story_spec as Record<string, unknown> | undefined;
   if (oss) {
     pageId = (oss.page_id as string) || "";
-    instagramUserId =
-      (oss.instagram_actor_id as string) || (oss.instagram_user_id as string) || "";
+    instagramUserId = (oss.instagram_actor_id as string) || (oss.instagram_user_id as string) || "";
     if (!link) {
       const linkData = oss.link_data as Record<string, unknown> | undefined;
       if (linkData) {
@@ -108,9 +138,7 @@ async function fetchModelAd(adId: string, token: string): Promise<ModelAdInfo> {
       }
     }
   }
-
   urlTags = (creative?.url_tags as string) || "";
-
   if (!displayLink && link) {
     try { displayLink = new URL(link).hostname; } catch { /* ignore */ }
   }
@@ -140,11 +168,7 @@ async function copyAdset(sourceAdsetId: string, token: string): Promise<string> 
     {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: formBody({
-        deep_copy: "false",
-        status_option: "PAUSED",
-        access_token: token,
-      }),
+      body: formBody({ deep_copy: "false", status_option: "PAUSED", access_token: token }),
     }
   );
   const newId = data.copied_adset_id || data.ad_object_ids?.[0]?.copied_ad_object_id || "";
@@ -171,11 +195,7 @@ async function uploadVideoFromUrl(accountId: string, videoUrl: string, name: str
     {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: formBody({
-        file_url: videoUrl,
-        name,
-        access_token: token,
-      }),
+      body: formBody({ file_url: videoUrl, name, access_token: token }),
     }
   );
   return data.id;
@@ -209,6 +229,7 @@ async function fetchVideoThumbnail(videoId: string, token: string): Promise<stri
   return preferred.uri;
 }
 
+// G4: createVideoCreative agora aceita partnership
 async function createVideoCreative(params: {
   accountId: string;
   name: string;
@@ -222,6 +243,7 @@ async function createVideoCreative(params: {
   link: string;
   ctaType: string;
   urlTags: string;
+  partnership?: PartnershipSpec;
   token: string;
 }): Promise<string> {
   await rateLimit();
@@ -231,19 +253,14 @@ async function createVideoCreative(params: {
     title: params.title,
     message: params.body,
     link_description: params.description,
-    call_to_action: {
-      type: params.ctaType,
-      value: { link: params.link },
-    },
+    call_to_action: { type: params.ctaType, value: { link: params.link } },
   };
 
   const objectStorySpec: Record<string, unknown> = {
     page_id: params.pageId,
     video_data: videoData,
   };
-  if (params.instagramUserId) {
-    objectStorySpec.instagram_user_id = params.instagramUserId;
-  }
+  if (params.instagramUserId) objectStorySpec.instagram_user_id = params.instagramUserId;
 
   const formParams: Record<string, string> = {
     name: params.name,
@@ -251,6 +268,15 @@ async function createVideoCreative(params: {
     access_token: params.token,
   };
   if (params.urlTags) formParams.url_tags = params.urlTags;
+
+  // G4: partnership para vídeos
+  if (params.partnership?.sponsor_id) {
+    formParams.instagram_branded_content = JSON.stringify({ sponsor_id: params.partnership.sponsor_id });
+    const brandedContent: Record<string, unknown> = { ad_format: 1 };
+    if (params.partnership.testimonial) brandedContent.testimonial = params.partnership.testimonial;
+    formParams.branded_content = JSON.stringify(brandedContent);
+    console.log(`[PublishVideos] G4: partnership sponsor_id=${params.partnership.sponsor_id}`);
+  }
 
   const data = await metaFetch<{ id: string }>(
     `${META_BASE_URL}/${params.accountId}/adcreatives`,
@@ -289,6 +315,8 @@ async function createAd(params: {
   return data.id;
 }
 
+// ── Main Handler ──
+
 export async function POST(req: NextRequest) {
   const auth = await requireAuth(req);
   if (auth instanceof NextResponse) return auth;
@@ -300,33 +328,74 @@ export async function POST(req: NextRequest) {
       new_adset_name,
       daily_budget_cents,
       model_ad_id,
+      // G9: campos diretos
+      page_id: directPageId,
+      instagram_user_id: directInstagramUserId,
+      account_id: directAccountId,
+      // G1: link override
+      link: linkOverride,
       ads,
       start_paused = true,
+      // G4: partnership
+      partnership,
     } = body as {
       source_adset_id: string;
       new_adset_name: string;
       daily_budget_cents: number;
-      model_ad_id: string;
+      model_ad_id?: string;
+      page_id?: string;
+      instagram_user_id?: string;
+      account_id?: string;
+      link?: string;
       ads: VideoAdSpec[];
       start_paused?: boolean;
+      partnership?: PartnershipSpec;
     };
 
-    if (!source_adset_id || !new_adset_name || !daily_budget_cents || !model_ad_id || !ads?.length) {
+    if (!source_adset_id || !new_adset_name || !daily_budget_cents || !ads?.length) {
       return NextResponse.json(
-        { error: "source_adset_id, new_adset_name, daily_budget_cents, model_ad_id, ads[] are required" },
+        { error: "source_adset_id, new_adset_name, daily_budget_cents, ads[] are required" },
+        { status: 400 }
+      );
+    }
+
+    // G9: model_ad_id OR (page_id + instagram_user_id + account_id)
+    const hasDirectFields = directPageId && directInstagramUserId && directAccountId;
+    if (!model_ad_id && !hasDirectFields) {
+      return NextResponse.json(
+        { error: "model_ad_id OR (page_id + instagram_user_id + account_id) are required" },
         { status: 400 }
       );
     }
 
     const token = await getTokenForWorkspace(auth.workspace_id);
-
     console.log(`[PublishVideos] start: ${ads.length} videos → new adset cloned from ${source_adset_id}`);
 
-    // 1. Fetch model ad info
-    const modelAd = await fetchModelAd(model_ad_id, token);
-    console.log(`[PublishVideos] model ad: account=${modelAd.accountId} page=${modelAd.pageId} ig=${modelAd.instagramUserId} link=${modelAd.link}`);
+    // 1. Model ad info
+    let modelAd: ModelAdInfo;
+    if (hasDirectFields) {
+      const accountId = directAccountId!.startsWith("act_") ? directAccountId! : `act_${directAccountId!}`;
+      modelAd = {
+        link: linkOverride || "",
+        pageId: directPageId!,
+        instagramUserId: directInstagramUserId!,
+        accountId,
+        urlTags: "",
+        displayLink: linkOverride ? (() => { try { return new URL(linkOverride).hostname; } catch { return ""; } })() : "",
+      };
+      console.log(`[PublishVideos] G9: direto page=${modelAd.pageId}, ig=${modelAd.instagramUserId}`);
+    } else {
+      modelAd = await fetchModelAd(model_ad_id!, token);
+      // G1: override link
+      if (linkOverride) {
+        console.log(`[PublishVideos] G1: link override: ${modelAd.link} → ${linkOverride}`);
+        modelAd.link = linkOverride;
+        try { modelAd.displayLink = new URL(linkOverride).hostname; } catch { /* ignore */ }
+      }
+    }
+    console.log(`[PublishVideos] model: account=${modelAd.accountId} page=${modelAd.pageId} ig=${modelAd.instagramUserId} link=${modelAd.link}`);
 
-    // 2. Get campaign id (just for echo back)
+    // 2. Get campaign id
     const campaignId = await fetchAdsetCampaignId(source_adset_id, token);
 
     // 3. Copy source adset
@@ -338,62 +407,63 @@ export async function POST(req: NextRequest) {
       name: new_adset_name,
       daily_budget: String(daily_budget_cents),
     }, token);
-    console.log(`[PublishVideos] updated adset name + budget=${daily_budget_cents}`);
+    console.log(`[PublishVideos] adset updated: name="${new_adset_name}" budget=${daily_budget_cents}`);
 
-    // 5. Process videos in parallel: upload + poll + creative + ad
-    const results = await Promise.all(
-      ads.map(async (ad) => {
-        const result: Record<string, unknown> = { name: ad.name };
-        try {
-          const videoId = await uploadVideoFromUrl(modelAd.accountId, ad.video_url, ad.name, token);
-          result.video_id = videoId;
-          console.log(`[PublishVideos] ${ad.name} uploaded as video_id=${videoId}`);
+    // 5. Process videos sequentially (evitar rate limit)
+    const results: Record<string, unknown>[] = [];
+    for (const ad of ads) {
+      const result: Record<string, unknown> = { name: ad.name };
+      try {
+        const videoId = await uploadVideoFromUrl(modelAd.accountId, ad.video_url, ad.name, token);
+        result.video_id = videoId;
+        console.log(`[PublishVideos] ${ad.name} uploaded as video_id=${videoId}`);
 
-          await pollVideoReady(videoId, token);
-          console.log(`[PublishVideos] ${ad.name} video ready`);
+        await pollVideoReady(videoId, token);
+        console.log(`[PublishVideos] ${ad.name} video ready`);
 
-          const thumbnailUrl = await fetchVideoThumbnail(videoId, token);
-          result.thumbnail = thumbnailUrl;
+        const thumbnailUrl = await fetchVideoThumbnail(videoId, token);
+        result.thumbnail = thumbnailUrl;
 
-          const creativeId = await createVideoCreative({
-            accountId: modelAd.accountId,
-            name: ad.name,
-            pageId: modelAd.pageId,
-            instagramUserId: modelAd.instagramUserId,
-            videoId,
-            thumbnailUrl,
-            body: ad.body,
-            title: ad.title,
-            description: ad.description,
-            link: modelAd.link,
-            ctaType: ad.cta_type,
-            urlTags: modelAd.urlTags,
-            token,
-          });
-          result.creative_id = creativeId;
-          console.log(`[PublishVideos] ${ad.name} creative=${creativeId}`);
+        // G4: passa partnership para createVideoCreative
+        const creativeId = await createVideoCreative({
+          accountId: modelAd.accountId,
+          name: ad.name,
+          pageId: modelAd.pageId,
+          instagramUserId: modelAd.instagramUserId,
+          videoId,
+          thumbnailUrl,
+          body: ad.body,
+          title: ad.title,
+          description: ad.description,
+          link: modelAd.link,
+          ctaType: ad.cta_type,
+          urlTags: modelAd.urlTags,
+          partnership,
+          token,
+        });
+        result.creative_id = creativeId;
+        console.log(`[PublishVideos] ${ad.name} creative=${creativeId}`);
 
-          const adId = await createAd({
-            accountId: modelAd.accountId,
-            adsetId: newAdsetId,
-            creativeId,
-            name: ad.name,
-            status: start_paused ? "PAUSED" : "ACTIVE",
-            token,
-          });
-          result.ad_id = adId;
-          console.log(`[PublishVideos] ${ad.name} ad=${adId}`);
-          result.success = true;
-        } catch (err) {
-          result.success = false;
-          result.error = err instanceof Error ? err.message : String(err);
-          console.error(`[PublishVideos] ${ad.name} FAILED:`, result.error);
-        }
-        return result;
-      })
-    );
+        const adId = await createAd({
+          accountId: modelAd.accountId,
+          adsetId: newAdsetId,
+          creativeId,
+          name: ad.name,
+          status: start_paused ? "PAUSED" : "ACTIVE",
+          token,
+        });
+        result.ad_id = adId;
+        result.success = true;
+        console.log(`[PublishVideos] ${ad.name} ad=${adId}`);
+      } catch (err) {
+        result.success = false;
+        result.error = err instanceof Error ? err.message : String(err);
+        console.error(`[PublishVideos] ${ad.name} FAILED:`, result.error);
+      }
+      results.push(result);
+    }
 
-    // Optionally activate adset if videos succeeded
+    // Ativar adset se todos ok e não start_paused
     const allOk = results.every((r) => r.success);
     if (allOk && !start_paused) {
       try {

@@ -99,28 +99,17 @@ export async function GET(
       args: [auth.workspace_id, `%${campaignName}%`, campaignId],
     });
 
-    // Build CRM map
+    // Build CRM map — strict matching only (no __ANY__ fallback to prevent cross-campaign leaks)
     const crmMap = new Map<string, { total: number; qualified: number }>();
     for (const r of crmResult.rows) {
       const entry = { total: Number(r.total_leads || 0), qualified: Number(r.qualified_leads || 0) };
-      // By names (primary)
+      // By names: (adName, adsetName) — primary key
       if (r.utm_content && r.utm_term) {
         crmMap.set(`${String(r.utm_content).toUpperCase()}||${String(r.utm_term).toUpperCase()}`, entry);
       }
-      // By IDs (fallback)
+      // By IDs: (adId, adsetId) — fallback when UTMs not resolved
       if (r.resolved_ad_id && r.resolved_adset_id) {
         crmMap.set(`ID:${r.resolved_ad_id}||${r.resolved_adset_id}`, entry);
-      }
-      // Partial (utm_content only)
-      if (r.utm_content) {
-        const key = `${String(r.utm_content).toUpperCase()}||__ANY__`;
-        const existing = crmMap.get(key);
-        if (existing) {
-          existing.total += entry.total;
-          existing.qualified += entry.qualified;
-        } else {
-          crmMap.set(key, { ...entry });
-        }
       }
     }
 
@@ -129,15 +118,13 @@ export async function GET(
     // 4. Resolve CRM leads per ad
     function resolveLeads(adName: string, adId: string, adsetName: string, adsetId: string) {
       if (!hasCrmData) return { leads: 0, qualified: 0, source: "meta" as const };
-      // Try (adName, adsetName)
+      // Try (adName, adsetName) — strict match
       const byName = crmMap.get(`${adName.toUpperCase()}||${adsetName.toUpperCase()}`);
       if (byName) return { leads: byName.total, qualified: byName.qualified, source: "crm" as const };
-      // Try (adId, adsetId)
+      // Try (adId, adsetId) — fallback
       const byId = crmMap.get(`ID:${adId}||${adsetId}`);
       if (byId) return { leads: byId.total, qualified: byId.qualified, source: "crm" as const };
-      // Try adName only
-      const byNameOnly = crmMap.get(`${adName.toUpperCase()}||__ANY__`);
-      if (byNameOnly) return { leads: byNameOnly.total, qualified: byNameOnly.qualified, source: "crm" as const };
+      // No match = 0 leads for this ad×adset in this campaign
       return { leads: 0, qualified: 0, source: "crm" as const };
     }
 

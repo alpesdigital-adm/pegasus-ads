@@ -1,0 +1,260 @@
+/**
+ * GET /api/campaigns/[id]/drill?window=3d
+ *
+ * Kill rules drill-down usando classified_insights (local, sem Meta API).
+ * Agrupa por adset → ads com métricas por janela.
+ * CRM leads cruzados via (utm_content, utm_term).
+ */
+import { NextRequest, NextResponse } from "next/server";
+import { requireAuth } from "@/lib/auth";
+import { getDb } from "@/lib/db";
+import { evaluateKillRules, type KillRuleMetrics } from "@/config/kill-rules";
+
+export const runtime = "nodejs";
+
+type Window = "today" | "2d" | "3d" | "5d" | "7d";
+
+function windowToDays(w: Window): number {
+  switch (w) {
+    case "today": return 0;
+    case "2d": return 2;
+    case "3d": return 3;
+    case "5d": return 5;
+    case "7d": return 7;
+  }
+}
+
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const auth = await requireAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
+  const { id: campaignId } = await params;
+  const windowParam = (req.nextUrl.searchParams.get("window") || "3d") as Window;
+  const validWindows: Window[] = ["today", "2d", "3d", "5d", "7d"];
+  if (!validWindows.includes(windowParam)) {
+    return NextResponse.json({ error: `window invalido. Use: ${validWindows.join(", ")}` }, { status: 400 });
+  }
+
+  try {
+    const db = getDb();
+    const daysBack = windowToDays(windowParam);
+    const dateFilter = daysBack === 0 ? "date = CURRENT_DATE" : `date >= CURRENT_DATE - INTERVAL '${daysBack} days'`;
+
+    // 1. Ads with metrics from classified_insights
+    const adsResult = await db.execute({
+      sql: `
+        SELECT
+          ad_id,
+          ad_name,
+          adset_id,
+          adset_name,
+          campaign_name,
+          MAX(effective_status) AS effective_status,
+          SUM(CAST(spend AS FLOAT)) AS spend,
+          SUM(impressions) AS impressions,
+          SUM(link_clicks) AS clicks,
+          SUM(landing_page_views) AS lpv,
+          SUM(leads) AS leads_meta,
+          CASE WHEN SUM(impressions) > 0 THEN (CAST(SUM(link_clicks) AS FLOAT) / SUM(impressions) * 100) ELSE 0 END AS ctr,
+          CASE WHEN SUM(impressions) > 0 THEN (SUM(CAST(spend AS FLOAT)) / SUM(impressions) * 1000) ELSE 0 END AS cpm,
+          COUNT(DISTINCT date) AS days_count
+        FROM classified_insights
+        WHERE campaign_id = ?
+          AND ${dateFilter}
+        GROUP BY ad_id, ad_name, adset_id, adset_name, campaign_name
+        ORDER BY SUM(CAST(spend AS FLOAT)) DESC
+      `,
+      args: [campaignId],
+    });
+
+    // 2. Campaign name for CRM lookup
+    let campaignName = "";
+    if (adsResult.rows.length > 0) {
+      campaignName = (adsResult.rows[0].campaign_name as string) || "";
+    }
+
+    // 3. CRM leads grouped by (utm_content, utm_term)
+    const crmResult = await db.execute({
+      sql: `
+        SELECT
+          utm_content,
+          utm_term,
+          ad_id AS resolved_ad_id,
+          adset_id AS resolved_adset_id,
+          COUNT(*) AS total_leads,
+          SUM(CASE WHEN is_qualified THEN 1 ELSE 0 END) AS qualified_leads
+        FROM crm_leads
+        WHERE workspace_id = ?
+          AND (utm_campaign LIKE ? OR campaign_id = ?)
+        GROUP BY utm_content, utm_term, ad_id, adset_id
+      `,
+      args: [auth.workspace_id, `%${campaignName}%`, campaignId],
+    });
+
+    // Build CRM map
+    const crmMap = new Map<string, { total: number; qualified: number }>();
+    for (const r of crmResult.rows) {
+      const entry = { total: Number(r.total_leads || 0), qualified: Number(r.qualified_leads || 0) };
+      // By names (primary)
+      if (r.utm_content && r.utm_term) {
+        crmMap.set(`${String(r.utm_content).toUpperCase()}||${String(r.utm_term).toUpperCase()}`, entry);
+      }
+      // By IDs (fallback)
+      if (r.resolved_ad_id && r.resolved_adset_id) {
+        crmMap.set(`ID:${r.resolved_ad_id}||${r.resolved_adset_id}`, entry);
+      }
+      // Partial (utm_content only)
+      if (r.utm_content) {
+        const key = `${String(r.utm_content).toUpperCase()}||__ANY__`;
+        const existing = crmMap.get(key);
+        if (existing) {
+          existing.total += entry.total;
+          existing.qualified += entry.qualified;
+        } else {
+          crmMap.set(key, { ...entry });
+        }
+      }
+    }
+
+    const hasCrmData = crmResult.rows.length > 0;
+
+    // 4. Resolve CRM leads per ad
+    function resolveLeads(adName: string, adId: string, adsetName: string, adsetId: string) {
+      if (!hasCrmData) return { leads: 0, qualified: 0, source: "meta" as const };
+      // Try (adName, adsetName)
+      const byName = crmMap.get(`${adName.toUpperCase()}||${adsetName.toUpperCase()}`);
+      if (byName) return { leads: byName.total, qualified: byName.qualified, source: "crm" as const };
+      // Try (adId, adsetId)
+      const byId = crmMap.get(`ID:${adId}||${adsetId}`);
+      if (byId) return { leads: byId.total, qualified: byId.qualified, source: "crm" as const };
+      // Try adName only
+      const byNameOnly = crmMap.get(`${adName.toUpperCase()}||__ANY__`);
+      if (byNameOnly) return { leads: byNameOnly.total, qualified: byNameOnly.qualified, source: "crm" as const };
+      return { leads: 0, qualified: 0, source: "crm" as const };
+    }
+
+    // 5. Campaign-level rolling 5d CPL for benchmark
+    const benchResult = await db.execute({
+      sql: `
+        SELECT
+          SUM(CAST(spend AS FLOAT)) AS total_spend,
+          SUM(leads) AS total_leads
+        FROM classified_insights
+        WHERE campaign_id = ? AND date >= CURRENT_DATE - INTERVAL '5 days'
+      `,
+      args: [campaignId],
+    });
+    const benchSpend = Number(benchResult.rows[0]?.total_spend || 0);
+    const benchLeads = Number(benchResult.rows[0]?.total_leads || 0);
+    const rolling5dCpl = benchLeads > 0 ? benchSpend / benchLeads : 0;
+
+    // 6. Find control CPL (best ad with 5+ leads)
+    let controlCpl: number | null = null;
+    for (const row of adsResult.rows) {
+      const crm = resolveLeads(
+        row.ad_name as string, row.ad_id as string,
+        row.adset_name as string, row.adset_id as string
+      );
+      const leads = hasCrmData ? crm.leads : Number(row.leads_meta || 0);
+      if (leads >= 5) {
+        const spend = Number(row.spend || 0);
+        const cpl = spend / leads;
+        if (controlCpl === null || cpl < controlCpl) controlCpl = cpl;
+      }
+    }
+
+    // 7. Build ads with kill rules
+    const CPL_TARGET = 30;
+    const ads = [];
+    let killCount = 0;
+    let totalSpend = 0;
+    let totalLeadsMeta = 0;
+    let totalLeadsCrm = 0;
+    let totalQualified = 0;
+    let activeCount = 0;
+
+    for (const row of adsResult.rows) {
+      const spend = Number(row.spend || 0);
+      const impressions = Number(row.impressions || 0);
+      const clicks = Number(row.clicks || 0);
+      const ctr = Number(row.ctr || 0);
+      const leadsMeta = Number(row.leads_meta || 0);
+      const daysRunning = Number(row.days_count || 0);
+      const effectiveStatus = (row.effective_status as string) || "UNKNOWN";
+      const isActive = effectiveStatus === "ACTIVE";
+
+      const crm = resolveLeads(
+        row.ad_name as string, row.ad_id as string,
+        row.adset_name as string, row.adset_id as string
+      );
+
+      const leadsForRules = hasCrmData ? crm.leads : leadsMeta;
+      const cpl = leadsForRules > 0 ? spend / leadsForRules : null;
+
+      // Kill rules
+      const killMetrics: KillRuleMetrics = {
+        spend,
+        leads: leadsForRules,
+        cpl,
+        impressions,
+        ctr,
+        cplTarget: CPL_TARGET,
+        controlCpl,
+        daysRunning,
+      };
+      const triggered = evaluateKillRules(killMetrics);
+
+      if (triggered) killCount++;
+      if (isActive) activeCount++;
+      totalSpend += spend;
+      totalLeadsMeta += leadsMeta;
+      totalLeadsCrm += crm.leads;
+      totalQualified += crm.qualified;
+
+      ads.push({
+        ad_id: row.ad_id,
+        ad_name: row.ad_name,
+        adset_id: row.adset_id,
+        adset_name: row.adset_name,
+        status: effectiveStatus,
+        effective_status: effectiveStatus,
+        spend: Math.round(spend * 100) / 100,
+        impressions,
+        clicks,
+        ctr: Math.round(ctr * 100) / 100,
+        cpm: Math.round(Number(row.cpm || 0) * 100) / 100,
+        leads: leadsMeta,
+        leads_crm: crm.leads,
+        qualified_leads: crm.qualified,
+        cpl: cpl ? Math.round(cpl * 100) / 100 : 0,
+        cpl_meta: leadsMeta > 0 ? Math.round(spend / leadsMeta * 100) / 100 : null,
+        leads_source: hasCrmData ? "crm" : "meta",
+        kill_rule: triggered ? { level: triggered.level, name: triggered.name, action: triggered.action } : null,
+      });
+    }
+
+    return NextResponse.json({
+      campaign_id: campaignId,
+      campaign_name: campaignName,
+      window: windowParam,
+      cpl_target: CPL_TARGET,
+      control_cpl: controlCpl ? Math.round(controlCpl * 100) / 100 : null,
+      leads_source: hasCrmData ? "crm" : "meta",
+      rolling_5d_cpl: Math.round(rolling5dCpl * 100) / 100,
+      total_ads: adsResult.rows.length,
+      active_ads: activeCount,
+      kill_candidates: killCount,
+      total_spend: Math.round(totalSpend * 100) / 100,
+      total_leads: totalLeadsMeta,
+      total_leads_crm: totalLeadsCrm,
+      total_qualified_leads: totalQualified,
+      ads,
+    });
+  } catch (error) {
+    console.error("[campaign/drill]", error);
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Failed" }, { status: 500 });
+  }
+}

@@ -25,13 +25,19 @@ interface AdMetrics {
 
 interface KillRuleResponse {
   campaign_id: string;
+  campaign_name: string;
   window: string;
   total_ads: number;
   active_ads: number;
   kill_candidates: number;
   total_spend: number;
   total_leads: number;
+  total_leads_crm: number;
+  total_qualified_leads: number;
   rolling_5d_cpl: number;
+  leads_source: string;
+  control_cpl: number | null;
+  cpl_target: number;
   ads: AdMetrics[];
 }
 
@@ -75,11 +81,21 @@ export default function CampaignDrillPage() {
   const [expandedAdsets, setExpandedAdsets] = useState<Set<string>>(new Set());
   const [showPaused, setShowPaused] = useState(false);
   const [togglingAds, setTogglingAds] = useState<Set<string>>(new Set());
+  const [syncing, setSyncing] = useState(false);
+
+  const syncData = async () => {
+    setSyncing(true);
+    try {
+      await fetch("/api/cron/sync-all");
+    } catch { /* ignore */ }
+    setSyncing(false);
+    fetchData();
+  };
 
   const fetchData = useCallback(() => {
     setLoading(true);
     setError(null);
-    fetch(`/api/ads/kill-rule?campaign_id=${campaignId}&window=${window}`)
+    fetch(`/api/campaigns/${campaignId}/drill?window=${window}`)
       .then((r) => r.json())
       .then((d) => {
         if (d.error) setError(d.error);
@@ -163,8 +179,19 @@ export default function CampaignDrillPage() {
           </button>
           <div className="flex-1">
             <h1 className="text-xl font-semibold tracking-tight">Kill Rules</h1>
-            <p className="text-xs text-[var(--text-tertiary)] mt-0.5 font-mono">{campaignId}</p>
+            <p className="text-xs text-[var(--text-tertiary)] mt-0.5 font-mono">{data?.campaign_name || campaignId}</p>
           </div>
+          <button
+            onClick={syncData}
+            disabled={syncing}
+            className="flex items-center gap-2 px-3 py-2 rounded-lg bg-[var(--bg-tertiary)] border border-[var(--border-default)] hover:bg-[var(--bg-hover)] text-xs font-medium text-[var(--text-secondary)] transition-all disabled:opacity-50"
+            title="Atualizar dados da Meta"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={syncing ? "animate-spin" : ""}>
+              <path d="M21 12a9 9 0 01-9 9m0 0a9 9 0 01-9-9m9 9V3m0 0a9 9 0 019 9m-9-9a9 9 0 00-9 9" />
+            </svg>
+            {syncing ? "Atualizando..." : "Atualizar dados"}
+          </button>
         </div>
 
         {/* Controls */}
@@ -262,9 +289,11 @@ export default function CampaignDrillPage() {
                             <th className="text-right px-2 py-2 font-medium">Spend</th>
                             <th className="text-right px-2 py-2 font-medium">Impr.</th>
                             <th className="text-right px-2 py-2 font-medium">CTR</th>
-                            <th className="text-right px-2 py-2 font-medium">Leads</th>
+                            <th className="text-right px-2 py-2 font-medium">Leads Meta</th>
+                            <th className="text-right px-2 py-2 font-medium">Leads CRM</th>
                             <th className="text-right px-2 py-2 font-medium">Qual.</th>
-                            <th className="text-right px-2 py-2 font-medium">CPL</th>
+                            <th className="text-right px-2 py-2 font-medium">CPL Meta</th>
+                            <th className="text-right px-2 py-2 font-medium">CPL CRM</th>
                             <th className="text-center px-2 py-2 font-medium">Acao</th>
                           </tr>
                         </thead>
@@ -305,7 +334,15 @@ export default function CampaignDrillPage() {
                                 <td className="text-right px-2 py-2 text-[var(--text-secondary)]">{fmtInt(ad.impressions || 0)}</td>
                                 <td className="text-right px-2 py-2 text-[var(--text-secondary)]">{(ad.ctr || 0).toFixed(2)}%</td>
                                 <td className="text-right px-2 py-2">{ad.leads || 0}</td>
+                                <td className="text-right px-2 py-2 text-emerald-400">{(ad as any).leads_crm || 0}</td>
                                 <td className="text-right px-2 py-2 text-blue-400">{ad.qualified_leads || 0}</td>
+                                <td className="text-right px-2 py-2">
+                                  {(ad as any).cpl_meta != null && (ad as any).cpl_meta > 0 ? (
+                                    <span className={`font-medium ${(ad as any).cpl_meta <= 32.77 ? "text-emerald-400" : "text-red-400"}`}>
+                                      R$ {(ad as any).cpl_meta.toFixed(2)}
+                                    </span>
+                                  ) : "—"}
+                                </td>
                                 <td className="text-right px-2 py-2">
                                   {ad.cpl > 0 ? (
                                     <span className={`font-medium ${ad.cpl <= 30 ? "text-emerald-400" : ad.cpl <= 50 ? "text-yellow-400" : "text-red-400"}`}>

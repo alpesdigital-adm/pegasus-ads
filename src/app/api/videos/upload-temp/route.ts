@@ -40,7 +40,15 @@ export async function POST(req: NextRequest) {
     // Garantir que o diretório temporário existe
     await mkdir(TEMP_DIR, { recursive: true });
 
-    const formData = await req.formData();
+    let formData: FormData;
+    try {
+      formData = await req.formData();
+    } catch {
+      return NextResponse.json(
+        { error: "file is required (multipart/form-data with 'file' field)" },
+        { status: 400 }
+      );
+    }
     const file = formData.get("file") as File | null;
     const name = (formData.get("name") as string | null) || "";
 

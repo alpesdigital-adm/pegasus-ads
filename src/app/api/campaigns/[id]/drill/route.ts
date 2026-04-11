@@ -76,7 +76,11 @@ export async function GET(
       campaignName = (adsResult.rows[0].campaign_name as string) || "";
     }
 
-    // 3. CRM leads grouped by (utm_content, utm_term)
+    // 3. CRM leads grouped by (utm_content, utm_term) — filtered by same window
+    const crmDateFilter = daysBack === 0
+      ? "AND subscribed_at >= CURRENT_DATE"
+      : `AND subscribed_at >= CURRENT_DATE - INTERVAL '${daysBack} days'`;
+
     const crmResult = await db.execute({
       sql: `
         SELECT
@@ -89,6 +93,7 @@ export async function GET(
         FROM crm_leads
         WHERE workspace_id = ?
           AND (utm_campaign LIKE ? OR campaign_id = ?)
+          ${crmDateFilter}
         GROUP BY utm_content, utm_term, ad_id, adset_id
       `,
       args: [auth.workspace_id, `%${campaignName}%`, campaignId],

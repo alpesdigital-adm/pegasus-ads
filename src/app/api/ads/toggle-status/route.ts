@@ -7,6 +7,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
 import { getTokenForWorkspace } from "@/lib/meta";
+import { getDb } from "@/lib/db";
 
 export const runtime = "nodejs";
 
@@ -32,6 +33,15 @@ export async function POST(req: NextRequest) {
     });
 
     if (res.ok) {
+      // Update local classified_insights to reflect immediately
+      try {
+        const db = getDb();
+        await db.execute({
+          sql: "UPDATE classified_insights SET effective_status = ? WHERE ad_id = ?",
+          args: [status, ad_id],
+        });
+      } catch { /* non-critical */ }
+
       console.log(`[ToggleStatus] ad=${ad_id} → ${status}`);
       return NextResponse.json({ success: true, ad_id, status });
     }

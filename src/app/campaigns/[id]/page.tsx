@@ -127,8 +127,19 @@ export default function CampaignDrillPage() {
       });
       const result = await res.json();
       if (result.success) {
-        // Refresh data
-        fetchData();
+        // Update local state only — no full refresh
+        setData((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            active_ads: prev.active_ads + (newStatus === "ACTIVE" ? 1 : -1),
+            ads: prev.ads.map((ad) =>
+              ad.ad_id === adId
+                ? { ...ad, status: newStatus, effective_status: newStatus }
+                : ad
+            ),
+          };
+        });
       } else {
         alert(`Erro ao ${newStatus === "PAUSED" ? "pausar" : "ativar"}: ${JSON.stringify(result.error)}`);
       }

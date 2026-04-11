@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import AppShell from "@/components/AppShell";
 
 interface Campaign {
@@ -63,6 +64,7 @@ export default function CampaignsPage() {
   const [totals, setTotals] = useState<Totals | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const router = useRouter();
 
   useEffect(() => {
     setLoading(true);
@@ -148,6 +150,7 @@ export default function CampaignsPage() {
                   <th className="text-right px-3 py-3 font-medium">CPL CRM</th>
                   <th className="text-right px-3 py-3 font-medium">CTR</th>
                   <th className="text-right px-3 py-3 font-medium">Connect</th>
+                  <th className="text-center px-3 py-3 font-medium">Kill Rules</th>
                 </tr>
               </thead>
               <tbody>
@@ -183,6 +186,19 @@ export default function CampaignsPage() {
                     </td>
                     <td className="text-right px-3 py-3 text-[var(--text-secondary)]">{fmtPct(c.ctr)}</td>
                     <td className="text-right px-3 py-3 text-[var(--text-secondary)]">{fmtPct(c.connect_rate)}</td>
+                    <td className="text-center px-3 py-3">
+                      <button
+                        onClick={() => router.push(`/campaigns/${c.campaign_id}`)}
+                        className="p-2 rounded-lg hover:bg-amber-500/10 text-[var(--text-muted)] hover:text-amber-400 transition-all"
+                        title="Kill Rules"
+                      >
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M12 2L2 7l10 5 10-5-10-5z" />
+                          <path d="M2 17l10 5 10-5" />
+                          <path d="M2 12l10 5 10-5" />
+                        </svg>
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>

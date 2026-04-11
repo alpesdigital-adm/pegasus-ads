@@ -69,6 +69,18 @@ function fmtInt(n: number): string {
   return n.toLocaleString("pt-BR");
 }
 
+function killRuleDescription(level: string): string {
+  const descriptions: Record<string, string> = {
+    L0: "Sem Lead: Spend >= 1.5x CPL target sem nenhum lead. Acao: pausar.",
+    L1: "CPL Explosivo: CPL > 3x target com pelo menos 1 lead. Acao: pausar.",
+    L2: "CPL Alto Sustentado: CPL > 2x target apos 2+ dias. Acao: pausar.",
+    L3: "CTR Morto: CTR < 0.5% com 1000+ impressoes. Acao: monitorar.",
+    L4: "Underperformer: CPL > 50% acima da mediana (controle) com dados suficientes. Acao: monitorar.",
+    L5: "Winner Potencial: CPL < 80% do controle com volume suficiente. Acao: escalar.",
+  };
+  return descriptions[level] || "";
+}
+
 export default function CampaignDrillPage() {
   const params = useParams();
   const router = useRouter();
@@ -328,7 +340,9 @@ export default function CampaignDrillPage() {
                                 </td>
                                 <td className="text-center px-2 py-2">
                                   {ad.kill_rule ? (
-                                    <span className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                    <span
+                                      title={`${ad.kill_rule.level} — ${ad.kill_rule.name}\nAcao: ${ad.kill_rule.action === "kill" ? "Pausar" : ad.kill_rule.action === "warn" ? "Atenção" : "Promover"}\n\n${killRuleDescription(ad.kill_rule.level)}`}
+                                      className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-bold cursor-help ${
                                       ad.kill_rule.action === "kill"
                                         ? "bg-red-500/10 text-red-400"
                                         : ad.kill_rule.action === "warn"
@@ -338,7 +352,7 @@ export default function CampaignDrillPage() {
                                       {ad.kill_rule.level}
                                     </span>
                                   ) : (
-                                    <span className="text-[var(--text-muted)]">OK</span>
+                                    <span className="text-[var(--text-muted)]" title="Nenhuma regra disparada — ad dentro dos parametros">OK</span>
                                   )}
                                 </td>
                                 <td className="text-right px-2 py-2 font-medium">{fmt(ad.spend, "R$ ")}</td>

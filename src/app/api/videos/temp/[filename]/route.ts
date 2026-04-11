@@ -19,9 +19,9 @@ const TEMP_DIR = "/tmp/pegasus-videos";
 
 export async function GET(
   _req: NextRequest,
-  { params }: { params: { filename: string } }
+  { params }: { params: Promise<{ filename: string }> }
 ) {
-  const { filename } = params;
+  const { filename } = await params;
 
   // Sanitize: apenas caracteres seguros (hex + extensão)
   if (!/^[a-f0-9]{16}\.(mp4|mov|avi|mkv)$/.test(filename)) {
@@ -57,7 +57,7 @@ export async function GET(
  */
 export async function DELETE(
   req: NextRequest,
-  { params }: { params: { filename: string } }
+  { params }: { params: Promise<{ filename: string }> }
 ) {
   // Requer API key para deleção manual
   const apiKey = req.headers.get("x-api-key");
@@ -66,7 +66,7 @@ export async function DELETE(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { filename } = params;
+  const { filename } = await params;
   if (!/^[a-f0-9]{16}\.(mp4|mov|avi|mkv)$/.test(filename)) {
     return NextResponse.json({ error: "Invalid filename" }, { status: 400 });
   }

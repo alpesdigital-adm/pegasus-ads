@@ -151,19 +151,26 @@ export async function GET(
     const benchLeads = Number(benchResult.rows[0]?.total_leads || 0);
     const rolling5dCpl = benchLeads > 0 ? benchSpend / benchLeads : 0;
 
-    // 6. Find control CPL (best ad with 5+ leads)
+    // 6. Find control CPL (median of ads with 3+ leads — robust against outliers)
     let controlCpl: number | null = null;
+    const cplValues: number[] = [];
     for (const row of adsResult.rows) {
       const crm = resolveLeads(
         row.ad_name as string, row.ad_id as string,
         row.adset_name as string, row.adset_id as string
       );
       const leads = hasCrmData ? crm.leads : Number(row.leads_meta || 0);
-      if (leads >= 5) {
+      if (leads >= 3) {
         const spend = Number(row.spend || 0);
-        const cpl = spend / leads;
-        if (controlCpl === null || cpl < controlCpl) controlCpl = cpl;
+        cplValues.push(spend / leads);
       }
+    }
+    if (cplValues.length > 0) {
+      cplValues.sort((a, b) => a - b);
+      const mid = Math.floor(cplValues.length / 2);
+      controlCpl = cplValues.length % 2 === 0
+        ? (cplValues[mid - 1] + cplValues[mid]) / 2
+        : cplValues[mid];
     }
 
     // 7. Build ads with kill rules

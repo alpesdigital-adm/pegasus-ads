@@ -81,6 +81,27 @@ async function rateLimit() {
   lastCall = Date.now();
 }
 
+// ── G11: Auto-testimonial ──
+function generateTestimonial(body: string, title: string): string {
+  const combined = (body + " " + title).toLowerCase();
+  if (combined.includes("anamnese") || combined.includes("diagnóst") || combined.includes("paciente capilar")) {
+    return "Esse guia mudou a qualidade da minha anamnese capilar. Não consigo guardar isso só pra mim.";
+  }
+  if (combined.includes("minoxidil") || combined.includes("prescrever") || combined.includes("posologia")) {
+    return "Prescrevemos Minoxidil todo dia — esse guia organiza o que a faculdade nunca ensinou de forma prática.";
+  }
+  if (combined.includes("tricolog") || combined.includes("capilar") || combined.includes("protocolo")) {
+    return "Esse é o tipo de material que eu gostaria de ter tido no início da minha prática. Acesso gratuito enquanto dura.";
+  }
+  if (combined.includes("gratuit") || combined.includes("grátis") || combined.includes("ebook") || combined.includes("guia")) {
+    return "Nem acredito que esse conteúdo está gratuito. Baixa agora — você vai entender por quê quando ver o material.";
+  }
+  if (combined.includes("formação") || combined.includes("curso") || combined.includes("aula")) {
+    return "Me convenceram a liberar esse material da formação. Oportunidade única — não vai durar muito.";
+  }
+  return "Tem ouro nesse material. Fico feliz de poder disponibilizar gratuitamente para colegas.";
+}
+
 // ── Interfaces ──
 
 interface VideoAdSpec {
@@ -94,7 +115,7 @@ interface VideoAdSpec {
 
 interface PartnershipSpec {
   sponsor_id: string;
-  testimonial?: string;
+  testimonial?: string;    // G11: auto-gerado se vazio
 }
 
 interface ModelAdInfo {
@@ -369,6 +390,14 @@ export async function POST(req: NextRequest) {
     }
 
     const token = await getTokenForWorkspace(auth.workspace_id);
+
+    // G11: Resolver testimonial
+    let resolvedTestimonial = partnership?.testimonial || "";
+    if (partnership?.sponsor_id && !resolvedTestimonial && ads.length > 0) {
+      resolvedTestimonial = generateTestimonial(ads[0].body || "", ads[0].title || "");
+      console.log(`[PublishVideos] G11: auto-testimonial="${resolvedTestimonial}"`);
+    }
+
     console.log(`[PublishVideos] start: ${ads.length} videos → new adset cloned from ${source_adset_id}`);
 
     // 1. Model ad info
@@ -424,7 +453,10 @@ export async function POST(req: NextRequest) {
         const thumbnailUrl = await fetchVideoThumbnail(videoId, token);
         result.thumbnail = thumbnailUrl;
 
-        // G4: passa partnership para createVideoCreative
+        // G4: passa partnership com testimonial resolvido (G11)
+        const partnershipWithTestimonial = partnership
+          ? { ...partnership, testimonial: resolvedTestimonial }
+          : undefined;
         const creativeId = await createVideoCreative({
           accountId: modelAd.accountId,
           name: ad.name,
@@ -438,7 +470,7 @@ export async function POST(req: NextRequest) {
           link: modelAd.link,
           ctaType: ad.cta_type,
           urlTags: modelAd.urlTags,
-          partnership,
+          partnership: partnershipWithTestimonial,
           token,
         });
         result.creative_id = creativeId;

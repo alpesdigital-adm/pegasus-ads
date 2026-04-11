@@ -4,6 +4,17 @@
  * Publica criativos em ad sets de uma campanha, usando um ad modelo
  * como referência para link, page_id, instagram_user_id, etc.
  *
+ * COMPORTAMENTO DE PAREAMENTO F/S (G10):
+ * Quando dois ads têm o mesmo nome base com sufixo F (Feed) e S (Stories),
+ * eles são automaticamente agrupados em UM único ad onde:
+ *   - A imagem F é usada no placement Feed
+ *   - A imagem S é usada no placement Stories (via placement_customizations)
+ * Exemplo: "T4EBANP-AD01F" + "T4EBANP-AD01S" → um ad "T4EBANP-AD01"
+ *
+ * TESTIMONIAL AUTO (G11):
+ * Quando partnership.sponsor_id está set mas partnership.testimonial está vazio,
+ * um testimonial persuasivo é gerado automaticamente com base no conteúdo do ad.
+ *
  * Body (JSON):
  * {
  *   "campaign_id": "120242550231280521",
@@ -13,28 +24,34 @@
  *   "account_id": "act_...",               // G9
  *   "link": "https://...",                  // G1: override do link do model_ad
  *   "adset_ids": ["...", "..."],            // G2: filtro de ad sets (vazio = todos)
- *   "source_adset_id": "...",              // G3: se fornecido, clona novo adset ao invés de usar existentes
+ *   "source_adset_id": "...",              // G3: se fornecido, clona novo adset
  *   "new_adset_name": "...",               // G3: nome do novo adset clonado
  *   "daily_budget_cents": 50000,           // G3: orçamento do novo adset
  *   "ads": [
  *     {
- *       "name": "T7EBMX-AD026",
- *       "image_base64": "iVBOR...",         // ou image_hash (G5)
+ *       "name": "T4EBANP-AD01F",           // sufixo F = Feed
  *       "image_hash": "abc123...",          // G5: alternativa a image_base64
- *       "image_filename": "T7EBMX-AD026F.png",
+ *       "image_base64": "iVBOR...",
+ *       "image_filename": "T4EBANP-AD01F.png",
  *       "body": "Texto principal...",
  *       "title": "Headline...",
- *       "description": "Descrição...",
+ *       "description": "",
  *       "cta_type": "DOWNLOAD"
+ *     },
+ *     {
+ *       "name": "T4EBANP-AD01S",           // sufixo S = Stories — será pareado com AD01F
+ *       "image_hash": "def456...",
+ *       "image_filename": "T4EBANP-AD01S.png",
+ *       ...
  *     }
  *   ],
- *   "partnership": {                        // opcional
+ *   "partnership": {
  *     "sponsor_id": "17841400601834755",
- *     "testimonial": "Texto do depoimento"
+ *     "testimonial": ""                     // G11: auto-gerado se vazio
  *   }
  * }
  *
- * Protegido por x-api-key (TEST_LOG_API_KEY).
+ * Protegido por x-api-key.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
@@ -60,7 +77,7 @@ async function metaFetch<T>(url: string, options?: RequestInit, retries = 4): Pr
   let lastErr: Error | null = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
     if (attempt > 0) {
-      const wait = Math.min(60000, 5000 * Math.pow(2, attempt - 1)); // 5s, 10s, 20s, 40s
+      const wait = Math.min(60000, 5000 * Math.pow(2, attempt - 1));
       console.warn(`[PublishToAdSets] Rate limit retry ${attempt}/${retries} — waiting ${wait}ms`);
       await new Promise((r) => setTimeout(r, wait));
     }
@@ -68,7 +85,6 @@ async function metaFetch<T>(url: string, options?: RequestInit, retries = 4): Pr
     const data = await response.json();
     if (!response.ok || (data as Record<string, unknown>).error) {
       const err = (data as Record<string, unknown>).error as Record<string, unknown> | undefined;
-      // G8: detecta rate limit (código 17) e retenta
       if (err && Number(err.code) === 17 && attempt < retries) {
         lastErr = new Error(`Meta API rate limit (code 17): ${JSON.stringify(err)}`);
         continue;
@@ -90,7 +106,7 @@ function formBody(params: Record<string, string>): string {
 
 interface AdSpec {
   name: string;
-  image_base64?: string;   // G5: opcional se image_hash fornecido
+  image_base64?: string;
   image_hash?: string;     // G5: alternativa a image_base64
   image_filename: string;
   body: string;
@@ -101,7 +117,7 @@ interface AdSpec {
 
 interface PartnershipSpec {
   sponsor_id: string;
-  testimonial?: string;
+  testimonial?: string;    // G11: auto-gerado se vazio
 }
 
 interface ModelAdInfo {
@@ -113,7 +129,78 @@ interface ModelAdInfo {
   displayLink: string;
 }
 
-// ── Helpers ──
+// ── G10: Agrupamento de imagens F/S em pares ──
+
+interface AdGroup {
+  name: string;       // Nome base sem sufixo F/S
+  feed?: AdSpec;      // Imagem Feed (sufixo F)
+  stories?: AdSpec;   // Imagem Stories (sufixo S)
+  single?: AdSpec;    // Imagem sem par (sem sufixo F/S)
+}
+
+/**
+ * Detecta pares F/S e agrupa em AdGroup.
+ * Qualquer nome terminando em maiúsculo F ou S é candidato a par.
+ * Pares com o mesmo nome base (sem o sufixo) são agrupados.
+ * Imagens sem sufixo F/S ficam como single.
+ */
+function groupAdsByPlacement(ads: AdSpec[]): AdGroup[] {
+  const groups = new Map<string, AdGroup>();
+
+  for (const ad of ads) {
+    // Detecta sufixo F ou S no final do nome (case-sensitive)
+    const match = ad.name.match(/^(.+?)([FS])$/);
+    if (match) {
+      const baseName = match[1];
+      const placement = match[2] as "F" | "S";
+
+      if (!groups.has(baseName)) {
+        groups.set(baseName, { name: baseName });
+      }
+      const group = groups.get(baseName)!;
+      if (placement === "F") {
+        group.feed = ad;
+      } else {
+        group.stories = ad;
+      }
+    } else {
+      // Sem sufixo F/S — ad individual
+      groups.set(ad.name, { name: ad.name, single: ad });
+    }
+  }
+
+  return Array.from(groups.values());
+}
+
+// ── G11: Auto-testimonial ──
+
+/**
+ * Gera testimonial persuasivo baseado no conteúdo do ad.
+ * Chamado quando partnership.sponsor_id está set mas testimonial está vazio.
+ */
+function generateTestimonial(body: string, title: string): string {
+  const combined = (body + " " + title).toLowerCase();
+
+  if (combined.includes("anamnese") || combined.includes("diagnóst") || combined.includes("paciente capilar")) {
+    return "Esse guia mudou a qualidade da minha anamnese capilar. Não consigo guardar isso só pra mim.";
+  }
+  if (combined.includes("minoxidil") || combined.includes("prescrever") || combined.includes("posologia")) {
+    return "Prescrevemos Minoxidil todo dia — esse guia organiza o que a faculdade nunca ensinou de forma prática.";
+  }
+  if (combined.includes("tricolog") || combined.includes("capilar") || combined.includes("protocolo")) {
+    return "Esse é o tipo de material que eu gostaria de ter tido no início da minha prática. Acesso gratuito enquanto dura.";
+  }
+  if (combined.includes("gratuit") || combined.includes("grátis") || combined.includes("ebook") || combined.includes("guia")) {
+    return "Nem acredito que esse conteúdo está gratuito. Baixa agora — você vai entender por quê quando ver o material.";
+  }
+  if (combined.includes("formação") || combined.includes("curso") || combined.includes("aula")) {
+    return "Me convenceram a liberar esse material da formação. Oportunidade única — não vai durar muito.";
+  }
+  // Default persuasivo genérico
+  return "Tem ouro nesse material. Fico feliz de poder disponibilizar gratuitamente para colegas.";
+}
+
+// ── Helpers Meta ──
 
 async function fetchModelAd(adId: string, token: string): Promise<ModelAdInfo> {
   await rateLimit();
@@ -147,18 +234,14 @@ async function fetchModelAd(adId: string, token: string): Promise<ModelAdInfo> {
       if (!displayLink) displayLink = (linkData.caption as string) || "";
     }
   }
-
   if (!displayLink && link) {
     try { displayLink = new URL(link).hostname; } catch { /* ignore */ }
   }
 
   return {
-    link,
-    pageId,
-    instagramUserId,
+    link, pageId, instagramUserId,
     accountId: accountId.startsWith("act_") ? accountId : `act_${accountId}`,
-    urlTags,
-    displayLink,
+    urlTags, displayLink,
   };
 }
 
@@ -170,24 +253,27 @@ async function fetchAdSets(campaignId: string, token: string): Promise<Array<{ i
   return data.data || [];
 }
 
-// G5: uploadImage agora só é chamada se image_base64 fornecido
-async function uploadImage(accountId: string, imageBuffer: Buffer, filename: string, token: string): Promise<{ hash: string }> {
+async function resolveImageHash(ad: AdSpec, accountId: string, token: string): Promise<string> {
+  // G5: usa hash diretamente se fornecido
+  if (ad.image_hash) {
+    return ad.image_hash;
+  }
+  if (!ad.image_base64) {
+    throw new Error(`Ad ${ad.name}: neither image_hash nor image_base64 provided`);
+  }
   await rateLimit();
+  const imageBuffer = Buffer.from(ad.image_base64, "base64");
   const data = await metaFetch<{ images: Record<string, { hash: string }> }>(
     `${META_BASE_URL}/${accountId}/adimages`,
     {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: formBody({
-        access_token: token,
-        filename,
-        bytes: imageBuffer.toString("base64"),
-      }),
+      body: formBody({ access_token: token, filename: ad.image_filename, bytes: imageBuffer.toString("base64") }),
     }
   );
   const imageInfo = Object.values(data.images)[0];
-  if (!imageInfo?.hash) throw new Error(`Image upload failed for ${filename}`);
-  return { hash: imageInfo.hash };
+  if (!imageInfo?.hash) throw new Error(`Image upload failed for ${ad.image_filename}`);
+  return imageInfo.hash;
 }
 
 // G3: Clone adset
@@ -198,34 +284,28 @@ async function copyAdset(sourceAdsetId: string, newName: string, dailyBudgetCent
     {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: formBody({
-        deep_copy: "false",
-        status_option: "PAUSED",
-        access_token: token,
-      }),
+      body: formBody({ deep_copy: "false", status_option: "PAUSED", access_token: token }),
     }
   );
   const newId = data.copied_adset_id || data.ad_object_ids?.[0]?.copied_ad_object_id || "";
   if (!newId) throw new Error("Adset copy returned no id: " + JSON.stringify(data));
 
-  // Rename + budget
   await rateLimit();
   await metaFetch(
     `${META_BASE_URL}/${newId}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: formBody({
-        name: newName,
-        daily_budget: String(dailyBudgetCents),
-        access_token: token,
-      }),
+      body: formBody({ name: newName, daily_budget: String(dailyBudgetCents), access_token: token }),
     }
   );
   console.log(`[PublishToAdSets] G3: cloned adset ${sourceAdsetId} → ${newId} (${newName})`);
   return newId;
 }
 
+/**
+ * Cria creative de imagem (Feed base) via object_story_spec.
+ */
 async function createCreativeSingleImage(params: {
   accountId: string;
   name: string;
@@ -240,13 +320,14 @@ async function createCreativeSingleImage(params: {
   urlTags: string;
   displayLink: string;
   partnership?: PartnershipSpec;
+  resolvedTestimonial: string;
   token: string;
 }): Promise<{ id: string }> {
   await rateLimit();
   const {
     accountId, name, pageId, instagramUserId,
     imageHash, body: bodyText, title, description, link, ctaType, urlTags,
-    displayLink, partnership, token,
+    displayLink, partnership, resolvedTestimonial, token,
   } = params;
 
   const linkData: Record<string, unknown> = {
@@ -272,8 +353,9 @@ async function createCreativeSingleImage(params: {
   if (partnership?.sponsor_id) {
     formParams.instagram_branded_content = JSON.stringify({ sponsor_id: partnership.sponsor_id });
     const brandedContent: Record<string, unknown> = { ad_format: 1 };
-    if (partnership.testimonial) brandedContent.testimonial = partnership.testimonial;
+    if (resolvedTestimonial) brandedContent.testimonial = resolvedTestimonial;
     formParams.branded_content = JSON.stringify(brandedContent);
+    console.log(`[PublishToAdSets] Partnership: sponsor=${partnership.sponsor_id} testimonial="${resolvedTestimonial}"`);
   }
 
   const data = await metaFetch<{ id: string }>(
@@ -287,14 +369,35 @@ async function createCreativeSingleImage(params: {
   return { id: data.id };
 }
 
+/**
+ * G10: Cria ad com placement_customizations quando há imagem Stories.
+ * O creative base usa a imagem Feed (F).
+ * A imagem Stories (S) é passada via placement_customizations.story.image_hash.
+ */
 async function createAd(params: {
   accountId: string;
   adSetId: string;
   creativeId: string;
   name: string;
+  storiesImageHash?: string;  // G10: override para placement Stories
   token: string;
 }): Promise<{ id: string }> {
   await rateLimit();
+
+  const creativePayload: Record<string, unknown> = {
+    creative_id: params.creativeId,
+  };
+
+  // G10: Se há imagem Stories, adiciona placement_customizations
+  if (params.storiesImageHash) {
+    creativePayload.placement_customizations = {
+      story: {
+        image_hash: params.storiesImageHash,
+      },
+    };
+    console.log(`[PublishToAdSets] G10: Stories placement_customizations.story.image_hash=${params.storiesImageHash}`);
+  }
+
   const data = await metaFetch<{ id: string }>(
     `${META_BASE_URL}/${params.accountId}/ads`,
     {
@@ -303,7 +406,7 @@ async function createAd(params: {
       body: formBody({
         name: params.name,
         adset_id: params.adSetId,
-        creative: JSON.stringify({ creative_id: params.creativeId }),
+        creative: JSON.stringify(creativePayload),
         status: "ACTIVE",
         access_token: params.token,
       }),
@@ -320,26 +423,21 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json();
-
     const {
       campaign_id,
       model_ad_id,
-      // G9: campos diretos sem model_ad
       page_id: directPageId,
       instagram_user_id: directInstagramUserId,
       account_id: directAccountId,
-      // G1: link override
       link: linkOverride,
-      // G2: filtro de adsets
       adset_ids: adsetIdsFilter,
-      // G3: clone adset
       source_adset_id,
       new_adset_name,
       daily_budget_cents,
       ads,
       partnership,
     } = body as {
-      campaign_id: string;
+      campaign_id?: string;
       model_ad_id?: string;
       page_id?: string;
       instagram_user_id?: string;
@@ -353,7 +451,6 @@ export async function POST(req: NextRequest) {
       partnership?: PartnershipSpec;
     };
 
-    // G9: model_ad_id OR (page_id + instagram_user_id + account_id) obrigatório
     const hasDirectFields = directPageId && directInstagramUserId && directAccountId;
     if (!model_ad_id && !hasDirectFields) {
       return NextResponse.json(
@@ -362,10 +459,7 @@ export async function POST(req: NextRequest) {
       );
     }
     if (!campaign_id && !source_adset_id) {
-      return NextResponse.json(
-        { error: "campaign_id or source_adset_id is required" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "campaign_id or source_adset_id is required" }, { status: 400 });
     }
     if (!ads || ads.length === 0) {
       return NextResponse.json({ error: "ads[] is required and must not be empty" }, { status: 400 });
@@ -373,7 +467,16 @@ export async function POST(req: NextRequest) {
 
     const token = await getTokenForWorkspace(auth.workspace_id);
 
-    // 1. Obter info do modelo (G9: direto se fornecido, G1: override link)
+    // G11: Resolver testimonial antes de qualquer publicação
+    let resolvedTestimonial = partnership?.testimonial || "";
+    if (partnership?.sponsor_id && !resolvedTestimonial) {
+      // Usa body/title do primeiro ad como referência para gerar testimonial
+      const refAd = ads[0];
+      resolvedTestimonial = generateTestimonial(refAd.body || "", refAd.title || "");
+      console.log(`[PublishToAdSets] G11: auto-testimonial="${resolvedTestimonial}"`);
+    }
+
+    // 1. Obter model ad info (G9: direto se fornecido)
     let modelAd: ModelAdInfo;
     if (hasDirectFields) {
       const accountId = directAccountId!.startsWith("act_") ? directAccountId! : `act_${directAccountId!}`;
@@ -383,13 +486,10 @@ export async function POST(req: NextRequest) {
         instagramUserId: directInstagramUserId!,
         accountId,
         urlTags: "",
-        displayLink: linkOverride ? new URL(linkOverride).hostname : "",
+        displayLink: linkOverride ? (() => { try { return new URL(linkOverride).hostname; } catch { return ""; } })() : "",
       };
-      console.log(`[PublishToAdSets] G9: usando campos diretos page=${modelAd.pageId}, ig=${modelAd.instagramUserId}`);
     } else {
-      console.log(`[PublishToAdSets] Fetching model ad ${model_ad_id}...`);
       modelAd = await fetchModelAd(model_ad_id!, token);
-      // G1: override link se fornecido
       if (linkOverride) {
         console.log(`[PublishToAdSets] G1: link override: ${modelAd.link} → ${linkOverride}`);
         modelAd.link = linkOverride;
@@ -400,111 +500,112 @@ export async function POST(req: NextRequest) {
 
     // 2. Determinar adsets alvo
     let targetAdSets: Array<{ id: string; name: string; status: string }>;
-
     if (source_adset_id && new_adset_name) {
-      // G3: Clonar novo adset
       const budget = daily_budget_cents ?? 50000;
       const newAdsetId = await copyAdset(source_adset_id, new_adset_name, budget, token);
       targetAdSets = [{ id: newAdsetId, name: new_adset_name, status: "PAUSED" }];
     } else {
-      // Buscar adsets da campanha
-      console.log(`[PublishToAdSets] Fetching ad sets for campaign ${campaign_id}...`);
       const allAdSets = await fetchAdSets(campaign_id!, token);
-      console.log(`[PublishToAdSets] Found ${allAdSets.length} ad sets`);
-
-      // G2: filtrar se adset_ids fornecido
-      if (adsetIdsFilter && adsetIdsFilter.length > 0) {
-        targetAdSets = allAdSets.filter((s) => adsetIdsFilter.includes(s.id));
-        console.log(`[PublishToAdSets] G2: filtered to ${targetAdSets.length} adsets (from ${adsetIdsFilter.length} requested)`);
-      } else {
-        targetAdSets = allAdSets;
-      }
+      targetAdSets = (adsetIdsFilter && adsetIdsFilter.length > 0)
+        ? allAdSets.filter((s) => adsetIdsFilter.includes(s.id))
+        : allAdSets;
+      console.log(`[PublishToAdSets] G2: ${targetAdSets.length}/${allAdSets.length} adsets targetados`);
     }
 
     if (targetAdSets.length === 0) {
       return NextResponse.json({ error: "No target ad sets found" }, { status: 400 });
     }
 
-    console.log(`[PublishToAdSets] Publishing ${ads.length} ads to ${targetAdSets.length} adsets`);
+    // G10: Agrupar ads por pares F/S
+    const adGroups = groupAdsByPlacement(ads);
+    const pairedCount = adGroups.filter((g) => g.feed && g.stories).length;
+    const singleCount = adGroups.filter((g) => !g.feed || !g.stories).length;
+    console.log(`[PublishToAdSets] G10: ${adGroups.length} ad groups (${pairedCount} paired F+S, ${singleCount} single)`);
 
-    // 3. Publicar cada ad em cada adset
+    // 3. Publicar cada grupo em cada adset
     const results: Array<{
       ad_name: string;
+      paired: boolean;
       creative_id: string;
-      image_hash: string;
+      feed_hash: string;
+      stories_hash: string;
       ads_created: Array<{ ad_id: string; adset_id: string; adset_name: string }>;
       errors: string[];
     }> = [];
 
-    for (const ad of ads) {
-      console.log(`[PublishToAdSets] Processing ${ad.name}...`);
+    for (const group of adGroups) {
+      // Determinar spec do ad base (Feed tem prioridade, depois single)
+      const baseSpec = group.feed || group.single!;
+      const isPaired = !!(group.feed && group.stories);
+
+      console.log(`[PublishToAdSets] Processing "${group.name}" (paired=${isPaired})...`);
       const adResult = {
-        ad_name: ad.name,
+        ad_name: group.name,
+        paired: isPaired,
         creative_id: "",
-        image_hash: "",
+        feed_hash: "",
+        stories_hash: "",
         ads_created: [] as Array<{ ad_id: string; adset_id: string; adset_name: string }>,
         errors: [] as string[],
       };
 
       try {
-        // G5: usar image_hash diretamente OU fazer upload de image_base64
-        let imageHash: string;
-        if (ad.image_hash) {
-          imageHash = ad.image_hash;
-          console.log(`[PublishToAdSets] G5: usando image_hash=${imageHash} (sem upload)`);
-        } else if (ad.image_base64) {
-          const imageBuffer = Buffer.from(ad.image_base64, "base64");
-          console.log(`[PublishToAdSets] Uploading ${ad.image_filename} (${imageBuffer.length} bytes)...`);
-          const upload = await uploadImage(modelAd.accountId, imageBuffer, ad.image_filename, token);
-          imageHash = upload.hash;
-          console.log(`[PublishToAdSets] Uploaded: hash=${imageHash}`);
-        } else {
-          throw new Error(`Ad ${ad.name}: neither image_hash nor image_base64 provided`);
-        }
-        adResult.image_hash = imageHash;
+        // Resolver hash(es) de imagem
+        const feedHash = await resolveImageHash(baseSpec, modelAd.accountId, token);
+        adResult.feed_hash = feedHash;
+        console.log(`[PublishToAdSets] Feed hash: ${feedHash}`);
 
-        // Criar creative
+        let storiesHash = "";
+        if (isPaired && group.stories) {
+          storiesHash = await resolveImageHash(group.stories, modelAd.accountId, token);
+          adResult.stories_hash = storiesHash;
+          console.log(`[PublishToAdSets] Stories hash: ${storiesHash}`);
+        }
+
+        // Criar creative com imagem Feed (base)
         const creative = await createCreativeSingleImage({
           accountId: modelAd.accountId,
-          name: ad.name,
+          name: group.name,
           pageId: modelAd.pageId,
           instagramUserId: modelAd.instagramUserId,
-          imageHash,
-          body: ad.body,
-          title: ad.title,
-          description: ad.description,
+          imageHash: feedHash,
+          body: baseSpec.body,
+          title: baseSpec.title,
+          description: baseSpec.description,
           link: modelAd.link,
-          ctaType: ad.cta_type,
+          ctaType: baseSpec.cta_type,
           urlTags: modelAd.urlTags,
           displayLink: modelAd.displayLink,
           partnership,
+          resolvedTestimonial,
           token,
         });
         adResult.creative_id = creative.id;
         console.log(`[PublishToAdSets] Creative: ${creative.id}`);
 
-        // Criar ad em cada adset alvo
+        // Criar ad em cada adset com placement_customizations (G10) se pareado
         for (const adSet of targetAdSets) {
           try {
             const adCreated = await createAd({
               accountId: modelAd.accountId,
               adSetId: adSet.id,
               creativeId: creative.id,
-              name: ad.name,
+              name: group.name,
+              storiesImageHash: storiesHash || undefined,
               token,
             });
             adResult.ads_created.push({ ad_id: adCreated.id, adset_id: adSet.id, adset_name: adSet.name });
-            console.log(`[PublishToAdSets] Ad ${adCreated.id} → adset ${adSet.name}`);
+            console.log(`[PublishToAdSets] Ad ${adCreated.id} → ${adSet.name}`);
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             adResult.errors.push(`Failed in adset ${adSet.id}: ${msg}`);
-            console.error(`[PublishToAdSets] FAILED in adset ${adSet.id}:`, msg);
+            console.error(`[PublishToAdSets] FAILED adset ${adSet.id}:`, msg);
           }
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         adResult.errors.push(msg);
-        console.error(`[PublishToAdSets] FAILED ${ad.name}:`, msg);
+        console.error(`[PublishToAdSets] FAILED ${group.name}:`, msg);
       }
 
       results.push(adResult);
@@ -517,6 +618,9 @@ export async function POST(req: NextRequest) {
       campaign_id: campaign_id || null,
       model_ad_id: model_ad_id || null,
       ad_sets: targetAdSets.map((s) => ({ id: s.id, name: s.name, status: s.status })),
+      partnership_testimonial: resolvedTestimonial || null,
+      total_ad_groups: adGroups.length,
+      paired_groups: pairedCount,
       total_ads_created: totalAdsCreated,
       total_errors: totalErrors,
       results,

@@ -6,7 +6,7 @@ import { useAuthStore } from "@/store/auth";
 import Sidebar from "./Sidebar";
 import gsap from "gsap";
 
-export default function AppShell({ children }: { children: React.ReactNode }) {
+export default function AppShell({ children, fullWidth }: { children: React.ReactNode; fullWidth?: boolean }) {
   const { initialized, user, fetchMe } = useAuthStore();
   const router = useRouter();
   const contentRef = useRef<HTMLDivElement>(null);
@@ -54,7 +54,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         className="lg:ml-[var(--sidebar-width)] min-h-screen"
         style={{ opacity: 0 }}
       >
-        <div className="max-w-6xl mx-auto px-6 py-8 max-lg:pt-16">
+        <div className={`${fullWidth ? "" : "max-w-6xl"} mx-auto px-6 py-8 max-lg:pt-16`}>
           {children}
         </div>
       </main>

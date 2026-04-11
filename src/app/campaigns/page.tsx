@@ -117,6 +117,11 @@ export default function CampaignsPage() {
           };
           t.cpl_meta = t.leads_meta > 0 ? Math.round(t.spend / t.leads_meta * 100) / 100 : null;
           t.cpl_crm = t.leads_crm > 0 ? Math.round(t.spend / t.leads_crm * 100) / 100 : null;
+          (t as any).ctr = t.impressions > 0 ? Math.round(t.clicks / t.impressions * 10000) / 100 : 0;
+          (t as any).cpm = t.impressions > 0 ? Math.round(t.spend / t.impressions * 100000) / 100 : 0;
+          const totalLpv = filtered.reduce((s: number, c: Campaign) => s + c.lpv, 0);
+          (t as any).lpv = totalLpv;
+          (t as any).connect_rate = t.clicks > 0 ? Math.round(totalLpv / t.clicks * 10000) / 100 : 0;
           setTotals(t);
         }
       })
@@ -125,7 +130,7 @@ export default function CampaignsPage() {
   }, [days, selectedProjectId, projects]);
 
   return (
-    <AppShell>
+    <AppShell fullWidth>
       <div className="space-y-6">
         {/* Header */}
         <div className="flex items-center justify-between flex-wrap gap-3">
@@ -179,13 +184,16 @@ export default function CampaignsPage() {
 
         {/* Totals cards */}
         {totals && (
-          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+          <div className="grid grid-cols-3 md:grid-cols-5 lg:grid-cols-9 gap-3">
             <MetricCard label="Gasto Total" value={fmt(totals.spend, "R$ ")} />
             <MetricCard label="Leads Meta" value={fmtInt(totals.leads_meta)} />
             <MetricCard label="Leads CRM" value={fmtInt(totals.leads_crm)} highlight />
             <MetricCard label="Qualificados" value={fmtInt(totals.leads_qualified)} />
             <MetricCard label="CPL Meta" value={fmt(totals.cpl_meta, "R$ ")} />
             <MetricCard label="CPL CRM" value={fmt(totals.cpl_crm, "R$ ")} highlight />
+            <MetricCard label="CTR" value={fmtPct((totals as any).ctr || 0)} />
+            <MetricCard label="CPM" value={fmt((totals as any).cpm, "R$ ")} />
+            <MetricCard label="% LPV" value={fmtPct((totals as any).connect_rate || 0)} />
           </div>
         )}
 

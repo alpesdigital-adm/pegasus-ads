@@ -6,9 +6,10 @@
  *
  * Body (JSON):
  * {
- *   "source_adset_id": "120242521315670521",
- *   "new_adset_name": "PA__LAL0-1p - VIDEO TEST 9:16",
+ *   "source_adset_id": "120242521315670521", // OPCIONAL se target_adset_id fornecido
+ *   "new_adset_name": "PA__INSTA365D_SEGUIDORES",
  *   "daily_budget_cents": 50000,
+ *   "target_adset_id": "120242870106240521", // G12: usar adset existente ao invés de clonar
  *   "model_ad_id": "120242521326410521",    // opcional se page_id+ig_user_id+account_id fornecidos (G9)
  *   "page_id": "...",                        // G9
  *   "instagram_user_id": "...",              // G9
@@ -348,6 +349,7 @@ export async function POST(req: NextRequest) {
       source_adset_id,
       new_adset_name,
       daily_budget_cents,
+      target_adset_id,          // G12: adset existente (pula clone)
       model_ad_id,
       // G9: campos diretos
       page_id: directPageId,
@@ -360,9 +362,10 @@ export async function POST(req: NextRequest) {
       // G4: partnership
       partnership,
     } = body as {
-      source_adset_id: string;
-      new_adset_name: string;
-      daily_budget_cents: number;
+      source_adset_id?: string;
+      new_adset_name?: string;
+      daily_budget_cents?: number;
+      target_adset_id?: string;
       model_ad_id?: string;
       page_id?: string;
       instagram_user_id?: string;
@@ -373,11 +376,15 @@ export async function POST(req: NextRequest) {
       partnership?: PartnershipSpec;
     };
 
-    if (!source_adset_id || !new_adset_name || !daily_budget_cents || !ads?.length) {
+    // G12: target_adset_id OU (source_adset_id + new_adset_name + daily_budget_cents)
+    if (!target_adset_id && (!source_adset_id || !new_adset_name || !daily_budget_cents)) {
       return NextResponse.json(
-        { error: "source_adset_id, new_adset_name, daily_budget_cents, ads[] are required" },
+        { error: "target_adset_id OR (source_adset_id + new_adset_name + daily_budget_cents) are required" },
         { status: 400 }
       );
+    }
+    if (!ads?.length) {
+      return NextResponse.json({ error: "ads[] is required and must not be empty" }, { status: 400 });
     }
 
     // G9: model_ad_id OR (page_id + instagram_user_id + account_id)
@@ -398,7 +405,7 @@ export async function POST(req: NextRequest) {
       console.log(`[PublishVideos] G11: auto-testimonial="${resolvedTestimonial}"`);
     }
 
-    console.log(`[PublishVideos] start: ${ads.length} videos → new adset cloned from ${source_adset_id}`);
+    console.log(`[PublishVideos] start: ${ads.length} videos → adset ${target_adset_id ? `EXISTING ${target_adset_id}` : `clone from ${source_adset_id}`}`);
 
     // 1. Model ad info
     let modelAd: ModelAdInfo;
@@ -424,19 +431,27 @@ export async function POST(req: NextRequest) {
     }
     console.log(`[PublishVideos] model: account=${modelAd.accountId} page=${modelAd.pageId} ig=${modelAd.instagramUserId} link=${modelAd.link}`);
 
-    // 2. Get campaign id
-    const campaignId = await fetchAdsetCampaignId(source_adset_id, token);
+    // 2. Determinar adset alvo
+    let targetAdsetId: string;
+    let campaignId: string;
 
-    // 3. Copy source adset
-    const newAdsetId = await copyAdset(source_adset_id, token);
-    console.log(`[PublishVideos] copied adset: ${newAdsetId}`);
-
-    // 4. Update name + budget
-    await updateAdset(newAdsetId, {
-      name: new_adset_name,
-      daily_budget: String(daily_budget_cents),
-    }, token);
-    console.log(`[PublishVideos] adset updated: name="${new_adset_name}" budget=${daily_budget_cents}`);
+    if (target_adset_id) {
+      // G12: usar adset existente — não clona, não renomeia
+      targetAdsetId = target_adset_id;
+      campaignId = await fetchAdsetCampaignId(target_adset_id, token);
+      console.log(`[PublishVideos] G12: usando adset existente ${targetAdsetId} (campaign=${campaignId})`);
+    } else {
+      // Fluxo original: clonar source_adset_id
+      campaignId = await fetchAdsetCampaignId(source_adset_id!, token);
+      const newAdsetIdCloned = await copyAdset(source_adset_id!, token);
+      console.log(`[PublishVideos] copied adset: ${newAdsetIdCloned}`);
+      await updateAdset(newAdsetIdCloned, {
+        name: new_adset_name!,
+        daily_budget: String(daily_budget_cents!),
+      }, token);
+      console.log(`[PublishVideos] adset updated: name="${new_adset_name}" budget=${daily_budget_cents}`);
+      targetAdsetId = newAdsetIdCloned;
+    }
 
     // 5. Process videos sequentially (evitar rate limit)
     const results: Record<string, unknown>[] = [];
@@ -478,7 +493,7 @@ export async function POST(req: NextRequest) {
 
         const adId = await createAd({
           accountId: modelAd.accountId,
-          adsetId: newAdsetId,
+          adsetId: targetAdsetId,
           creativeId,
           name: ad.name,
           status: start_paused ? "PAUSED" : "ACTIVE",
@@ -495,11 +510,11 @@ export async function POST(req: NextRequest) {
       results.push(result);
     }
 
-    // Ativar adset se todos ok e não start_paused
+    // Ativar adset se foi clonado, todos ok e não start_paused
     const allOk = results.every((r) => r.success);
-    if (allOk && !start_paused) {
+    if (allOk && !start_paused && !target_adset_id) {
       try {
-        await updateAdset(newAdsetId, { status: "ACTIVE" }, token);
+        await updateAdset(targetAdsetId, { status: "ACTIVE" }, token);
         console.log(`[PublishVideos] adset activated`);
       } catch (err) {
         console.error(`[PublishVideos] failed activating adset:`, err);
@@ -508,8 +523,9 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       campaign_id: campaignId,
-      new_adset_id: newAdsetId,
-      new_adset_name,
+      adset_id: targetAdsetId,
+      adset_mode: target_adset_id ? "existing" : "cloned",
+      partnership_testimonial: resolvedTestimonial || null,
       total_ads: ads.length,
       successful: results.filter((r) => r.success).length,
       failed: results.filter((r) => !r.success).length,

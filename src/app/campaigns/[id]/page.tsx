@@ -279,8 +279,8 @@ export default function CampaignDrillPage() {
 
                   {/* Ads table */}
                   {isExpanded && (
-                    <div className="border-t border-[var(--border-default)]">
-                      <table className="w-full text-xs">
+                    <div className="border-t border-[var(--border-default)] overflow-x-auto">
+                      <table className="w-full text-xs min-w-[900px]">
                         <thead>
                           <tr className="bg-[var(--bg-tertiary)] text-[var(--text-tertiary)] uppercase tracking-wider">
                             <th className="text-left px-4 py-2 font-medium">Ad</th>

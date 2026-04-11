@@ -66,6 +66,24 @@ export default function CampaignsPage() {
   const [error, setError] = useState<string | null>(null);
   const router = useRouter();
 
+  // Projects
+  interface Project { id: string; name: string; campaign_filter: string; }
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string>(() => {
+    if (typeof window !== "undefined") return localStorage.getItem("pegasus_selected_project") || "";
+    return "";
+  });
+
+  useEffect(() => {
+    fetch("/api/projects").then(r => r.json()).then(d => setProjects(d.projects || []));
+  }, []);
+
+  useEffect(() => {
+    if (selectedProjectId) localStorage.setItem("pegasus_selected_project", selectedProjectId);
+    else localStorage.removeItem("pegasus_selected_project");
+  }, [selectedProjectId]);
+
+  // Fetch campaigns
   useEffect(() => {
     setLoading(true);
     setError(null);
@@ -75,26 +93,73 @@ export default function CampaignsPage() {
         if (data.error) {
           setError(data.error);
         } else {
-          setCampaigns(data.campaigns || []);
-          setTotals(data.totals || null);
+          let filtered = data.campaigns || [];
+          // Apply project filter
+          const proj = projects.find(p => p.id === selectedProjectId);
+          if (proj && proj.campaign_filter) {
+            filtered = filtered.filter((c: Campaign) =>
+              c.campaign_name.toLowerCase().includes(proj.campaign_filter.toLowerCase())
+            );
+          }
+          setCampaigns(filtered);
+          // Recalc totals
+          const t = {
+            spend: filtered.reduce((s: number, c: Campaign) => s + c.spend, 0),
+            impressions: filtered.reduce((s: number, c: Campaign) => s + c.impressions, 0),
+            clicks: filtered.reduce((s: number, c: Campaign) => s + c.clicks, 0),
+            leads_meta: filtered.reduce((s: number, c: Campaign) => s + c.leads_meta, 0),
+            leads_crm: filtered.reduce((s: number, c: Campaign) => s + c.leads_crm, 0),
+            leads_qualified: filtered.reduce((s: number, c: Campaign) => s + c.leads_qualified, 0),
+            total_ads: filtered.reduce((s: number, c: Campaign) => s + c.total_ads, 0),
+            active_ads: filtered.reduce((s: number, c: Campaign) => s + c.active_ads, 0),
+            cpl_meta: null as number | null,
+            cpl_crm: null as number | null,
+          };
+          t.cpl_meta = t.leads_meta > 0 ? Math.round(t.spend / t.leads_meta * 100) / 100 : null;
+          t.cpl_crm = t.leads_crm > 0 ? Math.round(t.spend / t.leads_crm * 100) / 100 : null;
+          setTotals(t);
         }
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
-  }, [days]);
+  }, [days, selectedProjectId, projects]);
 
   return (
     <AppShell>
       <div className="space-y-6">
         {/* Header */}
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between flex-wrap gap-3">
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">Campanhas</h1>
             <p className="text-[var(--text-secondary)] text-sm mt-1">
-              Visao consolidada de todas as campanhas T7
+              {selectedProjectId && projects.find(p => p.id === selectedProjectId)
+                ? `Projeto: ${projects.find(p => p.id === selectedProjectId)!.name}`
+                : "Todas as campanhas"}
             </p>
           </div>
-          <div className="flex gap-1 bg-[var(--bg-tertiary)] rounded-lg p-1">
+          <div className="flex items-center gap-3">
+            {/* Project selector */}
+            <div className="flex items-center gap-2">
+              <select
+                value={selectedProjectId}
+                onChange={(e) => setSelectedProjectId(e.target.value)}
+                className="px-3 py-1.5 rounded-lg text-xs bg-[var(--bg-tertiary)] border border-[var(--border-default)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]/50"
+              >
+                <option value="">Todos os projetos</option>
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+              <button
+                onClick={() => router.push("/projects")}
+                className="p-1.5 rounded-lg hover:bg-[var(--bg-hover)] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-all"
+                title="Gerenciar projetos"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3" /><path d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" /></svg>
+              </button>
+            </div>
+            {/* Period selector */}
+            <div className="flex gap-1 bg-[var(--bg-tertiary)] rounded-lg p-1">
             {PERIOD_OPTIONS.map((opt) => (
               <button
                 key={opt.value}
@@ -108,6 +173,7 @@ export default function CampaignsPage() {
                 {opt.label}
               </button>
             ))}
+          </div>
           </div>
         </div>
 

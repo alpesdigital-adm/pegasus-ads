@@ -204,7 +204,7 @@ export async function GET(req: NextRequest) {
   const withMetrics = criativos.filter((c) => c.spend > 0);
   const kills = criativos.filter((c) => c.kill_rule?.action === "kill");
   const winners = criativos.filter((c) =>
-    c.status === "winner" || c.kill_rule?.action === "promote"
+    c.status === "winner" || (c.kill_rule?.action as string) === "promote"
   );
 
   const payload = {

@@ -143,30 +143,50 @@ export async function GET(
     const benchLeads = Number(benchResult.rows[0]?.total_leads || 0);
     const rolling5dCpl = benchLeads > 0 ? benchSpend / benchLeads : 0;
 
-    // 6. Find control CPL (median of ads with 3+ leads — robust against outliers)
-    let controlCpl: number | null = null;
-    const cplValues: number[] = [];
+    const CPL_TARGET = 32.77; // CPL meta do planejamento (cenário realista)
+
+    // 6. Per-ad windowed data (3d and 7d) for L3/L4 kill rules
+    const windows3dResult = await db.execute({
+      sql: `SELECT ad_id, adset_id, SUM(CAST(spend AS FLOAT)) AS spend, SUM(leads) AS leads
+            FROM classified_insights WHERE campaign_id = ? AND date >= CURRENT_DATE - INTERVAL '3 days'
+            GROUP BY ad_id, adset_id`,
+      args: [campaignId],
+    });
+    const w3dMap = new Map<string, { spend: number; leads: number }>();
+    for (const r of windows3dResult.rows) {
+      w3dMap.set(`${r.ad_id}||${r.adset_id}`, { spend: Number(r.spend || 0), leads: Number(r.leads || 0) });
+    }
+
+    const windows7dResult = await db.execute({
+      sql: `SELECT ad_id, adset_id, SUM(CAST(spend AS FLOAT)) AS spend, SUM(leads) AS leads
+            FROM classified_insights WHERE campaign_id = ? AND date >= CURRENT_DATE - INTERVAL '7 days'
+            GROUP BY ad_id, adset_id`,
+      args: [campaignId],
+    });
+    const w7dMap = new Map<string, { spend: number; leads: number }>();
+    for (const r of windows7dResult.rows) {
+      w7dMap.set(`${r.ad_id}||${r.adset_id}`, { spend: Number(r.spend || 0), leads: Number(r.leads || 0) });
+    }
+
+    // 6b. Benchmark: exists ad with spend > 20× CPL meta & CPL ≤ CPL meta?
+    let benchmarkExists = false;
     for (const row of adsResult.rows) {
+      const spend = Number(row.spend || 0);
       const crm = resolveLeads(
         row.ad_name as string, row.ad_id as string,
         row.adset_name as string, row.adset_id as string
       );
       const leads = hasCrmData ? crm.leads : Number(row.leads_meta || 0);
-      if (leads >= 3) {
-        const spend = Number(row.spend || 0);
-        cplValues.push(spend / leads);
+      if (leads > 0 && spend > CPL_TARGET * 20) {
+        const cpl = spend / leads;
+        if (cpl <= CPL_TARGET) {
+          benchmarkExists = true;
+          break;
+        }
       }
-    }
-    if (cplValues.length > 0) {
-      cplValues.sort((a, b) => a - b);
-      const mid = Math.floor(cplValues.length / 2);
-      controlCpl = cplValues.length % 2 === 0
-        ? (cplValues[mid - 1] + cplValues[mid]) / 2
-        : cplValues[mid];
     }
 
     // 7. Build ads with kill rules
-    const CPL_TARGET = 30;
     const ads = [];
     let killCount = 0;
     let totalSpend = 0;
@@ -192,17 +212,35 @@ export async function GET(
 
       const leadsForRules = hasCrmData ? crm.leads : leadsMeta;
       const cpl = leadsForRules > 0 ? spend / leadsForRules : null;
+      const cpm = impressions > 0 ? (spend / impressions) * 1000 : 0;
 
-      // Kill rules
+      // Window data for L3/L4
+      const adKey = `${row.ad_id}||${row.adset_id}`;
+      const w3d = w3dMap.get(adKey) || { spend: 0, leads: 0 };
+      const w7d = w7dMap.get(adKey) || { spend: 0, leads: 0 };
+      const leads3d = hasCrmData ? crm.leads : w3d.leads; // CRM not windowed separately yet, use meta for windows
+      const leads7d = hasCrmData ? crm.leads : w7d.leads;
+      const cpl3d = leads3d > 0 ? w3d.spend / leads3d : null;
+      const cpl7d = leads7d > 0 ? w7d.spend / leads7d : null;
+
+      // Kill rules (spec original)
       const killMetrics: KillRuleMetrics = {
         spend,
         leads: leadsForRules,
         cpl,
         impressions,
         ctr,
-        cplTarget: CPL_TARGET,
-        controlCpl,
+        cpm,
         daysRunning,
+        cplTarget: CPL_TARGET,
+        benchmarkExists,
+        rolling5dCpl: rolling5dCpl > 0 ? rolling5dCpl : null,
+        spend3d: w3d.spend,
+        leads3d,
+        cpl3d,
+        spend7d: w7d.spend,
+        leads7d,
+        cpl7d,
       };
       const triggered = evaluateKillRules(killMetrics);
 
@@ -240,7 +278,7 @@ export async function GET(
       campaign_name: campaignName,
       window: windowParam,
       cpl_target: CPL_TARGET,
-      control_cpl: controlCpl ? Math.round(controlCpl * 100) / 100 : null,
+      benchmark_exists: benchmarkExists,
       leads_source: hasCrmData ? "crm" : "meta",
       rolling_5d_cpl: Math.round(rolling5dCpl * 100) / 100,
       total_ads: adsResult.rows.length,

@@ -143,9 +143,13 @@ export async function POST(req: NextRequest) {
       cpl,
       impressions: totalImpressions,
       ctr: avgCtr,
-      cplTarget,
-      controlCpl,
+      cpm: totalImpressions > 0 ? (totalSpend / totalImpressions) * 1000 : 0,
       daysRunning,
+      cplTarget,
+      benchmarkExists: false,
+      rolling5dCpl: null as number | null,
+      spend3d: 0, leads3d: 0, cpl3d: null as number | null,
+      spend7d: 0, leads7d: 0, cpl7d: null as number | null,
     };
 
     const primaryRule = evaluateKillRules(killMetrics);
@@ -155,7 +159,7 @@ export async function POST(req: NextRequest) {
 
     // Aplicar no DB se solicitado e a regra é "kill"
     let dbUpdated = false;
-    if (shouldApply && primaryRule?.action === "kill") {
+    if (shouldApply && primaryRule) {
       const currentStatus = row.status as string;
       if (currentStatus !== "killed" && currentStatus !== "winner") {
         try {

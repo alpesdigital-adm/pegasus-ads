@@ -71,12 +71,13 @@ function fmtInt(n: number): string {
 
 function killRuleDescription(level: string): string {
   const descriptions: Record<string, string> = {
-    L0: "Sem Lead: Spend >= 1.5x CPL target sem nenhum lead. Acao: pausar.",
-    L1: "CPL Explosivo: CPL > 3x target com pelo menos 1 lead. Acao: pausar.",
-    L2: "CPL Alto Sustentado: CPL > 2x target apos 2+ dias. Acao: pausar.",
-    L3: "CTR Morto: CTR < 0.5% com 1000+ impressoes. Acao: monitorar.",
-    L4: "Underperformer: CPL > 50% acima da mediana (controle) com dados suficientes. Acao: monitorar.",
-    L5: "Winner Potencial: CPL < 80% do controle com volume suficiente. Acao: escalar.",
+    "L0a": "Sem Lead + CPM alto: spend >= 1x CPL meta + 0 leads + CPM >= R$60. Pausar.",
+    "L0b": "Sem Lead: spend >= 1.5x CPL meta + 0 leads. Pausar.",
+    L1: "Claramente ruim: spend > 4x CPL meta & CPL > 1.5x CPL meta. Pausar.",
+    L2: "Acima da meta com evidencia: spend > 6x CPL meta & CPL > 1.3x CPL meta. Pausar.",
+    L3: "Deterioracao aguda 3d: spend 3d > 5x & CPL 3d > 1.7x & CPL acum > 1x & benchmark & rolling 5d > 1.15x. Pausar.",
+    L4: "Deterioracao lenta 7d: spend 7d > 5x & CPL 7d > 1.7x & CPL acum > 1x & benchmark & rolling 5d > 1.15x. Pausar.",
+    L5: "Mediocridade persistente: spend > 10x & CPL > 1.15x & benchmark & rolling 5d > 1.15x. Pausar.",
   };
   return descriptions[level] || "";
 }

@@ -206,9 +206,13 @@ export async function GET(req: NextRequest) {
 
         const triggered = evaluateKillRules({
           spend, leads, cpl, impressions, ctr,
-          cplTarget: CPL_TARGET,
-          controlCpl,
+          cpm: impressions > 0 ? (spend / impressions) * 1000 : 0,
           daysRunning,
+          cplTarget: CPL_TARGET,
+          benchmarkExists: false,  // Simplified: sync-all only checks L0-L2
+          rolling5dCpl: null,
+          spend3d: 0, leads3d: 0, cpl3d: null,
+          spend7d: 0, leads7d: 0, cpl7d: null,
         });
         if (!triggered) continue;
         killsTriggered++;

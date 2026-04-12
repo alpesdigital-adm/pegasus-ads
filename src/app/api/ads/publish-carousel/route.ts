@@ -342,11 +342,12 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
 
-    const { campaign_id, model_ad_id, carousels, partnership } = body as {
+    const { campaign_id, model_ad_id, carousels, partnership, adset_ids } = body as {
       campaign_id: string;
       model_ad_id: string;
       carousels: CarouselSpec[];
       partnership?: PartnershipSpec;
+      adset_ids?: string[]; // G2: filtro de adsets (vazio = todos)
     };
 
     if (!campaign_id || !model_ad_id || !carousels || carousels.length === 0) {
@@ -369,11 +370,17 @@ export async function POST(req: NextRequest) {
     const allAdSets = await fetchAdSets(campaign_id, token);
     console.log(`[PublishCarousel] Found ${allAdSets.length} ad sets`);
 
-    if (allAdSets.length === 0) {
+    // G2: filtrar por adset_ids se fornecido
+    const filteredAdSets = adset_ids && adset_ids.length > 0
+      ? allAdSets.filter((s) => adset_ids.includes(s.id))
+      : allAdSets;
+    console.log(`[PublishCarousel] After adset_ids filter: ${filteredAdSets.length} ad sets`);
+
+    if (filteredAdSets.length === 0) {
       return NextResponse.json({ error: "No ad sets found in campaign" }, { status: 400 });
     }
 
-    // 3. Publish each carousel to each ad set
+    // 3. Publish each carousel to each filtered ad set
     const results: Array<{
       carousel_name: string;
       creative_id: string;
@@ -433,7 +440,7 @@ export async function POST(req: NextRequest) {
         console.log(`[PublishCarousel] Creative created: ${creative.id}`);
 
         // Create ad in each ad set
-        for (const adSet of allAdSets) {
+        for (const adSet of filteredAdSets) {
           try {
             const adCreated = await createAd({
               accountId: modelAd.accountId,
@@ -469,7 +476,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       campaign_id,
       model_ad_id,
-      ad_sets: allAdSets.map((s) => ({ id: s.id, name: s.name, status: s.status })),
+      ad_sets: filteredAdSets.map((s) => ({ id: s.id, name: s.name, status: s.status })),
       total_ads_created: totalAdsCreated,
       total_errors: totalErrors,
       results,

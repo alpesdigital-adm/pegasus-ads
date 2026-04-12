@@ -277,14 +277,18 @@ async function resolveImageHash(ad: AdSpec, accountId: string, token: string): P
 }
 
 // G3: Clone adset
-async function copyAdset(sourceAdsetId: string, newName: string, dailyBudgetCents: number, token: string): Promise<string> {
+async function copyAdset(sourceAdsetId: string, newName: string, dailyBudgetCents: number, token: string, destinationCampaignId?: string): Promise<string> {
   await rateLimit();
+  const copyParams: Record<string, string> = { deep_copy: "false", status_option: "PAUSED", access_token: token };
+  if (destinationCampaignId) {
+    copyParams.campaign_id = destinationCampaignId;
+  }
   const data = await metaFetch<{ copied_adset_id?: string; ad_object_ids?: Array<{ copied_ad_object_id: string }> }>(
     `${META_BASE_URL}/${sourceAdsetId}/copies`,
     {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: formBody({ deep_copy: "false", status_option: "PAUSED", access_token: token }),
+      body: formBody(copyParams),
     }
   );
   const newId = data.copied_adset_id || data.ad_object_ids?.[0]?.copied_ad_object_id || "";
@@ -299,7 +303,7 @@ async function copyAdset(sourceAdsetId: string, newName: string, dailyBudgetCent
       body: formBody({ name: newName, daily_budget: String(dailyBudgetCents), access_token: token }),
     }
   );
-  console.log(`[PublishToAdSets] G3: cloned adset ${sourceAdsetId} → ${newId} (${newName})`);
+  console.log(`[PublishToAdSets] G3: cloned adset ${sourceAdsetId} → ${newId} (${newName}) ${destinationCampaignId ? `into campaign ${destinationCampaignId}` : "(same campaign)"}`);
   return newId;
 }
 
@@ -502,7 +506,7 @@ export async function POST(req: NextRequest) {
     let targetAdSets: Array<{ id: string; name: string; status: string }>;
     if (source_adset_id && new_adset_name) {
       const budget = daily_budget_cents ?? 50000;
-      const newAdsetId = await copyAdset(source_adset_id, new_adset_name, budget, token);
+      const newAdsetId = await copyAdset(source_adset_id, new_adset_name, budget, token, campaign_id || undefined);
       targetAdSets = [{ id: newAdsetId, name: new_adset_name, status: "PAUSED" }];
     } else {
       const allAdSets = await fetchAdSets(campaign_id!, token);

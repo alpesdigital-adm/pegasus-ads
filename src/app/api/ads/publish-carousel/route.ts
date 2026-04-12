@@ -342,12 +342,13 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
 
-    const { campaign_id, model_ad_id, carousels, partnership, adset_ids } = body as {
+    const { campaign_id, model_ad_id, carousels, partnership, adset_ids, link: linkOverride } = body as {
       campaign_id: string;
       model_ad_id: string;
       carousels: CarouselSpec[];
       partnership?: PartnershipSpec;
       adset_ids?: string[]; // G2: filtro de adsets (vazio = todos)
+      link?: string; // G1: override do link do model_ad
     };
 
     if (!campaign_id || !model_ad_id || !carousels || carousels.length === 0) {
@@ -429,10 +430,10 @@ export async function POST(req: NextRequest) {
           body: carousel.body,
           headline: carousel.headline,
           description: carousel.description,
-          link: modelAd.link,
+          link: linkOverride || modelAd.link,
           ctaType: carousel.cta_type,
           urlTags: modelAd.urlTags,
-          displayLink: modelAd.displayLink,
+          displayLink: linkOverride ? ((() => { try { return new URL(linkOverride).hostname; } catch { return modelAd.displayLink; } })()) : modelAd.displayLink,
           partnership: carousel.partnership || partnership, // Per-carousel partnership takes precedence
           token,
         });

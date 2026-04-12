@@ -269,7 +269,7 @@ export async function GET(
         cpl: cpl ? Math.round(cpl * 100) / 100 : 0,
         cpl_meta: leadsMeta > 0 ? Math.round(spend / leadsMeta * 100) / 100 : null,
         leads_source: hasCrmData ? "crm" : "meta",
-        kill_rule: triggered ? { level: triggered.level, name: triggered.name, action: triggered.action } : null,
+        kill_rule: triggered ? { level: triggered.level, name: triggered.name, action: triggered.action, recoveryPotential: triggered.recoveryPotential || null } : null,
       });
     }
 

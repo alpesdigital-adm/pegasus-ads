@@ -214,6 +214,10 @@ export async function GET(
       const cpl = leadsForRules > 0 ? spend / leadsForRules : null;
       const cpm = impressions > 0 ? (spend / impressions) * 1000 : 0;
 
+      // Qualified metrics
+      const cplQualified = crm.qualified > 0 ? spend / crm.qualified : null;
+      const qualificationRate = crm.leads > 0 ? (crm.qualified / crm.leads) * 100 : null;
+
       // Window data for L3/L4
       const adKey = `${row.ad_id}||${row.adset_id}`;
       const w3d = w3dMap.get(adKey) || { spend: 0, leads: 0 };
@@ -267,11 +271,17 @@ export async function GET(
         leads_crm: crm.leads,
         qualified_leads: crm.qualified,
         cpl: cpl ? Math.round(cpl * 100) / 100 : 0,
+        cpl_qualified: cplQualified ? Math.round(cplQualified * 100) / 100 : null,
         cpl_meta: leadsMeta > 0 ? Math.round(spend / leadsMeta * 100) / 100 : null,
+        qualification_rate: qualificationRate ? Math.round(qualificationRate * 100) / 100 : null,
         leads_source: hasCrmData ? "crm" : "meta",
         kill_rule: triggered ? { level: triggered.level, name: triggered.name, action: triggered.action, recoveryPotential: triggered.recoveryPotential || null } : null,
       });
     }
+
+    // Campaign-level qualified metrics
+    const totalCplQualified = totalQualified > 0 ? totalSpend / totalQualified : null;
+    const totalQualificationRate = totalLeadsCrm > 0 ? (totalQualified / totalLeadsCrm) * 100 : null;
 
     return NextResponse.json({
       campaign_id: campaignId,
@@ -288,6 +298,8 @@ export async function GET(
       total_leads: totalLeadsMeta,
       total_leads_crm: totalLeadsCrm,
       total_qualified_leads: totalQualified,
+      total_cpl_qualified: totalCplQualified ? Math.round(totalCplQualified * 100) / 100 : null,
+      total_qualification_rate: totalQualificationRate ? Math.round(totalQualificationRate * 100) / 100 : null,
       ads,
     });
   } catch (error) {

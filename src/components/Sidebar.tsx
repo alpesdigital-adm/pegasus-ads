@@ -62,6 +62,16 @@ const NAV_ITEMS: NavItem[] = [
       </svg>
     ),
   },
+  {
+    label: "CRM Import",
+    href: "/crm/import",
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M10 2v12M6 10l4 4 4-4" />
+        <path d="M3 15v2h14v-2" />
+      </svg>
+    ),
+  },
 ];
 
 const BOTTOM_ITEMS: NavItem[] = [

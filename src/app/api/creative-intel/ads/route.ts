@@ -54,6 +54,7 @@ export async function GET(req: NextRequest) {
           COALESCE(con.name, ac.concept_label, 'Pre-Conceito') AS concept_name,
           COALESCE(ang.code, '-') AS angle_code,
           COALESCE(ang.name, '-') AS angle_name,
+          MAX(ci.ad_id) AS ad_id,
           CAST(COALESCE(SUM(CAST(ci.spend AS FLOAT)), 0) AS FLOAT) AS spend,
           COALESCE(SUM(ci.impressions), 0) AS impressions,
           COALESCE(SUM(ci.link_clicks), 0) AS clicks,
@@ -107,6 +108,7 @@ export async function GET(req: NextRequest) {
 
       return {
         ad_name: row.ad_name,
+        ad_id: row.ad_id || "",
         format: row.format,
         hook: row.hook || "",
         motor: row.motor,

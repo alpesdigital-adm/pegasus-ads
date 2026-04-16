@@ -1,58 +1,33 @@
 /**
  * POST /api/auth/login
  *
- * Autentica usuário com email/senha.
+ * Autentica usuario com email/senha.
  * Retorna session token no cookie.
  *
  * Body: { email, password, workspace_id? }
  *
- * Se workspace_id omitido, usa o primeiro workspace do usuário.
+ * Se workspace_id omitido, usa o primeiro workspace do usuario.
  *
  * Suporta bcrypt ($2b$...) e scrypt (hash:salt) password hashes.
- *
- * Errors:
- * - 400 VALIDATION_ERROR: campos obrigatórios ausentes
- * - 401 INVALID_CREDENTIALS: email ou senha incorretos
- * - 403 NO_WORKSPACE_ACCESS: usuário não tem acesso ao workspace
- * - 500 INTERNAL_ERROR: falha interna
  */
 import { NextRequest, NextResponse } from "next/server";
 import { initDb } from "@/lib/db";
 import { createSession, setSessionCookie } from "@/lib/auth";
 import crypto from "crypto";
+import bcryptjs from "bcryptjs";
 
-// ---------- password verification helpers ----------
+// ---------- password verification ----------
 
-async function verifyBcrypt(password: string, storedHash: string): Promise<boolean> {
-  // Dynamic import to avoid bundling issues if bcryptjs not available
-  try {
-    const bcrypt = await import("bcryptjs");
-    return bcrypt.compare(password, storedHash);
-  } catch {
-    // Fallback: try bcrypt (native)
-    try {
-      const bcrypt = await import("bcrypt");
-      return bcrypt.compare(password, storedHash);
-    } catch {
-      console.error("[auth/login] Neither bcryptjs nor bcrypt available");
-      return false;
-    }
+async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
+  // Bcrypt format: $2b$10$... or $2a$10$...
+  if (storedHash.startsWith("$2b$") || storedHash.startsWith("$2a$")) {
+    return bcryptjs.compare(password, storedHash);
   }
-}
-
-function verifyScrypt(password: string, storedHash: string): boolean {
+  // Scrypt format: hash:salt
   const [hash, salt] = storedHash.split(":");
   if (!hash || !salt) return false;
   const attemptHash = crypto.scryptSync(password, salt, 64).toString("hex");
   return attemptHash === hash;
-}
-
-async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
-  if (storedHash.startsWith("$2b$") || storedHash.startsWith("$2a$")) {
-    return verifyBcrypt(password, storedHash);
-  }
-  // Default: scrypt format "hash:salt"
-  return verifyScrypt(password, storedHash);
 }
 
 // ---------- route handler ----------

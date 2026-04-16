@@ -75,14 +75,14 @@ export async function POST(req: NextRequest) {
     const placeholders = ad_names.map(() => "?").join(", ");
     const resolveResult = await db.execute({
       sql: `
-        SELECT DISTINCT ad_name, ad_id
-        FROM classified_insights
-        WHERE ad_name IN (${placeholders})
-          AND ad_id IS NOT NULL
-          AND ad_id != ''
-          AND workspace_id = ?
+        SELECT DISTINCT ci.ad_name, ci.ad_id
+        FROM classified_insights ci
+        INNER JOIN ad_creatives ac ON ci.ad_name = ac.ad_name AND ac.workspace_id = ?
+        WHERE ci.ad_name IN (${placeholders})
+          AND ci.ad_id IS NOT NULL
+          AND ci.ad_id != ''
       `,
-      args: [...ad_names, auth.workspace_id],
+      args: [auth.workspace_id, ...ad_names],
     });
 
     const adMap: Record<string, string> = {};

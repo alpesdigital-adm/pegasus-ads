@@ -8,6 +8,8 @@
  *
  * Se workspace_id omitido, usa o primeiro workspace do usuário.
  *
+ * Suporta bcrypt ($2b$...) e scrypt (hash:salt) password hashes.
+ *
  * Errors:
  * - 400 VALIDATION_ERROR: campos obrigatórios ausentes
  * - 401 INVALID_CREDENTIALS: email ou senha incorretos
@@ -18,6 +20,42 @@ import { NextRequest, NextResponse } from "next/server";
 import { initDb } from "@/lib/db";
 import { createSession, setSessionCookie } from "@/lib/auth";
 import crypto from "crypto";
+
+// ---------- password verification helpers ----------
+
+async function verifyBcrypt(password: string, storedHash: string): Promise<boolean> {
+  // Dynamic import to avoid bundling issues if bcryptjs not available
+  try {
+    const bcrypt = await import("bcryptjs");
+    return bcrypt.compare(password, storedHash);
+  } catch {
+    // Fallback: try bcrypt (native)
+    try {
+      const bcrypt = await import("bcrypt");
+      return bcrypt.compare(password, storedHash);
+    } catch {
+      console.error("[auth/login] Neither bcryptjs nor bcrypt available");
+      return false;
+    }
+  }
+}
+
+function verifyScrypt(password: string, storedHash: string): boolean {
+  const [hash, salt] = storedHash.split(":");
+  if (!hash || !salt) return false;
+  const attemptHash = crypto.scryptSync(password, salt, 64).toString("hex");
+  return attemptHash === hash;
+}
+
+async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
+  if (storedHash.startsWith("$2b$") || storedHash.startsWith("$2a$")) {
+    return verifyBcrypt(password, storedHash);
+  }
+  // Default: scrypt format "hash:salt"
+  return verifyScrypt(password, storedHash);
+}
+
+// ---------- route handler ----------
 
 export async function POST(req: NextRequest) {
   try {
@@ -47,10 +85,9 @@ export async function POST(req: NextRequest) {
     }
 
     const user = userResult.rows[0];
-    const [storedHash, salt] = (user.password_hash as string).split(":");
-    const attemptHash = crypto.scryptSync(password, salt, 64).toString("hex");
+    const passwordValid = await verifyPassword(password, user.password_hash as string);
 
-    if (attemptHash !== storedHash) {
+    if (!passwordValid) {
       return NextResponse.json(
         { error: "INVALID_CREDENTIALS", message: "Invalid email or password" },
         { status: 401 }

@@ -48,11 +48,19 @@ DECLARE
     -- Creative Intelligence (TD-008, adicionadas na Fase 1B)
     'offers',              -- workspace_id direto
     'launches',            -- workspace_id direto
-    'ad_creatives'         -- workspace_id direto
+    'ad_creatives',        -- workspace_id direto
+    -- Legacy extras com workspace_id (commit 574a412)
+    'projects',            -- workspace_id direto
+    'crm_import_mappings'  -- workspace_id direto
     -- concepts: NÃO tem workspace_id (herda de offers via FK)
     -- angles: idem (herda de concepts)
     -- classified_insights: NÃO tem workspace_id próprio — RLS via JOIN
     --   com ad_creatives.ad_name (atribuição). Tratado em bloco separado.
+    -- TABELAS GLOBAIS SEM RLS (acesso só via dbAdmin):
+    --   plans, settings, prompts, users, sessions, api_keys
+    --   ad_accounts, ad_insights, hourly_insights, sync_logs
+    --   accounts, lead_sources, leads
+    --   classification_rules, saved_views
   ];
   ws_col TEXT;
 BEGIN

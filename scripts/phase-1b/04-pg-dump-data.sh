@@ -7,9 +7,13 @@
 #           Drizzle migration). Formato INSERT (text) para permitir
 #           transformação de IDs antes do restore.
 #
+# POSTGRES VERSION: Neon roda Postgres 17.x, mas o pg_dump do apt/Ubuntu é
+#                   16.x. Usamos `docker run postgres:17-alpine pg_dump` para
+#                   evitar "server version mismatch".
+#
 # OUTPUT: /tmp/pegasus-ads-data-dump.sql (~50k rows esperados)
 #
-# DEPOIS: rodar 05-restore-with-uuid-conversion.ts
+# DEPOIS: rodar 05-transform-and-restore.sh
 # =============================================================================
 
 set -euo pipefail
@@ -27,26 +31,31 @@ OUT=/tmp/pegasus-ads-data-dump.sql
 # Tabelas que NÃO entram no dump:
 # - users e sessions: dados migram para auth.users na Fase 2
 # - __drizzle_migrations: gerada pelo drizzle-kit no destino
-EXCLUDE_TABLES=(
-  --exclude-table-data='public.users'
-  --exclude-table-data='public.sessions'
-  --exclude-table-data='public.__drizzle_migrations'
+EXCLUDE_ARGS=(
+  --exclude-table-data=public.users
+  --exclude-table-data=public.sessions
+  --exclude-table-data=public.__drizzle_migrations
 )
 
-echo "[1/2] Dumpando dados do Neon..."
+echo "[1/2] Dumpando dados do Neon via docker postgres:17-alpine..."
 echo "      Origem : ${NEON_URL//:*@/:***@}"
-echo "      Destino: $OUT"
-echo "      Excluindo: users, sessions"
+echo "      Destino: $OUT (no host, via volume mount)"
+echo "      Excluindo: users, sessions, __drizzle_migrations"
 echo
 
-pg_dump "$NEON_URL" \
-  --data-only \
-  --column-inserts \
-  --no-owner \
-  --no-acl \
-  --disable-triggers \
-  "${EXCLUDE_TABLES[@]}" \
-  -f "$OUT"
+# Rodar pg_dump em container com versão correta.
+# --network host: acesso outbound ao Neon (via AWS)
+# -v /tmp:/tmp: monta /tmp do host para receber o dump
+# -i: interativo (para stdin passar erros se houver)
+docker run --rm --network host -v /tmp:/tmp postgres:17-alpine \
+  pg_dump "$NEON_URL" \
+    --data-only \
+    --column-inserts \
+    --no-owner \
+    --no-acl \
+    --disable-triggers \
+    "${EXCLUDE_ARGS[@]}" \
+    -f "$OUT"
 
 LINES=$(wc -l < "$OUT")
 SIZE=$(du -h "$OUT" | cut -f1)

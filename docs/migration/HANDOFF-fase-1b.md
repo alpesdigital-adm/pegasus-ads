@@ -210,19 +210,27 @@ Claude.
 
 ---
 
-## Bloqueios conhecidos antes de começar
+## Bloqueios resolvidos (antes da iteração atual)
 
-1. **TD-008**: 6 tabelas Creative Intelligence não estão nos schemas Drizzle.
-   Step 01 precisa rodar primeiro pra extrair schemas; depois Claude precisa
-   adicionar os arquivos `creative-intelligence.ts` e regenerar migration.
-   **NÃO rodar Step 03+ antes disso.**
+1. ~~**TD-008**: 6 tabelas Creative Intelligence~~ → **RESOLVIDO** (commit 258c805
+   + 574a412). Todas as 17 tabelas que estavam fora do initDb() agora têm
+   schemas Drizzle. Migrations 0001 (CI) + 0002 (legacy+insights) geradas.
+2. ~~**pg_dump version mismatch** (Neon 17.8 vs VPS apt 16.13)~~ → **RESOLVIDO**
+   (commit atual). Step 04 agora usa `docker run postgres:17-alpine pg_dump`.
 
-2. **TD-002 / Step 02**: a config exata de tenant do Supavisor depende da
+## Bloqueios que permanecem
+
+1. **TD-002 / Step 02**: a config exata de tenant do Supavisor depende da
    versão. Script preview o INSERT mas não executa — você confirma colunas
    primeiro.
 
-3. **TD-006**: gotrue com JWT secret demo público — bloqueador P0 ANTES da
+2. **TD-006**: gotrue com JWT secret demo público — bloqueador P0 ANTES da
    Fase 2, mas não da Fase 1B. Só anotar.
+
+3. **Volume do restore**: hourly_insights tem 25.463 rows. Com
+   `--column-inserts` do pg_dump (uma linha por row), o dump será ~5-10MB de
+   SQL. Restore deve rodar em < 2 min com `-v ON_ERROR_STOP=1`. Se demorar
+   muito ou der timeout, considerar dividir em chunks por data.
 
 ---
 

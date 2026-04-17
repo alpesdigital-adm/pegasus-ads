@@ -1,26 +1,19 @@
 // =============================================================================
-// classified_insights (TD-008)
+// classified_insights (TD-008 — resolvido na Fase 1B commit 574a412)
 // =============================================================================
 // Tabela de insights da Meta API classificados por launch/phase/audiência.
 // Criada no Neon em 2026-04-12 fora do initDb() — usada pelo /api/cron/sync-all
 // e pela /insights page.
 //
-// FKs OMITIDAS NESTA PR:
-//   - account_id → ad_accounts(id): tabela ad_accounts NÃO existe nos schemas
-//     Drizzle desta PR (não estava no db.ts nem no Brain). Próxima sessão:
-//     descobrir se ad_accounts existe no Neon e adicionar schema, ou se a FK
-//     é vestigial (era para uma tabela planejada mas nunca criada).
-//   - insight_id → ad_insights(id): mesma situação. O gêmeo VPS afirmou que
-//     ad_insights "já está no schema Drizzle" mas isso NÃO é verdade — não
-//     existe em nenhum dos schemas. Pode ser confusão com a tabela `metrics`.
-//
-// AÇÃO PRÉ-FASE 1B CUTOVER: rodar `psql NEON_URL -c "\d ad_accounts"` e
-// `\d ad_insights" para descobrir o estado real. Se as tabelas existirem,
-// adicionar schemas + FKs. Se não, dropar as colunas da migração.
+// FKs (resolvidas — ad_accounts e ad_insights agora existem nos schemas):
+//   - account_id → ad_accounts(id): adicionado. Antes era bigint (vestigial),
+//     agora UUID com reference.
+//   - insight_id → ad_insights(id): adicionado. Antes era integer sem FK.
 //
 // Conversão na Fase 1B:
 //   - id integer → uuid (gen_random_uuid)
-//   - account_id bigint mantém (Meta account ID é numérico)
+//   - account_id bigint → uuid (via mapping ad_accounts)
+//   - insight_id integer → uuid (via mapping ad_insights)
 //   - varchar(N) mantém para compatibilidade com queries existentes
 // =============================================================================
 
@@ -33,19 +26,21 @@ import {
   varchar,
   integer,
   numeric,
-  bigint,
   unique,
   index,
 } from "drizzle-orm/pg-core";
+import { adAccounts } from "./ad-accounts";
+import { adInsights } from "./insights";
 
 export const classifiedInsights = pgTable(
   "classified_insights",
   {
     id: uuid("id").primaryKey().defaultRandom(),
 
-    // FK omitida — ver bloco TODO no topo do arquivo
-    insightId: integer("insight_id").notNull(),
-    accountId: bigint("account_id", { mode: "bigint" }),
+    insightId: uuid("insight_id")
+      .notNull()
+      .references(() => adInsights.id),
+    accountId: uuid("account_id").references(() => adAccounts.id),
 
     date: date("date").notNull(),
     campaignId: varchar("campaign_id", { length: 50 }).notNull(),

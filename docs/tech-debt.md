@@ -144,17 +144,24 @@ adicionadas aos schemas Drizzle na Fase 1B prep
 + `classified-insights.ts` + migration `drizzle/0001_*`).
 
 **Status:**
-- ✓ Schemas extraídos (gêmeo VPS, commit c37e0ea)
-- ✓ Schemas Drizzle adicionados (UUID PKs, workspace_id UUID, FKs)
-- ✓ Migration 0001 gerada (6 CREATE TABLE)
-- ✓ Step 05 atualizado (Python script para mapping integer→UUID)
-- ✓ Step 06 (RLS) cobre offers/launches/ad_creatives + concepts/angles/
-  classified_insights via JOIN
-- 🔴 PENDENTE: tabelas `ad_accounts` e `ad_insights` (FKs de `classified_insights`)
-  NÃO existem nos schemas Drizzle. Precisa rodar `\d ad_accounts` e
-  `\d ad_insights` no Neon para confirmar se existem ou se são FKs vestigiais
-  apontando para tabelas que nunca foram criadas. Schema atual omite as FKs
-  com TODO comment — será re-avaliado após inspeção.
+- ✓ Schemas extraídos (gêmeo VPS, commits c37e0ea + 574a412)
+- ✓ Schemas Drizzle adicionados — 17 tabelas novas no total:
+  - CI core (5): offers, concepts, angles, launches, ad_creatives
+  - CI adjacente (1): classified_insights
+  - Meta insights (4): ad_accounts, ad_insights, hourly_insights, sync_logs
+  - Legacy lead capture (3): accounts, lead_sources, leads
+  - Workspace extras (2): projects, crm_import_mappings
+  - Global misc (2): classification_rules, saved_views
+- ✓ Migration 0001 (6 CI tables) + 0002 (11 tables adicionais) geradas
+- ✓ FKs resolvidas: classified_insights.insight_id → ad_insights,
+  classified_insights.account_id → ad_accounts (antes eram int/bigint sem FK)
+- ✓ Step 04 atualizado (docker postgres:17-alpine — Neon é 17.8 / apt é 16.x)
+- ✓ Step 05 Python: mapping para 15 tabelas com PK serial +  preserva FKs
+  (accounts → lead_sources → leads cadeia, ad_accounts → insights/sync_logs)
+- ✓ Step 06 RLS: projects + crm_import_mappings (workspace_id direto)
+- ✓ Handoff report do gêmeo em docs/migration/fase1b-inspect-report.md
+- 🟢 TD-008 RESOLVIDO — todas as tabelas do Neon estão nos schemas Drizzle.
+  Pronto para Fase 1B steps 03-07 sem perda de dados.
 
 ---
 

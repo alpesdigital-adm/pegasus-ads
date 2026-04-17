@@ -41,49 +41,79 @@ literal_map = {}
 for key in ("plan_free", "plan_pro", "plan_enterprise"):
     literal_map[key] = str(uuid.uuid5(uuid.NAMESPACE_DNS, key))
 
-# 2. Tabelas Creative Intelligence — integer PKs precisam virar UUIDs
-# determinísticos por (table, old_id) para que FKs continuem ligadas.
-ci_tables = ("offers", "concepts", "angles", "launches", "ad_creatives", "classified_insights")
-ci_map = {}  # (table, old_id) -> new_uuid
+# 2. Tabelas com PK integer/serial — mapping integer→UUID, preserva FKs
+# Todas as tabelas descobertas na Fase 1B (inspect report + CI handoff).
+serial_pk_tables = (
+    # Creative Intelligence (handoff c37e0ea)
+    "offers", "concepts", "angles", "launches", "ad_creatives",
+    "classified_insights",
+    # Legacy + insights (inspect report 574a412)
+    "ad_accounts", "ad_insights", "hourly_insights", "sync_logs",
+    "accounts", "lead_sources", "leads",
+    "classification_rules", "saved_views",
+)
+id_map = {}  # (table, old_id) -> new_uuid
 
-def ci_uuid(table, old_id):
+def get_uuid(table, old_id):
     key = (table, str(old_id))
-    if key not in ci_map:
+    if key not in id_map:
         # UUIDv5 estável (re-run gera mesmo UUID)
-        ci_map[key] = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{table}/{old_id}"))
-    return ci_map[key]
+        id_map[key] = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{table}/{old_id}"))
+    return id_map[key]
 
 def first_pass_collect(text):
     """Pré-coleta todos os PKs antigos para garantir mapping antes de FKs"""
-    # INSERT INTO public."ad_creatives" (id, workspace_id, ...) VALUES (1, ...)
+    # INSERT INTO public."ad_creatives" (id, ...) VALUES (1, ...)
     pat = re.compile(
-        r'INSERT INTO public\.(?:")?(' + '|'.join(ci_tables) + r')(?:")? \([^)]*\) VALUES \((\d+),'
+        r'INSERT INTO public\.(?:")?(' + '|'.join(serial_pk_tables) + r')(?:")? \([^)]*\) VALUES \((\d+),'
     )
     for m in pat.finditer(text):
-        ci_uuid(m.group(1), m.group(2))
+        get_uuid(m.group(1), m.group(2))
 
-def transform_ci_inserts(text):
+def transform_serial_inserts(text):
     """
-    Reescreve INSERTs nas 6 tabelas CI:
+    Reescreve INSERTs nas tabelas com PK serial:
     - PK integer → UUID
     - FK integer → UUID (lookup no mapping)
     """
-    # Regex genérica: captura nome da tabela + lista de colunas + valores.
-    # Substitui valores INT que correspondem a PKs/FKs por UUIDs do mapping.
+    # (column, target_table) — (id, self) é implícito (sempre convertido)
     fk_columns = {
+        # Creative Intelligence
         "offers":             [("id", "offers")],
-        "concepts":           [("id", "concepts"),    ("offer_id", "offers")],
-        "angles":             [("id", "angles"),      ("concept_id", "concepts")],
+        "concepts":           [("id", "concepts"),
+                                ("offer_id", "offers")],
+        "angles":             [("id", "angles"),
+                                ("concept_id", "concepts")],
         "launches":           [("id", "launches")],
         "ad_creatives":       [("id", "ad_creatives"),
                                 ("offer_id", "offers"),
                                 ("launch_id", "launches"),
                                 ("angle_id", "angles")],
-        "classified_insights":[("id", "classified_insights")],
+        "classified_insights":[("id", "classified_insights"),
+                                ("insight_id", "ad_insights"),
+                                ("account_id", "ad_accounts")],
+        # Insights
+        "ad_accounts":        [("id", "ad_accounts")],
+        "ad_insights":        [("id", "ad_insights"),
+                                ("account_id", "ad_accounts")],
+        "hourly_insights":    [("id", "hourly_insights"),
+                                ("account_id", "ad_accounts")],
+        "sync_logs":          [("id", "sync_logs"),
+                                ("account_id", "ad_accounts")],
+        # Legacy lead capture
+        "accounts":           [("id", "accounts")],
+        "lead_sources":       [("id", "lead_sources"),
+                                ("account_id", "accounts")],
+        "leads":              [("id", "leads"),
+                                ("account_id", "accounts"),
+                                ("source_id", "lead_sources")],
+        # Misc
+        "classification_rules":[("id", "classification_rules")],
+        "saved_views":         [("id", "saved_views")],
     }
     out_lines = []
     insert_pat = re.compile(
-        r'^INSERT INTO public\.(?:")?(' + '|'.join(ci_tables) + r')(?:")? \(([^)]+)\) VALUES \((.+)\);$'
+        r'^INSERT INTO public\.(?:")?(' + '|'.join(serial_pk_tables) + r')(?:")? \(([^)]+)\) VALUES \((.+)\);$'
     )
     for line in text.splitlines(keepends=True):
         m = insert_pat.match(line.rstrip())
@@ -105,7 +135,11 @@ def transform_ci_inserts(text):
                 clean = val.strip()
                 # Pode vir como inteiro (1) ou como '1' (raro pra ints)
                 clean = clean.strip("'")
-                new_vals.append(f"'{ci_uuid(target, clean)}'")
+                # Se já é UUID-format, passa direto (mantém o valor original)
+                if re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', clean, re.I):
+                    new_vals.append(f"'{clean}'")
+                else:
+                    new_vals.append(f"'{get_uuid(target, clean)}'")
             else:
                 new_vals.append(val)
         out_lines.append(
@@ -153,11 +187,11 @@ for old, new in literal_map.items():
     text = text.replace(f"'{old}'", f"'{new}'")
     print(f"  literal: '{old}' → '{new}' ({count_before} occurrences)", file=sys.stderr)
 
-# 2. CI table integer → UUID rewrite
-text = transform_ci_inserts(text)
-print(f"  CI mapping size: {len(ci_map)} (table, old_id) pairs", file=sys.stderr)
-for tbl in ci_tables:
-    n = sum(1 for k in ci_map if k[0] == tbl)
+# 2. Serial PK integer → UUID rewrite (15 tables)
+text = transform_serial_inserts(text)
+print(f"  Serial PK mapping size: {len(id_map)} (table, old_id) pairs", file=sys.stderr)
+for tbl in serial_pk_tables:
+    n = sum(1 for k in id_map if k[0] == tbl)
     print(f"    {tbl}: {n} rows", file=sys.stderr)
 
 with open(dst, "w") as f:

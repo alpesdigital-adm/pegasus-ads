@@ -20,9 +20,85 @@ Gêmeo VPS completou steps 01-07 com sucesso. Relatório completo em
   (commit atual) para re-run limpo em futuras disaster recovery
 
 **Pendente para Fase 1B "done":**
-1. Cutover (manual — seção "Cutover" abaixo)
-2. Supavisor tenant (step 02, skipado por bug — fazer junto com cutover)
+1. Cutover (blue/green — `scripts/cutover/`)
+2. Supavisor tenant (`scripts/phase-1b/02-supavisor-add-tenant.sh` — reescrito
+   com fix do pipefail)
 3. User migration → auth.users (Fase 2)
+
+---
+
+## Cutover Blue/Green (estratégia escolhida pelo Leandro)
+
+Blue = versão atual rodando apontando para Neon. Green = nova imagem apontando
+para Supabase. **Duas instâncias rodando simultaneamente**, permitindo validar
+green em produção sem parar blue.
+
+### Fluxo
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                           DURANTE                                │
+│                                                                  │
+│   pegasus.alpesd.com.br     → BLUE (Neon)     — produção       │
+│   pegasus-green.alpesd.com.br → GREEN (Supabase) — staging    │
+└─────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼ step 02 (swap quando confiante)
+┌─────────────────────────────────────────────────────────────────┐
+│                           DEPOIS                                 │
+│                                                                  │
+│   pegasus.alpesd.com.br     → GREEN (Supabase) — produção ✓  │
+│   pegasus-green.alpesd.com.br → GREEN (mesma coisa)            │
+│   pegasus-blue.alpesd.com.br → BLUE (Neon) — rollback 24-48h   │
+└─────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼ step 04 (remoção final)
+┌─────────────────────────────────────────────────────────────────┐
+│                      CUTOVER FINALIZADO                          │
+│                                                                  │
+│   pegasus.alpesd.com.br     → GREEN                             │
+│   pegasus-green.alpesd.com.br → GREEN (opcional, mantido)      │
+│   pegasus-ads (blue) removido                                   │
+│   deploy.sh atualizado para deploy em green como canônico       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Scripts
+
+```bash
+# Pré-requisito: preservar .env atual de blue (apontando para Neon)
+cp /apps/pegasus/.env /apps/pegasus/.env.blue.backup
+# Depois atualizar /apps/pegasus/.env pra apontar DATABASE_URL → Supabase
+
+# 1. Deploy green — SEM PARAR blue
+bash scripts/cutover/01-deploy-green.sh
+
+# 2. Validar green em https://pegasus-green.alpesd.com.br (smoke test completo)
+#    - login, workspace switch
+#    - /campaigns, /insights, /creatives
+#    - /api/cron/sync-all — verificar que pega dados novos no Supabase
+
+# 3. Quando confiante, swap para primário
+bash scripts/cutover/02-swap-to-green.sh
+#    Janela de ~10-30s de ambiguidade — ambos containers podem responder.
+#    OK porque green já foi validado.
+
+# 4. Monitor 24-48h
+
+# 5. Se quebrar: rollback (volta tudo ao estado anterior ao step 02)
+bash scripts/cutover/03-rollback-to-blue.sh
+
+# 6. Se OK por 24-48h: remoção final
+bash scripts/cutover/04-remove-blue.sh
+#    Atualiza deploy.sh, remove blue container, opcional remove DNS
+```
+
+### DNS
+
+Scripts criam automaticamente via Cloudflare API se `CLOUDFLARE_API_TOKEN`
+estiver no `.env`. Senão, mostra o registro para criar manualmente:
+- `pegasus-green.alpesd.com.br A 187.77.245.144 (proxied)`
+- `pegasus-blue.alpesd.com.br A 187.77.245.144 (proxied)` (step 02)
 
 ---
 

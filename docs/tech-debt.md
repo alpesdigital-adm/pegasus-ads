@@ -108,6 +108,56 @@ estabilizada sem regressões de auth.
 
 ---
 
+## TD-007 — Staging Queue v1.5 schemas ausentes 🔴 open
+
+**Descoberto:** 2026-04-17 (Fase 1A da migração)
+**Dono:** Leandro (doc de especificação) + Claude (implementação)
+**Impacto:** o plano v1.4 referencia tabelas da "Staging Queue v1.5"
+(`publication_batches`, `publication_steps`, `step_dependencies`, `step_events`,
+`ad_blueprints`, `blueprint_versions`) mas o documento v1.5 com especificação
+completa de colunas NÃO está no repo. Sem ele, criar os schemas Drizzle é
+chute.
+
+**Contexto:** o plano diz que os schemas devem existir na Fase 1 para evitar
+migration adicional depois. Mas criar schemas com colunas especulativas gera
+dívida real — a migration final terá que alterar tipo/nome/constraint.
+
+**Como resolver:** finalizar o doc `docs/staging-queue-v1.5.md` com
+especificação de colunas ANTES de adicionar os schemas Drizzle. Depois,
+adicionar em PR separado (Fase 1E ou Fase 6 antecipada).
+
+**Quando:** antes da Fase 6 ou quando a feature de staging queue for
+priorizada (o que vier primeiro).
+
+---
+
+## TD-008 — Tabelas Creative Intelligence fora do db.ts 🔴 open
+
+**Descoberto:** 2026-04-17 (Fase 1A — Brain memória #108/#109)
+**Dono:** Claude (Fase 1A follow-up)
+**Impacto:** 5 tabelas adicionais (`offers`, `concepts`, `angles`, `launches`,
+`ad_creatives`) + `classified_insights` foram criadas no Neon em 2026-04-12
+via SQL direto, FORA do `initDb()` em `src/lib/db.ts`. Por isso, os schemas
+Drizzle criados na Fase 1A NÃO incluem elas. A migration 0000 vai gerar um
+banco Supabase com schema INCOMPLETO comparado ao Neon atual.
+
+**Contexto:** tabelas usadas por `/insights` (memória #110) e `/api/cron/sync-all`.
+Referências em `classified_insights` (BIGINT account_id, unique date+ad_id),
+`offers` (workspace_id, key, name, offer_type, cpl_target), etc.
+
+**Como resolver:**
+1. Conectar no Neon (do VPS) e rodar `\d <tabela>` em cada uma para extrair
+   o schema exato
+2. Criar `src/lib/db/schema/creative-intelligence.ts` + adicionar
+   `classified-insights.ts` (ou merger em metrics.ts)
+3. Regenerar migration Drizzle
+4. Commit como PR de correção (pre-Fase 1B)
+
+**Quando:** ANTES da Fase 1B (pg_dump / restore) — senão o restore vai falhar
+em FKs ou deixar dados órfãos.
+
+---
+
 ## TD-006 — gotrue com JWT secret demo público (herdado do CRM) ⚠️
 
 **Descoberto:** 2026-04-15 (Brain memória #149, TD-001 do CRM)

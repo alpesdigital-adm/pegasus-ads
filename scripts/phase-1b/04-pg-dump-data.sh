@@ -31,10 +31,13 @@ OUT=/tmp/pegasus-ads-data-dump.sql
 # Tabelas que NÃO entram no dump:
 # - users e sessions: dados migram para auth.users na Fase 2
 # - __drizzle_migrations: gerada pelo drizzle-kit no destino
+# - schemas drizzle e neon_auth: Neon-exclusive / gerados no destino
 EXCLUDE_ARGS=(
   --exclude-table-data=public.users
   --exclude-table-data=public.sessions
   --exclude-table-data=public.__drizzle_migrations
+  --exclude-schema=drizzle
+  --exclude-schema=neon_auth
 )
 
 echo "[1/2] Dumpando dados do Neon via docker postgres:17-alpine..."

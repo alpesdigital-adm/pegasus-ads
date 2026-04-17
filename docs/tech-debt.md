@@ -39,8 +39,9 @@ não confundir falha real de CI com ruído residual.
 ## TD-002 — Configurar Supavisor no pegasus_ads 🟡 in-progress
 
 **Descoberto:** 2026-04-17 (Fase 0 da migração)
-**Atualizado:** 2026-04-17 (após execução VPS — Supavisor detectado)
-**Dono:** Claude (Fase 1)
+**Atualizado:** 2026-04-17 (Fase 1B — step 02 skipado por bug pipefail no
+script; será feito como parte do cutover manual)
+**Dono:** Claude / Leandro (pre-cutover)
 **Impacto:** o cluster já tem Supavisor (`alpes-ads_supabase-supavisor-1`),
 mas o `.env` do pegasus-ads hoje aponta conexão direta ao Postgres
 (`alpes-ads_supabase-db:5432`). Falta configurar o Supavisor para o
@@ -131,10 +132,11 @@ priorizada (o que vier primeiro).
 
 ---
 
-## TD-008 — Tabelas Creative Intelligence fora do db.ts 🟡 in-progress
+## TD-008 — Tabelas Creative Intelligence fora do db.ts 🟢 done
 
 **Descoberto:** 2026-04-17 (Fase 1A — Brain memória #108/#109)
-**Atualizado:** 2026-04-17 (Fase 1B prep — schemas extraídos pelo gêmeo VPS)
+**Atualizado:** 2026-04-17 (Fase 1B executada end-to-end — relatório em
+`docs/migration/fase1b-complete-report.md`)
 **Dono:** Claude (Fase 1B)
 **Impacto:** 6 tabelas adicionais (`offers`, `concepts`, `angles`, `launches`,
 `ad_creatives`, `classified_insights`) foram criadas no Neon em 2026-04-12

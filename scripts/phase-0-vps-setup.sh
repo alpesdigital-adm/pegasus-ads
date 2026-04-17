@@ -176,6 +176,9 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
   GRANT USAGE, SELECT ON SEQUENCES TO ${ROLE_APP};
 
 -- Admin role: tudo (DDL incluído — usado por drizzle-kit/migrations)
+-- GRANT CREATE ON DATABASE é necessário para drizzle-kit criar schema `drizzle`
+-- (fix #4 do fase1b-complete-report — sem isso, migrate falha com permission denied).
+GRANT CREATE ON DATABASE ${DB_NAME} TO ${ROLE_ADMIN};
 GRANT ALL PRIVILEGES ON SCHEMA public TO ${ROLE_ADMIN};
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO ${ROLE_ADMIN};
 GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO ${ROLE_ADMIN};

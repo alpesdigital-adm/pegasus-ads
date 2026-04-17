@@ -8,6 +8,26 @@
 
 ---
 
+## 🟢 STATUS: Fase 1B executada end-to-end (2026-04-17)
+
+Gêmeo VPS completou steps 01-07 com sucesso. Relatório completo em
+[`fase1b-complete-report.md`](./fase1b-complete-report.md).
+
+- **45/45 tabelas migradas, 51k rows** (drift <1% por Neon ativo)
+- **FK sanity**: 0 orphans
+- **RLS validado** com 2 workspaces
+- **12 fixes aplicados ad-hoc**, todos consolidados nos scripts desta pasta
+  (commit atual) para re-run limpo em futuras disaster recovery
+
+**Pendente para Fase 1B "done":**
+1. Cutover (manual — seção "Cutover" abaixo)
+2. Supavisor tenant (step 02, skipado por bug — fazer junto com cutover)
+3. User migration → auth.users (Fase 2)
+
+---
+
+---
+
 ## O que é a Fase 1B
 
 Migração de DADOS (Neon → pegasus_ads) + RLS + tenant Supavisor. Ainda **não**

@@ -205,12 +205,16 @@ CREATE POLICY workspace_isolation ON classified_insights
 -- Sem WITH CHECK — INSERTs vêm de cron com dbAdmin (BYPASSRLS).
 
 -- ── Resumo ───────────────────────────────────────────────────────────────
-SELECT tablename,
-       CASE WHEN rowsecurity THEN '✓ enabled'
-            WHEN forcerowsecurity THEN '✓ forced'
+-- Fix #11: `forcerowsecurity` na pg_tables só existe em Pg16+. No Pg15.8
+-- (cluster atual do Supabase self-hosted) precisamos ler de pg_class.
+SELECT c.relname AS tablename,
+       CASE WHEN c.relrowsecurity AND c.relforcerowsecurity THEN '✓ enabled + forced'
+            WHEN c.relrowsecurity                          THEN '✓ enabled'
             ELSE '✗ disabled' END AS rls_status
-FROM pg_tables
-WHERE schemaname = 'public'
-  AND tablename NOT LIKE '\_%'
-  AND tablename != '__drizzle_migrations'
-ORDER BY tablename;
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relkind = 'r'
+  AND c.relname NOT LIKE '\_%'
+  AND c.relname != '__drizzle_migrations'
+ORDER BY c.relname;

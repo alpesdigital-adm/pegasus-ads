@@ -22,9 +22,12 @@ DB_APP_PASSWORD="${DB_APP_PASSWORD:?defina DB_APP_PASSWORD}"
 DB_ADMIN_PASSWORD="${DB_ADMIN_PASSWORD:?defina DB_ADMIN_PASSWORD}"
 
 DB_CONTAINER=alpes-ads_supabase-db-1
-PSQL_ADMIN=(docker exec -i "$DB_CONTAINER" psql -U pegasus_ads_admin -d pegasus_ads -At)
-PSQL_APP=(docker exec -i -e PGPASSWORD="$DB_APP_PASSWORD" "$DB_CONTAINER" \
-  psql "postgres://pegasus_ads_app:$DB_APP_PASSWORD@localhost:5432/pegasus_ads" -At)
+# Fix #12: docker exec com peer auth falha — preciso passar a senha via env.
+# Uso URL com senha embutida no connection string (PGPASSWORD funciona igual).
+PSQL_ADMIN=(docker exec -i "$DB_CONTAINER"
+  psql "postgres://pegasus_ads_admin:${DB_ADMIN_PASSWORD}@localhost:5432/pegasus_ads" -At)
+PSQL_APP=(docker exec -i "$DB_CONTAINER"
+  psql "postgres://pegasus_ads_app:${DB_APP_PASSWORD}@localhost:5432/pegasus_ads" -At)
 
 # ── 1. Comparação de contagem ────────────────────────────────────────────
 echo "[1/4] Comparando contagem de rows: Neon vs pegasus_ads"

@@ -1,21 +1,17 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Pegasus Ads — Fase 1B / Step 05: Transformar IDs literais e restaurar
+# Pegasus Ads — Fase 1B / Step 05: Transformar IDs e restaurar
 # =============================================================================
 # RODAR ONDE: VPS Hostinger
 # OBJETIVO:
-#   1. Transformar IDs literais (não-UUID-format) em UUIDv5 determinísticos
-#   2. Restaurar dump transformado no pegasus_ads
+#   1. Transformar IDs literais (plan_free, plan_pro, plan_enterprise) →
+#      UUIDv5 determinístico
+#   2. Transformar IDs integer das 6 tabelas Creative Intelligence
+#      (offers, concepts, angles, launches, ad_creatives, classified_insights)
+#      → UUID novo, mantendo coerência de FKs
+#   3. Restaurar dump transformado no pegasus_ads
 #
-# IDS LITERAIS CONHECIDOS (do legacy db.ts):
-#   - plans: 'plan_free', 'plan_pro', 'plan_enterprise'
-#   - (possivelmente outros — checar output do step 01: non_uuid_pks.tsv)
-#
-# UUIDv5 NAMESPACE: DNS namespace padrão (6ba7b810-9dad-11d1-80b4-00c04fd430c8)
-# IDs UUIDv5 são determinísticos: mesmo input → mesmo UUID. Re-rodar é seguro.
-#
-# Para conversão UUIDv5 em SQL puro, usamos uuid_generate_v5() do pgcrypto/
-# uuid-ossp. Como pgcrypto está habilitado (Fase 0), criamos uma função local.
+# REQUISITO: Python 3.x (vem por default em Ubuntu 24.04)
 # =============================================================================
 
 set -euo pipefail
@@ -28,61 +24,154 @@ if [[ ! -f "$DUMP" ]]; then
   exit 1
 fi
 
-# ── 1. Mapeamento de IDs literais → UUIDv5 ──────────────────────────────
-# UUIDv5 é determinístico — pré-computado offline com:
-#   python3 -c "import uuid; print(uuid.uuid5(uuid.NAMESPACE_DNS, 'plan_free'))"
-# Resultados (NAMESPACE_DNS = 6ba7b810-9dad-11d1-80b4-00c04fd430c8):
-declare -A ID_MAP=(
-  [plan_free]="64a6fc6c-1c01-5fb9-ba0b-a24cb1d50fdf"
-  [plan_pro]="2b34dd62-fe7b-5b94-b0ac-dab5f4cb86b5"
-  [plan_enterprise]="50fe9b3e-4c2b-5ddf-8afa-91d23e30bbac"
-)
-# Importante: validar via Python na VPS antes de rodar:
-#   python3 -c "import uuid; print(uuid.uuid5(uuid.NAMESPACE_DNS, 'plan_free'))"
-# Se diferente, ATUALIZAR o ID_MAP acima ou recalcular automaticamente
-# (script abaixo recalcula se Python disponível).
-
-if command -v python3 >/dev/null; then
-  echo "[1/3] Validando UUIDs determinísticos com Python..."
-  for key in "${!ID_MAP[@]}"; do
-    expected="${ID_MAP[$key]}"
-    actual=$(python3 -c "import uuid; print(uuid.uuid5(uuid.NAMESPACE_DNS, '$key'))")
-    if [[ "$actual" != "$expected" ]]; then
-      echo "  ⚠️  Mismatch para '$key': esperado=$expected, obtido=$actual"
-      echo "  Atualizando ID_MAP em runtime..."
-      ID_MAP[$key]="$actual"
-    else
-      echo "  ✓ $key → $actual"
-    fi
-  done
-else
-  echo "  ⚠️  Python3 não disponível — usando ID_MAP estático (validar antes!)"
+if ! command -v python3 >/dev/null; then
+  echo "ERRO: python3 não disponível." >&2
+  exit 1
 fi
 
-# ── 2. Aplicar transformações no dump ────────────────────────────────────
-echo
-echo "[2/3] Transformando IDs literais no dump..."
-cp "$DUMP" "$TRANSFORMED"
+# ── Transformação via Python (mais robusto que sed para integer→UUID) ───
+echo "[1/2] Transformando dump..."
+python3 - "$DUMP" "$TRANSFORMED" <<'PYEOF'
+import sys, re, uuid
 
-for old in "${!ID_MAP[@]}"; do
-  new="${ID_MAP[$old]}"
-  # Replace 'old_id' → 'new_uuid' apenas em contextos de ID
-  # (cuidado: não fazer replace cego — pode atingir nomes/values)
-  # Aproximação segura: substituir apenas valores entre aspas em INSERTs
-  sed -i "s|'$old'|'$new'|g" "$TRANSFORMED"
-  count=$(grep -c "$new" "$TRANSFORMED" || true)
-  echo "  $old → $new ($count ocorrências)"
-done
+src, dst = sys.argv[1], sys.argv[2]
 
-# ── 3. Restaurar no pegasus_ads ──────────────────────────────────────────
+# 1. Literal IDs → UUIDv5 (NAMESPACE_DNS) — para tabela `plans` seedada
+literal_map = {}
+for key in ("plan_free", "plan_pro", "plan_enterprise"):
+    literal_map[key] = str(uuid.uuid5(uuid.NAMESPACE_DNS, key))
+
+# 2. Tabelas Creative Intelligence — integer PKs precisam virar UUIDs
+# determinísticos por (table, old_id) para que FKs continuem ligadas.
+ci_tables = ("offers", "concepts", "angles", "launches", "ad_creatives", "classified_insights")
+ci_map = {}  # (table, old_id) -> new_uuid
+
+def ci_uuid(table, old_id):
+    key = (table, str(old_id))
+    if key not in ci_map:
+        # UUIDv5 estável (re-run gera mesmo UUID)
+        ci_map[key] = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{table}/{old_id}"))
+    return ci_map[key]
+
+def first_pass_collect(text):
+    """Pré-coleta todos os PKs antigos para garantir mapping antes de FKs"""
+    # INSERT INTO public."ad_creatives" (id, workspace_id, ...) VALUES (1, ...)
+    pat = re.compile(
+        r'INSERT INTO public\.(?:")?(' + '|'.join(ci_tables) + r')(?:")? \([^)]*\) VALUES \((\d+),'
+    )
+    for m in pat.finditer(text):
+        ci_uuid(m.group(1), m.group(2))
+
+def transform_ci_inserts(text):
+    """
+    Reescreve INSERTs nas 6 tabelas CI:
+    - PK integer → UUID
+    - FK integer → UUID (lookup no mapping)
+    """
+    # Regex genérica: captura nome da tabela + lista de colunas + valores.
+    # Substitui valores INT que correspondem a PKs/FKs por UUIDs do mapping.
+    fk_columns = {
+        "offers":             [("id", "offers")],
+        "concepts":           [("id", "concepts"),    ("offer_id", "offers")],
+        "angles":             [("id", "angles"),      ("concept_id", "concepts")],
+        "launches":           [("id", "launches")],
+        "ad_creatives":       [("id", "ad_creatives"),
+                                ("offer_id", "offers"),
+                                ("launch_id", "launches"),
+                                ("angle_id", "angles")],
+        "classified_insights":[("id", "classified_insights")],
+    }
+    out_lines = []
+    insert_pat = re.compile(
+        r'^INSERT INTO public\.(?:")?(' + '|'.join(ci_tables) + r')(?:")? \(([^)]+)\) VALUES \((.+)\);$'
+    )
+    for line in text.splitlines(keepends=True):
+        m = insert_pat.match(line.rstrip())
+        if not m:
+            out_lines.append(line)
+            continue
+        table, cols_raw, vals_raw = m.group(1), m.group(2), m.group(3)
+        cols = [c.strip().strip('"') for c in cols_raw.split(",")]
+        # split values (respeitando aspas)
+        vals = split_values(vals_raw)
+        if len(cols) != len(vals):
+            out_lines.append(line)  # malformado, deixa
+            continue
+        col_to_table = dict(fk_columns.get(table, []))
+        new_vals = []
+        for col, val in zip(cols, vals):
+            if col in col_to_table and val.strip() != "NULL":
+                target = col_to_table[col]
+                clean = val.strip()
+                # Pode vir como inteiro (1) ou como '1' (raro pra ints)
+                clean = clean.strip("'")
+                new_vals.append(f"'{ci_uuid(target, clean)}'")
+            else:
+                new_vals.append(val)
+        out_lines.append(
+            f'INSERT INTO public."{table}" ({cols_raw}) VALUES ({", ".join(new_vals)});\n'
+        )
+    return "".join(out_lines)
+
+def split_values(s):
+    """Split values em INSERT respeitando aspas e parens internos."""
+    out, buf, in_str, depth = [], [], False, 0
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == "'" and (i == 0 or s[i-1] != '\\'):
+            # Toggle ou escape ''
+            if in_str and i+1 < len(s) and s[i+1] == "'":
+                buf.append("''"); i += 2; continue
+            in_str = not in_str
+            buf.append(c); i += 1; continue
+        if not in_str:
+            if c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+            elif c == ',' and depth == 0:
+                out.append("".join(buf)); buf = []; i += 1
+                # skip space after comma
+                while i < len(s) and s[i] == ' ': i += 1
+                continue
+        buf.append(c); i += 1
+    if buf:
+        out.append("".join(buf))
+    return out
+
+# ── Main ──
+with open(src) as f:
+    text = f.read()
+
+# Pre-collect (mapping precisa estar pronto antes de qualquer FK lookup)
+first_pass_collect(text)
+
+# 1. Literal substitutions (plan_*)
+for old, new in literal_map.items():
+    count_before = text.count(f"'{old}'")
+    text = text.replace(f"'{old}'", f"'{new}'")
+    print(f"  literal: '{old}' → '{new}' ({count_before} occurrences)", file=sys.stderr)
+
+# 2. CI table integer → UUID rewrite
+text = transform_ci_inserts(text)
+print(f"  CI mapping size: {len(ci_map)} (table, old_id) pairs", file=sys.stderr)
+for tbl in ci_tables:
+    n = sum(1 for k in ci_map if k[0] == tbl)
+    print(f"    {tbl}: {n} rows", file=sys.stderr)
+
+with open(dst, "w") as f:
+    f.write(text)
+print(f"  output: {dst}", file=sys.stderr)
+PYEOF
+
 echo
-echo "[3/3] Restaurando no pegasus_ads (via dbAdmin para BYPASSRLS)..."
-echo
-read -p "Confirmar restore no pegasus_ads (apaga dados existentes)? [y/N] " -n 1 -r
+echo "[2/2] Restaurando no pegasus_ads (TRUNCATE CASCADE + restore)..."
+read -p "Confirmar restore (apaga dados existentes em pegasus_ads)? [y/N] " -n 1 -r
 echo
 [[ "$REPLY" =~ ^[Yy]$ ]] || { echo "Cancelado."; exit 0; }
 
-# TRUNCATE primeiro pra garantir restore limpo (CASCADE para FKs)
+# TRUNCATE primeiro
 docker exec -i alpes-ads_supabase-db-1 psql -U pegasus_ads_admin -d pegasus_ads <<'SQL'
 DO $$
 DECLARE
@@ -105,5 +194,5 @@ docker exec -i alpes-ads_supabase-db-1 psql -U pegasus_ads_admin -d pegasus_ads 
 
 echo
 echo "====================================================================="
-echo " Restore concluído. Validar com scripts/phase-1b/06-validate.sh"
+echo " Restore concluído. Validar com scripts/phase-1b/07-validate.sh"
 echo "====================================================================="

@@ -131,30 +131,30 @@ priorizada (o que vier primeiro).
 
 ---
 
-## TD-008 — Tabelas Creative Intelligence fora do db.ts 🔴 open
+## TD-008 — Tabelas Creative Intelligence fora do db.ts 🟡 in-progress
 
 **Descoberto:** 2026-04-17 (Fase 1A — Brain memória #108/#109)
-**Dono:** Claude (Fase 1A follow-up)
-**Impacto:** 5 tabelas adicionais (`offers`, `concepts`, `angles`, `launches`,
-`ad_creatives`) + `classified_insights` foram criadas no Neon em 2026-04-12
-via SQL direto, FORA do `initDb()` em `src/lib/db.ts`. Por isso, os schemas
-Drizzle criados na Fase 1A NÃO incluem elas. A migration 0000 vai gerar um
-banco Supabase com schema INCOMPLETO comparado ao Neon atual.
+**Atualizado:** 2026-04-17 (Fase 1B prep — schemas extraídos pelo gêmeo VPS)
+**Dono:** Claude (Fase 1B)
+**Impacto:** 6 tabelas adicionais (`offers`, `concepts`, `angles`, `launches`,
+`ad_creatives`, `classified_insights`) foram criadas no Neon em 2026-04-12
+via SQL direto, FORA do `initDb()` em `src/lib/db.ts`. Essas tabelas FORAM
+adicionadas aos schemas Drizzle na Fase 1B prep
+(`docs/migration/fase1b-ci-schemas.md` → `src/lib/db/schema/creative-intelligence.ts`
++ `classified-insights.ts` + migration `drizzle/0001_*`).
 
-**Contexto:** tabelas usadas por `/insights` (memória #110) e `/api/cron/sync-all`.
-Referências em `classified_insights` (BIGINT account_id, unique date+ad_id),
-`offers` (workspace_id, key, name, offer_type, cpl_target), etc.
-
-**Como resolver:**
-1. Conectar no Neon (do VPS) e rodar `\d <tabela>` em cada uma para extrair
-   o schema exato
-2. Criar `src/lib/db/schema/creative-intelligence.ts` + adicionar
-   `classified-insights.ts` (ou merger em metrics.ts)
-3. Regenerar migration Drizzle
-4. Commit como PR de correção (pre-Fase 1B)
-
-**Quando:** ANTES da Fase 1B (pg_dump / restore) — senão o restore vai falhar
-em FKs ou deixar dados órfãos.
+**Status:**
+- ✓ Schemas extraídos (gêmeo VPS, commit c37e0ea)
+- ✓ Schemas Drizzle adicionados (UUID PKs, workspace_id UUID, FKs)
+- ✓ Migration 0001 gerada (6 CREATE TABLE)
+- ✓ Step 05 atualizado (Python script para mapping integer→UUID)
+- ✓ Step 06 (RLS) cobre offers/launches/ad_creatives + concepts/angles/
+  classified_insights via JOIN
+- 🔴 PENDENTE: tabelas `ad_accounts` e `ad_insights` (FKs de `classified_insights`)
+  NÃO existem nos schemas Drizzle. Precisa rodar `\d ad_accounts` e
+  `\d ad_insights` no Neon para confirmar se existem ou se são FKs vestigiais
+  apontando para tabelas que nunca foram criadas. Schema atual omite as FKs
+  com TODO comment — será re-avaliado após inspeção.
 
 ---
 

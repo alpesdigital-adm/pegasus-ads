@@ -44,7 +44,15 @@ DECLARE
     'visual_elements',
     'hypotheses',
     'crm_leads',
-    'lead_qualification_rules'
+    'lead_qualification_rules',
+    -- Creative Intelligence (TD-008, adicionadas na Fase 1B)
+    'offers',              -- workspace_id direto
+    'launches',            -- workspace_id direto
+    'ad_creatives'         -- workspace_id direto
+    -- concepts: NÃO tem workspace_id (herda de offers via FK)
+    -- angles: idem (herda de concepts)
+    -- classified_insights: NÃO tem workspace_id próprio — RLS via JOIN
+    --   com ad_creatives.ad_name (atribuição). Tratado em bloco separado.
   ];
   ws_col TEXT;
 BEGIN
@@ -124,6 +132,69 @@ BEGIN
     RAISE NOTICE 'RLS ativo em % (workspace_id redundante)', tbl;
   END LOOP;
 END $$;
+
+-- ── concepts + angles: RLS via JOIN com offers ───────────────────────
+-- Tabelas Creative Intelligence sem workspace_id direto. Policy faz lookup
+-- pelo offers associado.
+
+ALTER TABLE concepts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE concepts FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS workspace_isolation ON concepts;
+CREATE POLICY workspace_isolation ON concepts
+  USING (
+    EXISTS (
+      SELECT 1 FROM offers o
+      WHERE o.id = concepts.offer_id
+        AND o.workspace_id::text = current_setting('app.workspace_id', true)
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM offers o
+      WHERE o.id = concepts.offer_id
+        AND o.workspace_id::text = current_setting('app.workspace_id', true)
+    )
+  );
+
+ALTER TABLE angles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE angles FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS workspace_isolation ON angles;
+CREATE POLICY workspace_isolation ON angles
+  USING (
+    EXISTS (
+      SELECT 1 FROM concepts c
+      JOIN offers o ON o.id = c.offer_id
+      WHERE c.id = angles.concept_id
+        AND o.workspace_id::text = current_setting('app.workspace_id', true)
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM concepts c
+      JOIN offers o ON o.id = c.offer_id
+      WHERE c.id = angles.concept_id
+        AND o.workspace_id::text = current_setting('app.workspace_id', true)
+    )
+  );
+
+-- ── classified_insights: RLS via JOIN com ad_creatives ──────────────────
+-- Sem workspace_id próprio. Atribuição via ad_name (UTM).
+-- IMPORTANTE: rows sem ad_creatives correspondente ficam INVISÍVEIS — pode
+-- ser problema se sync-all popular insights antes de ad_creatives existir.
+-- AÇÃO: avaliar se devemos usar dbAdmin para sync-all (BYPASSRLS) — provável SIM.
+
+ALTER TABLE classified_insights ENABLE ROW LEVEL SECURITY;
+ALTER TABLE classified_insights FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS workspace_isolation ON classified_insights;
+CREATE POLICY workspace_isolation ON classified_insights
+  USING (
+    EXISTS (
+      SELECT 1 FROM ad_creatives ac
+      WHERE ac.ad_name = classified_insights.ad_name
+        AND ac.workspace_id::text = current_setting('app.workspace_id', true)
+    )
+  );
+-- Sem WITH CHECK — INSERTs vêm de cron com dbAdmin (BYPASSRLS).
 
 -- ── Resumo ───────────────────────────────────────────────────────────────
 SELECT tablename,

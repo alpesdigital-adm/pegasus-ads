@@ -14,3 +14,5 @@ export * from "./intelligence";
 export * from "./crm";
 export * from "./pipelines";
 export * from "./prompts";
+export * from "./creative-intelligence";
+export * from "./classified-insights";

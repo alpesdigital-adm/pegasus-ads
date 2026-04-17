@@ -8,6 +8,13 @@
       "when": 1776455431821,
       "tag": "0000_0000_phase_1a_foundation",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1776456802670,
+      "tag": "0001_0001_creative_intelligence",
+      "breakpoints": true
     }
   ]
 }

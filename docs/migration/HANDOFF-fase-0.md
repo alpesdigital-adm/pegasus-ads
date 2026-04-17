@@ -157,8 +157,11 @@ não ter DDL. Se passou, está errado.
 
 ### 6. Salvar senhas no Brain
 
+**Nota (corrigida 2026-04-17):** o endpoint de escrita é `POST /memory`
+(singular), não `/memories`. `DELETE /memory/{id}` remove.
+
 ```bash
-curl -X POST https://brain.alpesd.com.br/memories \
+curl -X POST https://brain.alpesd.com.br/memory \
   -H "Authorization: Bearer brain-api-2026-secure-token" \
   -H "Content-Type: application/json" \
   -d '{

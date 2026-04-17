@@ -36,25 +36,31 @@ não confundir falha real de CI com ruído residual.
 
 ---
 
-## TD-002 — Pooler de conexão no Supabase self-hosted 🔴 open
+## TD-002 — Configurar Supavisor no pegasus_ads 🟡 in-progress
 
 **Descoberto:** 2026-04-17 (Fase 0 da migração)
-**Dono:** Claude + Leandro (decisão arquitetural)
-**Impacto:** sem pooler, a Fase 1 vai usar pool do driver `postgres-js`
-(parâmetro `max`) direto na conexão. Funciona, mas perde o multiplexing
-de conexões que um PgBouncer/Supavisor transaction-mode daria — relevante
-quando o número de concurrent requests crescer.
+**Atualizado:** 2026-04-17 (após execução VPS — Supavisor detectado)
+**Dono:** Claude (Fase 1)
+**Impacto:** o cluster já tem Supavisor (`alpes-ads_supabase-supavisor-1`),
+mas o `.env` do pegasus-ads hoje aponta conexão direta ao Postgres
+(`alpes-ads_supabase-db:5432`). Falta configurar o Supavisor para o
+novo database `pegasus_ads` e trocar o `DATABASE_URL` para passar pelo
+pooler em transaction mode (ganho de multiplexing).
 
-**Contexto:** o cluster `alpes-ads_supabase` não tem PgBouncer/Supavisor
-rodando hoje (a detectar na execução do `scripts/phase-0-vps-setup.sh`).
-O plano v1.3 (seção 4.1) assume PgBouncer em porta 6543 — premissa a
-revisitar antes da Fase 1.
+**Contexto:** o plano v1.3 (seção 4.1) assumia PgBouncer em porta 6543.
+Na verdade o stack usa **Supavisor** (Supabase moderno), que faz o
+mesmo papel em outra porta/config. `DATABASE_URL_ADMIN` continua em
+conexão direta (drizzle-kit + migrations não devem passar pelo pooler).
 
 **Como resolver:**
-1. Avaliar adicionar Supavisor ao stack `alpes-ads_supabase` (Supabase
-   moderno usa Supavisor em vez de PgBouncer)
-2. Ou manter direct connection + pool no driver e documentar que é uma
-   decisão consciente (ok para os 6 clientes atuais)
+1. Dentro de `alpes-ads_supabase-supavisor-1`, adicionar tenant
+   `pegasus_ads` (confere como o CRM fez — provavelmente via env
+   `POOLER_TENANT_ID` ou config file)
+2. Atualizar o plano v1.4 trocando "PgBouncer" por "Supavisor" nas
+   seções 4.1 / 4.3 / 5.8
+3. Trocar `DATABASE_URL` do pegasus-ads para a URL via Supavisor
+4. Validar que `SET LOCAL app.workspace_id` funciona no transaction
+   mode do Supavisor (ponto de atenção da seção 5.8 do plano)
 
 **Quando:** antes da Fase 1 cair em produção.
 

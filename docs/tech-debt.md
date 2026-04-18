@@ -447,6 +447,124 @@ docker compose -p alpes-ads_supabase up -d supavisor --force-recreate
 
 ---
 
+## TD-020 — Cancel route não acionava finalizeBatch 🟢 done
+
+**Descoberto:** 2026-04-18 (smoke Fase 3 do gêmeo VPS)
+**Atualizado:** 2026-04-18 (fix commitado no mesmo dia)
+**Dono:** Claude
+**Impacto:** resolvido. POST `/api/batches/[id]/cancel` fazia UPDATE dumb
+em `batch.status='cancelled'` + cascata em `publication_steps` mas NÃO
+chamava `finalizeBatch('cancelled')`. Resultado do smoke do round 3:
+
+- `test_rounds.status` ficou em `'publishing'` (nunca voltou pra lugar
+  coerente; deveria reverter ou marcar cancelled)
+- Nenhum `step_event` com `step_id IS NULL` emitido (perdemos a trilha
+  batch-level que o Fase 2D codificou)
+
+**Fix aplicado:**
+- `finalizeBatch` em `src/lib/staging-queue/worker.ts` agora aceita
+  `'cancelled'` no status. Lógica de `resolveTestRoundStatus` propaga
+  `test_rounds.status = 'reviewing'` (cancel é reversível por design —
+  round volta pro estado pré-batch pra permitir nova tentativa).
+- Função exportada pra consumo externo.
+- `/api/batches/[id]/cancel` passa a:
+  1. Pre-check ownership (withWorkspace/RLS) + estado terminal
+  2. Cascata `pending`/`ready` → `cancelled` via dbAdmin
+  3. `finalizeBatch(id, 'cancelled')` — fecha batch + propaga round +
+     emite `step_event` batch-level com `reason='cancelled_by_user'`
+
+**Validação pendente:** próximo cancel de batch ativo deve mostrar
+`test_rounds.status='reviewing'` + 1 step_event com `step_id IS NULL`.
+
+---
+
+## TD-019 — resolveReadySteps em deadlock silencioso 🟢 done
+
+**Descoberto:** 2026-04-18 (smoke Fase 3 do gêmeo VPS — batch travou em
+loop `status:evaluated` por 10 ticks com 2 steps `retryable_failed`
+585s overdue)
+**Atualizado:** 2026-04-18 (fix commitado no mesmo dia)
+**Dono:** Claude
+**Impacto:** resolvido. Bug P0 que impedia QUALQUER retry de convergir
+em produção. `resolveReadySteps` em `worker.ts` fazia 3 UPDATEs:
+
+1. `retryable_failed → ready` (timer expirou) — sem RETURNING
+2. `pending → ready` (deps satisfeitas) — com RETURNING
+3. `pending → skipped` (não-crítico com dep failed)
+
+E retornava só o RETURNING do UPDATE (2). **Consequência:** um step que
+já era `ready` vindo do tick anterior OU promovido agora pelo UPDATE (1)
+ficava invisível pro `processQueueTick`, que via `readyRows=[]` e pulava
+pra `evaluateBatchCompletion`. Este contava `active > 0` (steps em ready)
+e não finalizava. Loop eterno — worker reportava `evaluated` infinitamente,
+batch nunca chegava em `failed` após max attempts.
+
+**Fix aplicado:** substituído `readyRows.map()` por um `SELECT` final
+que retorna TODOS os `status='ready'` do batch, ordenados por `ordinal`.
+3 linhas. O ciclo de retry agora converge:
+
+```
+retryable_failed → (timer) → ready → executeStep → 3 attempts → failed
+  → evaluateBatchCompletion → finalizeBatch → test_rounds.status=failed
+```
+
+**Raiz do bug:** code review falhou por usar padrão "devolve o que
+transicionou" (bom pra logs) em vez de "devolve o que está pronto"
+(correto pro worker loop). RETURNING é tentador mas enganoso aqui.
+
+---
+
+## TD-018 — classifyError não tratava HTTP 4xx 🟢 done
+
+**Descoberto:** 2026-04-18 (smoke Fase 3 — upload_image 404 retentado
+inutilmente com backoff 5s+20s+80s antes de failed definitivo)
+**Atualizado:** 2026-04-18 (fix commitado no mesmo dia)
+**Dono:** Claude
+**Impacto:** resolvido. Polish de retry policy. Erros de fetch com HTTP
+4xx (404, 403, 401) caíam em `UNKNOWN` → retryable. Em prod isso
+desperdiçava ~105s de backoff em recursos que não voltam (ex: blob URL
+morto, endpoint permissão negada).
+
+**Fix aplicado:** `classifyError` em `src/lib/staging-queue/errors.ts`
+detecta mensagens contendo "4\d{2}" acompanhado de "fetch"/"http"/
+"status"/"failed" e classifica como `META_VALIDATION` (non-retryable).
+4xx → fail fast, libera worker.
+
+---
+
+## TD-017 — Vercel Blob deletado bloqueia todas publicações via Staging Queue 🔴 open
+
+**Descoberto:** 2026-04-18 (smoke Fase 3 do gêmeo VPS)
+**Dono:** Leandro (decisão de rota) + Claude (implementação)
+**Impacto:** P0, bloqueia TODA publicação nova via Staging Queue v2.
+30 de 31 `creatives.blob_url` apontam pra
+`tybpdu7cioonow4j.public.blob.vercel-storage.com` — o projeto Vercel
+`pegasus-ads` foi removido em 2026-04-18 como parte do TD-001 (cutover
+Neon→Supabase). Os blobs foram junto. Fetch retorna 404.
+
+Os 7 `test_rounds` em `reviewing` têm variants com `role='variant'`
+`status='generated'` apontando pra esse storage morto. Imagens IA
+geradas nunca tiveram backup fora do Vercel Blob.
+
+**Caminhos avaliados (ver conversa Brain):**
+- **A (mínimo):** Leandro fornece 1 imagem feed (1080×1080) + 1 stories
+  (1080×1920). Twin substitui `blob_url` de 1 round pra URL pública
+  temporária (ou Supabase Storage). Smoke passa em minutos.
+- **B (fundação):** setup Supabase Storage self-hosted + bucket +
+  re-upload de 30 creatives via script one-off. 1-2 dias. Todos rounds
+  voltam operacionais + migração Vercel→Supabase Storage do plano v1.4
+  adiantada.
+- **C (feature):** antecipar Fase 6 (import Meta ads) completa. ~1-2
+  semanas. Importaria `controls` (ads rodando) mas não recupera
+  `variants` IA perdidos. Não resolve os 7 rounds atuais.
+
+**Recomendação casa-de-tijolos:** A agora (smoke imediato) + B na
+sequência (foundation Supabase Storage). C depois como feature própria.
+
+**Decisão pendente:** Leandro escolher entre A/B/C ou variação.
+
+---
+
 ## TD-016 — Alerta "integridade estatística do test_round" no cockpit 🔴 open
 
 **Descoberto:** 2026-04-18 (peer review da regra `finalizeBatch` → `test_rounds.status`)

@@ -111,7 +111,7 @@ export async function resolveReadySteps(batchId: string): Promise<string[]> {
   `);
 
   // 2. pending → ready quando deps satisfeitas (ou root sem deps)
-  const readyRows = await dbAdmin.execute<{ id: string }>(sql`
+  await dbAdmin.execute(sql`
     UPDATE publication_steps ps
     SET status = 'ready'
     WHERE ps.batch_id = ${batchId}
@@ -122,7 +122,6 @@ export async function resolveReadySteps(batchId: string): Promise<string[]> {
         WHERE sd.step_id = ps.id
           AND dep.status NOT IN ('succeeded', 'skipped')
       )
-    RETURNING ps.id
   `);
 
   // 3. pending → skipped (não-crítico com dep falhada)
@@ -140,7 +139,22 @@ export async function resolveReadySteps(batchId: string): Promise<string[]> {
       )
   `);
 
-  return readyRows.map((r) => r.id);
+  // 4. Retorna TODOS os steps em 'ready' do batch, não só os que
+  // transicionaram neste tick. TD-019: a versão anterior usava RETURNING
+  // no UPDATE (2), perdendo os steps que (a) foram promovidos de
+  // retryable_failed no passo (1) acima ou (b) já estavam ready de
+  // ticks anteriores. Resultado: após o 1º fail de um step retryable,
+  // o worker reportava 'evaluated' em loop eterno. Agora o ciclo do
+  // retry converge (backoff expira → UPDATE 1 promove → SELECT vê →
+  // executeStep roda → 3 attempts → failed → evaluateBatchCompletion
+  // finaliza).
+  const rows = await dbAdmin.execute<{ id: string }>(sql`
+    SELECT id FROM publication_steps
+    WHERE batch_id = ${batchId}
+      AND status = 'ready'
+    ORDER BY ordinal ASC
+  `);
+  return rows.map((r) => r.id);
 }
 
 /**
@@ -366,13 +380,16 @@ export async function evaluateBatchCompletion(batchId: string): Promise<void> {
 
 async function finalizeBatch(
   batchId: string,
-  status: "succeeded" | "partial_success" | "failed",
+  status: "succeeded" | "partial_success" | "failed" | "cancelled",
 ): Promise<void> {
-  // 1. Finaliza batch em si (sempre acontece)
+  // 1. Finaliza batch em si (sempre acontece). Cancel pode chegar aqui
+  // vindo de /api/batches/[id]/cancel — batch pode já estar em status
+  // 'cancelled' (cancel route faz UPDATE preventivo). Este UPDATE é
+  // idempotente: seta completed_at/lock=NULL caso ainda não estejam.
   await dbAdmin.execute(sql`
     UPDATE publication_batches
     SET status = ${status}::batch_status,
-        completed_at = NOW(),
+        completed_at = COALESCE(completed_at, NOW()),
         locked_by = NULL,
         locked_at = NULL
     WHERE id = ${batchId}
@@ -380,7 +397,9 @@ async function finalizeBatch(
 
   // 2. Propaga status pro test_rounds (só se batchType = test_round_publish).
   // Regra "status reflete tráfego real": succeeded=live, failed=failed,
-  // partial_success inspeciona activate_ads pra decidir.
+  // partial_success inspeciona activate_ads pra decidir. Cancelled reverte
+  // pra 'reviewing' (batch foi abortado pelo usuário, round volta pro
+  // estado pré-publicação pra permitir novo batch).
   const [batch] = await dbAdmin
     .select({
       batchType: publicationBatches.batchType,
@@ -442,6 +461,8 @@ async function finalizeBatch(
  * Regra "status reflete tráfego real":
  *   succeeded          → live (all good)
  *   failed             → failed (algo crítico quebrou)
+ *   cancelled          → reviewing (cancel é reversível, round volta ao
+ *                        estado pré-batch pra permitir re-publicação)
  *   partial_success    → depende do activate_ads:
  *     activate_ads.succeeded         → live (ads foram ativados, tráfego real)
  *     activate_ads não sucedeu       → failed (zero tráfego)
@@ -451,13 +472,16 @@ async function finalizeBatch(
  */
 async function resolveTestRoundStatus(
   batchId: string,
-  batchStatus: "succeeded" | "partial_success" | "failed",
+  batchStatus: "succeeded" | "partial_success" | "failed" | "cancelled",
 ): Promise<{ roundStatus: string; reason: string }> {
   if (batchStatus === "succeeded") {
     return { roundStatus: "live", reason: "all_steps_succeeded" };
   }
   if (batchStatus === "failed") {
     return { roundStatus: "failed", reason: "critical_step_failed" };
+  }
+  if (batchStatus === "cancelled") {
+    return { roundStatus: "reviewing", reason: "cancelled_by_user" };
   }
 
   // partial_success — inspeciona activate_ads
@@ -491,6 +515,10 @@ async function resolveTestRoundStatus(
     reason: `partial_success_no_active_traffic_activate_step_${activateStep.status}`,
   };
 }
+
+// Exportado pra /api/batches/[id]/cancel chamar e fechar o fluxo completo
+// (test_rounds.status + step_events batch-level). TD-020.
+export { finalizeBatch };
 
 async function getBatchStatus(batchId: string): Promise<string | null> {
   const [row] = await dbAdmin

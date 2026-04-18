@@ -20,6 +20,15 @@ export type StepErrorCode =
 export function classifyError(error: unknown): StepErrorCode {
   const msg = error instanceof Error ? error.message : String(error);
 
+  // HTTP 4xx de fetch nosso (ex: upload_image buscando blob URL morto).
+  // TD-018: 4xx é non-retryable — recurso que retornou 404/403/401 hoje
+  // não vai virar 200 em 5s. Poupa ~105s de backoff (5+20+80) até failed.
+  // Match em mensagens do tipo "blob fetch failed 404", "HTTP 403", etc.
+  if (/\b(4\d{2})\b.*(?:fetch|http|status|failed)/i.test(msg) ||
+      /(?:fetch|http|status)[^\d]{0,20}\b4\d{2}\b/i.test(msg)) {
+    return "META_VALIDATION"; // reusa non-retryable existing code
+  }
+
   // Meta API
   if (msg.includes("code 17") || /rate.?limit/i.test(msg)) return "META_RATE_LIMIT";
   if (msg.includes("code 190") || /access.?token/i.test(msg)) return "META_AUTH_EXPIRED";
@@ -27,7 +36,7 @@ export function classifyError(error: unknown): StepErrorCode {
   if (msg.includes("code 506") || /duplicate/i.test(msg)) return "META_DUPLICATE";
   if (msg.includes("code 2") || /temporary error/i.test(msg)) return "META_TEMPORARY";
 
-  // Network
+  // Network (conexão real) — retryable
   if (/ECONNREFUSED|ETIMEDOUT|fetch failed|ENOTFOUND/i.test(msg)) return "NETWORK";
 
   // Storage

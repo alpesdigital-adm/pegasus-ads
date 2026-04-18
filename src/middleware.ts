@@ -1,33 +1,58 @@
 import { NextRequest, NextResponse } from "next/server";
+import { httpRequestsTotal, httpRequestDuration } from "@/lib/metrics";
 
 const PUBLIC_PATHS = ["/login", "/register", "/api/auth/", "/api/docs"];
 
-export function middleware(req: NextRequest) {
+// Normaliza path pra evitar cardinality explosion nos labels Prometheus.
+// /api/campaigns/abc-123/drill → /api/campaigns/:id/drill
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const NUMERIC_RE = /^\d+$/;
+function routeLabel(pathname: string): string {
+  return pathname
+    .split("/")
+    .map((seg) => (UUID_RE.test(seg) || NUMERIC_RE.test(seg) ? ":id" : seg))
+    .join("/");
+}
+
+export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
+  const startNs = process.hrtime.bigint();
 
-  // Allow public paths
+  // Não auto-observa o próprio scrape — o Prometheus bateria em si mesmo.
+  const skipMetrics = pathname === "/api/metrics";
+
+  let response: NextResponse;
+
+  // ── Auth redirect existente (preservado) ────────────────────────────
   if (PUBLIC_PATHS.some((p) => pathname.startsWith(p))) {
-    return NextResponse.next();
+    response = NextResponse.next();
+  } else if (pathname.startsWith("/api/")) {
+    // API routes têm requireAuth interno — middleware só passa.
+    response = NextResponse.next();
+  } else if (pathname.startsWith("/_next/") || pathname.startsWith("/favicon")) {
+    response = NextResponse.next();
+  } else {
+    const session = req.cookies.get("pegasus_session");
+    if (!session?.value) {
+      response = NextResponse.redirect(new URL("/login", req.url));
+    } else {
+      response = NextResponse.next();
+    }
   }
 
-  // Allow all API routes (they have their own auth via requireAuth)
-  if (pathname.startsWith("/api/")) {
-    return NextResponse.next();
+  // ── Métricas ────────────────────────────────────────────────────────
+  if (!skipMetrics) {
+    const seconds = Number(process.hrtime.bigint() - startNs) / 1e9;
+    const labels = {
+      method: req.method,
+      route: routeLabel(pathname),
+      status: String(response.status),
+    };
+    httpRequestsTotal.inc(labels);
+    httpRequestDuration.observe(labels, seconds);
   }
 
-  // Allow static assets
-  if (pathname.startsWith("/_next/") || pathname.startsWith("/favicon")) {
-    return NextResponse.next();
-  }
-
-  // Check for session cookie on protected pages
-  const session = req.cookies.get("pegasus_session");
-  if (!session?.value) {
-    const loginUrl = new URL("/login", req.url);
-    return NextResponse.redirect(loginUrl);
-  }
-
-  return NextResponse.next();
+  return response;
 }
 
 export const config = {

@@ -4,20 +4,21 @@
  * Modelo de atribuição first-touch + any-touch (tarefa 3.5).
  * Combina métricas de captação (Meta Ads) com dados validados de conversão (T4).
  *
- * Retorna:
- * {
- *   first_touch: { cpl, leads, conv_rate, projected_revenue, description }
- *   any_touch:   { cpl_adjusted, leads_adjusted, conv_rate_adjusted, multi_ebook_lift }
- *   live_metrics: { total_spend, total_leads, avg_cpl, campaign_key }
- *   context: { validated_at, source, notes }
- * }
- *
  * Query params:
  *   - campaign_key  (optional, default T7_0003_RAT)
  *   - period        (optional, "7d" | "30d" | "all", default "all")
+ *
+ * MIGRADO NA FASE 1C (Wave 2):
+ *  - getDb() → withWorkspace (RLS)
+ *  - 2 aggregate queries em sql`` tagged (LEFT JOIN + SUM + CASE)
+ *  - BUG CROSS-TENANT CORRIGIDO: o código legado não tinha filtro
+ *    WHERE workspace_id = ? — agregava métricas de TODAS as workspaces.
+ *    Agora com withWorkspace + RLS, filtragem é automática e correta.
+ *    Se o Track F de smoke test revelar números diferentes antes/depois
+ *    deste commit, é porque antes misturava dados de múltiplas workspaces.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { getDb } from "@/lib/db";
+import { withWorkspace, sql } from "@/lib/db";
 import { requireAuth } from "@/lib/auth";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
 
@@ -32,20 +33,28 @@ const T4_VALIDATED = {
   conv_rate_total: 0.0195,            // 1,95% — inclui orgânico/indicação
   sample_leads_first_touch: 233,
   sample_total_leads: 16136,
-  // Efeito multi-ebook (any-touch): uplift na conversão
   multi_ebook_effect: {
     one_ebook: 0.0122,    // 1,22%
     two_ebooks: 0.0457,   // 4,57%
     three_plus: 0.0624,   // 6,24%
   },
-  // Ebooks de meio-de-funil têm 100-229% mais presença any-touch vs first-touch
-  mid_funnel_any_touch_multiplier: 1.65,  // média conservadora
+  mid_funnel_any_touch_multiplier: 1.65,
 };
 
-function periodFilter(period: string): string {
-  if (period === "7d") return `AND m.date >= (CURRENT_DATE - INTERVAL '7 days')::TEXT`;
-  if (period === "30d") return `AND m.date >= (CURRENT_DATE - INTERVAL '30 days')::TEXT`;
-  return "";
+type Period = "7d" | "30d" | "all";
+
+function periodDateThreshold(period: Period): string | null {
+  if (period === "7d") {
+    const d = new Date();
+    d.setDate(d.getDate() - 7);
+    return d.toISOString().split("T")[0];
+  }
+  if (period === "30d") {
+    const d = new Date();
+    d.setDate(d.getDate() - 30);
+    return d.toISOString().split("T")[0];
+  }
+  return null;
 }
 
 export async function GET(req: NextRequest) {
@@ -53,68 +62,69 @@ export async function GET(req: NextRequest) {
   if (auth instanceof NextResponse) return auth;
 
   try {
-    const db = getDb();
     const { searchParams } = new URL(req.url);
     const campaignKey = searchParams.get("campaign_key") ?? "T7_0003_RAT";
-    const period = searchParams.get("period") ?? "all";
+    const period = (searchParams.get("period") ?? "all") as Period;
 
     const campaign = KNOWN_CAMPAIGNS[campaignKey];
     const cplTarget = campaign?.cplTarget ?? T4_VALIDATED.cpl_ebook_first_touch;
 
-    // ── Métricas ao vivo do banco ──
-    const periodSql = periodFilter(period);
-    const liveRes = await db.execute(`
-      SELECT
-        COALESCE(SUM(m.spend), 0)       AS total_spend,
-        COALESCE(SUM(m.leads), 0)       AS total_leads,
-        COALESCE(SUM(m.impressions), 0) AS total_impressions,
-        COALESCE(SUM(m.clicks), 0)      AS total_clicks
-      FROM metrics m
-      JOIN creatives c ON c.id = m.creative_id
-      WHERE c.status NOT IN ('killed')
-      ${periodSql}
-    `);
+    const dateThreshold = periodDateThreshold(period);
 
-    const live = liveRes.rows[0] as {
-      total_spend: string; total_leads: string;
-      total_impressions: string; total_clicks: string;
-    };
+    // Aggregates — live + top creatives — dentro da mesma transaction
+    // (withWorkspace escopa workspace_id via RLS em c, m).
+    const { live, topCreatives } = await withWorkspace(auth.workspace_id, async (tx) => {
+      const liveResult = await tx.execute(sql`
+        SELECT
+          COALESCE(SUM(m.spend), 0)       AS total_spend,
+          COALESCE(SUM(m.leads), 0)       AS total_leads,
+          COALESCE(SUM(m.impressions), 0) AS total_impressions,
+          COALESCE(SUM(m.clicks), 0)      AS total_clicks
+        FROM metrics m
+        JOIN creatives c ON c.id = m.creative_id
+        WHERE c.status NOT IN ('killed')
+        ${dateThreshold ? sql`AND m.date >= ${dateThreshold}` : sql``}
+      `);
+      const liveRows = liveResult as unknown as Array<Record<string, unknown>>;
 
-    const totalSpend = parseFloat(live.total_spend) || 0;
-    const totalLeads = parseInt(live.total_leads) || 0;
+      const topResult = await tx.execute(sql`
+        SELECT
+          c.name,
+          c.id,
+          COALESCE(SUM(m.spend), 0) AS spend,
+          COALESCE(SUM(m.leads), 0) AS leads,
+          CASE WHEN SUM(m.leads) > 0 THEN SUM(m.spend) / SUM(m.leads) ELSE NULL END AS cpl
+        FROM creatives c
+        JOIN metrics m ON m.creative_id = c.id
+        WHERE c.status NOT IN ('killed')
+        ${dateThreshold ? sql`AND m.date >= ${dateThreshold}` : sql``}
+        GROUP BY c.id, c.name
+        HAVING SUM(m.leads) > 0
+        ORDER BY cpl ASC
+        LIMIT 10
+      `);
+      const topRows = topResult as unknown as Array<Record<string, unknown>>;
+
+      return {
+        live: liveRows[0] ?? {},
+        topCreatives: topRows,
+      };
+    });
+
+    const totalSpend = parseFloat(String(live.total_spend ?? 0)) || 0;
+    const totalLeads = parseInt(String(live.total_leads ?? 0)) || 0;
     const liveCpl = totalLeads > 0 ? totalSpend / totalLeads : null;
 
     // ── First-touch attribution ──
-    // CPL do banco (captação); conversão baseada no T4 validado
     const ftCpl = liveCpl ?? cplTarget;
     const ftConvRate = T4_VALIDATED.conv_rate_first_touch;
     const ftProjectedMatriculas = Math.round(totalLeads * ftConvRate);
-    const ftProjectedRevenue = ftProjectedMatriculas; // multiplied by ticket externally
 
     // ── Any-touch attribution ──
-    // Efeito multi-ebook: upside de 1,65x na conversão para leads que passaram por múltiplos ebooks
     const atConvRate = ftConvRate * T4_VALIDATED.mid_funnel_any_touch_multiplier;
     const atLeadsAdjusted = Math.round(totalLeads * T4_VALIDATED.mid_funnel_any_touch_multiplier);
     const atProjectedMatriculas = Math.round(totalLeads * atConvRate);
     const multiEbookLift = ((atConvRate - ftConvRate) / ftConvRate) * 100;
-
-    // ── Breakdown por criativo (top performers) ──
-    const topRes = await db.execute(`
-      SELECT
-        c.name,
-        c.id,
-        COALESCE(SUM(m.spend), 0) AS spend,
-        COALESCE(SUM(m.leads), 0) AS leads,
-        CASE WHEN SUM(m.leads) > 0 THEN SUM(m.spend) / SUM(m.leads) ELSE NULL END AS cpl
-      FROM creatives c
-      JOIN metrics m ON m.creative_id = c.id
-      WHERE c.status NOT IN ('killed')
-      ${periodSql}
-      GROUP BY c.id, c.name
-      HAVING SUM(m.leads) > 0
-      ORDER BY cpl ASC
-      LIMIT 10
-    `);
 
     return NextResponse.json({
       campaign_key: campaignKey,
@@ -123,8 +133,8 @@ export async function GET(req: NextRequest) {
       live_metrics: {
         total_spend: totalSpend,
         total_leads: totalLeads,
-        total_impressions: parseInt(live.total_impressions) || 0,
-        total_clicks: parseInt(live.total_clicks) || 0,
+        total_impressions: parseInt(String(live.total_impressions ?? 0)) || 0,
+        total_clicks: parseInt(String(live.total_clicks ?? 0)) || 0,
         avg_cpl: liveCpl,
         cpl_target: cplTarget,
         cpl_vs_target_pct: liveCpl ? ((liveCpl - cplTarget) / cplTarget) * 100 : null,
@@ -153,12 +163,12 @@ export async function GET(req: NextRequest) {
         },
       },
 
-      top_creatives_by_cpl: topRes.rows.map(r => ({
+      top_creatives_by_cpl: topCreatives.map((r) => ({
         name: r.name,
         id: r.id,
-        spend: parseFloat(r.spend as string),
-        leads: parseInt(r.leads as string),
-        cpl: r.cpl ? parseFloat(r.cpl as string) : null,
+        spend: parseFloat(String(r.spend ?? 0)),
+        leads: parseInt(String(r.leads ?? 0)),
+        cpl: r.cpl ? parseFloat(String(r.cpl)) : null,
       })),
 
       context: {

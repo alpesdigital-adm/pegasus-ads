@@ -55,6 +55,30 @@ que roda em produção, e o runbook de debug quando algo quebra.
   (comparação constant-time via `timingSafeEqual`).
 - Sem token → 503 (fail-safe, não expõe métricas abertas).
 
+### ⚠ Proxy (`src/proxy.ts`) NÃO instrumenta HTTP
+Em Next 16, `proxy.ts` (sucessor de `middleware.ts`) roda em contexto
+isolado das routes — module-level state não é compartilhado. Se
+incrementássemos `http_requests_total` lá, o counter subiria num
+registry que o `/api/metrics` (route handler) não enxerga.
+
+**Decisão:** o proxy só cuida do redirect de auth. HTTP metrics são
+coletadas por `instrumentRoute(routeName, handler)` em
+`src/lib/metrics.ts`, que wrapa handler a handler. Uso:
+
+```ts
+import { instrumentRoute } from "@/lib/metrics";
+
+export const GET = instrumentRoute("/api/foo", async (req) => {
+  // ... handler normal
+  return NextResponse.json({ ok: true });
+});
+```
+
+Routes rodam no mesmo processo que o `/api/metrics` scrape, então o
+counter incrementado por `instrumentRoute` aparece no scrape. Wrappers
+ainda não aplicados em produção — roll-out é per-rota; priorizar
+routes de alto tráfego (cron, insights, reports).
+
 ### Prometheus
 - Container `pegasus-prometheus` na network `alpes-ads_supabase_default`
   (sem ingress externo — só o Grafana fala com ele).
@@ -169,6 +193,10 @@ adicionar `@sentry/nextjs`, wire em `instrumentation.ts` via
 
 ## TODOs conhecidos
 
+- **Rollout do `instrumentRoute`**: aplicar o wrapper nas routes de alto
+  tráfego (cron/*, insights/*, reports/*, generate/*). Uma rota por vez
+  pra validar que o scrape pega. Sem wrapper hoje, só métricas default
+  (CPU, memória, event loop) populam o Grafana.
 - **DB pool gauge**: `pegasus_db_connections_active` / `_idle` —
   precisa expor via periodic collector lendo o pool do postgres-js.
   Ainda não wirado.

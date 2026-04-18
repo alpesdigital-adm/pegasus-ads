@@ -1,58 +1,38 @@
 import { NextRequest, NextResponse } from "next/server";
-import { httpRequestsTotal, httpRequestDuration } from "@/lib/metrics";
 
 const PUBLIC_PATHS = ["/login", "/register", "/api/auth/", "/api/docs"];
 
-// Normaliza path pra evitar cardinality explosion nos labels Prometheus.
-// /api/campaigns/abc-123/drill → /api/campaigns/:id/drill
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const NUMERIC_RE = /^\d+$/;
-function routeLabel(pathname: string): string {
-  return pathname
-    .split("/")
-    .map((seg) => (UUID_RE.test(seg) || NUMERIC_RE.test(seg) ? ":id" : seg))
-    .join("/");
-}
-
+// Proxy (sucessor de middleware em Next 16) roda em contexto isolado das
+// routes — module-level state NÃO é compartilhado. Por isso não
+// instrumentamos prom-client aqui: o counter incrementaria em um registry
+// diferente do que /api/metrics lê. HTTP metrics ficam pra um wrapper de
+// route handler numa iteração futura (ver docs/observability.md TODOs).
 export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
-  const startNs = process.hrtime.bigint();
 
-  // Não auto-observa o próprio scrape — o Prometheus bateria em si mesmo.
-  const skipMetrics = pathname === "/api/metrics";
-
-  let response: NextResponse;
-
-  // ── Auth redirect existente (preservado) ────────────────────────────
+  // Allow public paths
   if (PUBLIC_PATHS.some((p) => pathname.startsWith(p))) {
-    response = NextResponse.next();
-  } else if (pathname.startsWith("/api/")) {
-    // API routes têm requireAuth interno — middleware só passa.
-    response = NextResponse.next();
-  } else if (pathname.startsWith("/_next/") || pathname.startsWith("/favicon")) {
-    response = NextResponse.next();
-  } else {
-    const session = req.cookies.get("pegasus_session");
-    if (!session?.value) {
-      response = NextResponse.redirect(new URL("/login", req.url));
-    } else {
-      response = NextResponse.next();
-    }
+    return NextResponse.next();
   }
 
-  // ── Métricas ────────────────────────────────────────────────────────
-  if (!skipMetrics) {
-    const seconds = Number(process.hrtime.bigint() - startNs) / 1e9;
-    const labels = {
-      method: req.method,
-      route: routeLabel(pathname),
-      status: String(response.status),
-    };
-    httpRequestsTotal.inc(labels);
-    httpRequestDuration.observe(labels, seconds);
+  // Allow all API routes (they have their own auth via requireAuth)
+  if (pathname.startsWith("/api/")) {
+    return NextResponse.next();
   }
 
-  return response;
+  // Allow static assets
+  if (pathname.startsWith("/_next/") || pathname.startsWith("/favicon")) {
+    return NextResponse.next();
+  }
+
+  // Check for session cookie on protected pages
+  const session = req.cookies.get("pegasus_session");
+  if (!session?.value) {
+    const loginUrl = new URL("/login", req.url);
+    return NextResponse.redirect(loginUrl);
+  }
+
+  return NextResponse.next();
 }
 
 export const config = {

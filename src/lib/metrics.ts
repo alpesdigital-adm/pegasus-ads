@@ -68,3 +68,37 @@ export const metaApiCallsTotal = counter(
   "Chamadas a Meta Graph API por endpoint/status",
   ["endpoint", "status"],
 );
+
+// ── Route wrapper — uso manual por rota ─────────────────────────────────
+// Proxy/middleware roda em contexto isolado das routes em Next 16, então
+// não dá pra instrumentar HTTP de lá. Esta wrapper aplica por route:
+//
+//   export const GET = instrumentRoute("/api/foo", async (req) => {...});
+//
+// Routes compartilham o mesmo process do /api/metrics scrape → o counter
+// incrementado aqui aparece no /api/metrics.
+type RouteHandler = (
+  req: Request,
+  ctx?: { params: Promise<Record<string, string | string[]>> },
+) => Promise<Response>;
+
+export function instrumentRoute<H extends RouteHandler>(
+  routeName: string,
+  handler: H,
+): H {
+  const wrapped: RouteHandler = async (req, ctx) => {
+    const start = process.hrtime.bigint();
+    let status = "500";
+    try {
+      const response = await handler(req, ctx);
+      status = String(response.status);
+      return response;
+    } finally {
+      const seconds = Number(process.hrtime.bigint() - start) / 1e9;
+      const labels = { method: req.method, route: routeName, status };
+      httpRequestsTotal.inc(labels);
+      httpRequestDuration.observe(labels, seconds);
+    }
+  };
+  return wrapped as H;
+}

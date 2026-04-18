@@ -263,30 +263,43 @@ export async function adminGetUserByEmail(email: string): Promise<SupabaseUser |
 // Nomes alinhados com @supabase/ssr para compatibilidade com o pacote oficial
 // se migrarmos depois. Access token é curto (1h), refresh token 30d.
 
+import type { NextResponse } from "next/server";
+
 export const SUPABASE_ACCESS_COOKIE = "sb-access-token";
 export const SUPABASE_REFRESH_COOKIE = "sb-refresh-token";
 
 const ACCESS_COOKIE_MAX_AGE = 60 * 60; // 1h
 const REFRESH_COOKIE_MAX_AGE = 60 * 60 * 24 * 30; // 30d
 
-export function buildAuthCookieAttrs(isProduction: boolean, maxAge: number): {
+interface CookieAttrs {
   httpOnly: boolean;
   secure: boolean;
   sameSite: "lax";
   maxAge: number;
   path: string;
-} {
+}
+
+function cookieAttrs(maxAge: number): CookieAttrs {
   return {
     httpOnly: true,
-    secure: isProduction,
+    secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
     maxAge,
     path: "/",
   };
 }
 
-export const ACCESS_COOKIE_OPTS = (isProd: boolean) =>
-  buildAuthCookieAttrs(isProd, ACCESS_COOKIE_MAX_AGE);
+export function setSupabaseCookies(
+  response: NextResponse,
+  session: { access_token: string; refresh_token: string },
+): NextResponse {
+  response.cookies.set(SUPABASE_ACCESS_COOKIE, session.access_token, cookieAttrs(ACCESS_COOKIE_MAX_AGE));
+  response.cookies.set(SUPABASE_REFRESH_COOKIE, session.refresh_token, cookieAttrs(REFRESH_COOKIE_MAX_AGE));
+  return response;
+}
 
-export const REFRESH_COOKIE_OPTS = (isProd: boolean) =>
-  buildAuthCookieAttrs(isProd, REFRESH_COOKIE_MAX_AGE);
+export function clearSupabaseCookies(response: NextResponse): NextResponse {
+  response.cookies.delete(SUPABASE_ACCESS_COOKIE);
+  response.cookies.delete(SUPABASE_REFRESH_COOKIE);
+  return response;
+}

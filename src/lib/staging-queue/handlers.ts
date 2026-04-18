@@ -23,6 +23,7 @@ import { dbAdmin } from "@/lib/db";
 import { testRounds } from "@/lib/db/schema";
 import { eq, sql } from "drizzle-orm";
 import * as meta from "@/lib/meta";
+import { verifyPrePublish as runVerifyPrePublish } from "@/lib/ai-verify";
 import { generateMetaAdName } from "@/lib/creative-naming";
 import { UTM_TEMPLATE } from "@/config/campaigns";
 import { logger } from "@/lib/logger";
@@ -461,6 +462,190 @@ async function findAdLabelByName(
   return rows.find((r) => r.name === name) ?? null;
 }
 
+// ─── verify_pre_publish ───────────────────────────────────────────────────
+/**
+ * Gate antes de uploads/creates. Reprova ads com naming inválido, imagens
+ * ausentes, attribution/bid/targeting/promoted_object incompletos, budget
+ * abaixo de R$5 (warning, não-crítico).
+ *
+ * Input: { adName, adSetName, feedImageReady, storiesImageReady,
+ *          hasAttribution, hasBidStrategy, hasTargeting, hasPromotedObject,
+ *          dailyBudgetCents }
+ *         — tudo derivado pelo factory do load_context.output.adSetTemplate
+ *           + do shape do VariantPair (feed+stories presentes = ready).
+ *
+ * Output: VerificationCheckpoint (passed, issues, suggestions, score).
+ *
+ * Se !passed → throw META_VALIDATION (non-retryable). Problema estrutural
+ * (naming, falta de config) não muda em retry.
+ */
+async function handleVerifyPrePublish(
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const adName = input.adName as string | undefined;
+  const adSetName = input.adSetName as string | undefined;
+
+  if (!adName || !adSetName) {
+    throw new Error(
+      "META_VALIDATION: verify_pre_publish requires adName, adSetName",
+    );
+  }
+
+  const result = runVerifyPrePublish({
+    adName,
+    adSetName,
+    feedImageReady: input.feedImageReady !== false,
+    storiesImageReady: input.storiesImageReady !== false,
+    hasAttribution: input.hasAttribution !== false,
+    hasBidStrategy: !!input.hasBidStrategy,
+    hasTargeting: !!input.hasTargeting,
+    hasPromotedObject: !!input.hasPromotedObject,
+    dailyBudgetCents: Number(input.dailyBudgetCents ?? 0) || undefined,
+    campaignObjective: input.campaignObjective as string | undefined,
+  });
+
+  if (!result.passed) {
+    throw new Error(
+      `META_VALIDATION: pre_publish failed for ${adName} — ${result.issues.join("; ")}`,
+    );
+  }
+
+  return {
+    passed: true,
+    score: result.score,
+    issues: result.issues,
+    suggestions: result.suggestions,
+    verifiedAt: result.verified_at,
+  };
+}
+
+// ─── create_creative ──────────────────────────────────────────────────────
+/**
+ * Cria creative Meta com asset_feed_spec (feed+stories customization rules).
+ * Assinatura espelha meta.createCreative — estrutura validada em prod.
+ *
+ * Input (montado pelo factory via propagação do DAG):
+ *   - accountId, pageId, instagramUserId  ← load_context
+ *   - adName                               ← factory (nome do ad lógico)
+ *   - feedImageHash                        ← upload_image feed (outputKey='imageHash')
+ *   - storiesImageHash                     ← upload_image stories
+ *   - feedLabelId                          ← create_ad_label feed (outputKey='labelId')
+ *   - storiesLabelId                       ← create_ad_label stories
+ *   - adContent: {body, title, link, callToAction}  ← load_context
+ *   - urlTags                              ← load_context
+ *
+ * Output: { metaCreativeId, metaEntityId, metaEntityType='creative' }
+ *
+ * Idempotência: retry pode criar creative duplicado na Meta. Débito aceito
+ * (<1/mês), reconciliation semanal cobre (Fase 5).
+ */
+async function handleCreateCreative(
+  input: Record<string, unknown>,
+  workspaceId: string,
+): Promise<Record<string, unknown>> {
+  const required = [
+    "accountId",
+    "pageId",
+    "instagramUserId",
+    "adName",
+    "feedImageHash",
+    "storiesImageHash",
+    "feedLabelId",
+    "storiesLabelId",
+    "adContent",
+  ];
+  for (const key of required) {
+    if (!input[key]) {
+      throw new Error(`META_VALIDATION: create_creative requires ${key}`);
+    }
+  }
+
+  const adContent = input.adContent as AdContent;
+  if (!adContent.body || !adContent.title || !adContent.link) {
+    throw new Error(
+      "META_VALIDATION: create_creative.adContent must have body, title, link",
+    );
+  }
+
+  const result = await meta.createCreative({
+    accountId: input.accountId as string,
+    workspaceId,
+    name: input.adName as string,
+    pageId: input.pageId as string,
+    instagramUserId: input.instagramUserId as string,
+    feedImageHash: input.feedImageHash as string,
+    storiesImageHash: input.storiesImageHash as string,
+    feedLabelId: input.feedLabelId as string,
+    storiesLabelId: input.storiesLabelId as string,
+    body: adContent.body,
+    title: adContent.title,
+    link: adContent.link,
+    callToAction: adContent.callToAction,
+    urlTags: (input.urlTags as string | undefined) ?? UTM_TEMPLATE,
+  });
+
+  log.info({ adName: input.adName, creativeId: result.id }, "creative created");
+
+  return {
+    metaCreativeId: result.id,
+    metaEntityId: result.id,
+    metaEntityType: "creative",
+  };
+}
+
+// ─── create_adset ─────────────────────────────────────────────────────────
+/**
+ * Cria ad set Meta clonando adSetTemplate carregado pelo load_context.
+ * Attribution fixa em 1d click (alinhado com lead campaigns).
+ *
+ * Status: sempre ACTIVE — ad set rodando permite que os ads filhos sirvam
+ * quando ativados. O gate de atividade fica nos ads (via activationMode
+ * do batch: after_all cria PAUSED, immediate cria ACTIVE).
+ *
+ * Input:
+ *   - accountId, metaCampaignId  ← load_context
+ *   - adSetTemplate              ← load_context (objeto consolidado)
+ *
+ * Output: { metaAdsetId, metaEntityId, metaEntityType='adset' }
+ */
+async function handleCreateAdSet(
+  input: Record<string, unknown>,
+  workspaceId: string,
+): Promise<Record<string, unknown>> {
+  const accountId = input.accountId as string | undefined;
+  const metaCampaignId = input.metaCampaignId as string | undefined;
+  const tpl = input.adSetTemplate as AdSetTemplate | undefined;
+
+  if (!accountId || !metaCampaignId || !tpl) {
+    throw new Error(
+      "META_VALIDATION: create_adset requires accountId, metaCampaignId, adSetTemplate",
+    );
+  }
+
+  const result = await meta.createAdSet({
+    accountId,
+    workspaceId,
+    campaignId: metaCampaignId,
+    name: tpl.name,
+    dailyBudgetCents: tpl.dailyBudgetCents,
+    bidStrategy: tpl.bidStrategy,
+    billingEvent: tpl.billingEvent,
+    optimizationGoal: tpl.optimizationGoal,
+    targeting: tpl.targeting,
+    promotedObject: tpl.promotedObject,
+    attributionSpec: [{ event_type: "CLICK_THROUGH", window_days: 1 }],
+    status: "ACTIVE",
+  });
+
+  log.info({ name: tpl.name, adSetId: result.id }, "ad set created");
+
+  return {
+    metaAdsetId: result.id,
+    metaEntityId: result.id,
+    metaEntityType: "adset",
+  };
+}
+
 // ─── stubs ────────────────────────────────────────────────────────────────
 /**
  * Stub — lança NOT_IMPLEMENTED pra forçar isNonRetryable=true → falha
@@ -481,11 +666,13 @@ export const stepHandlers: Record<string, StepHandler> = {
   upload_image: handleUploadImage,
   create_ad_label: handleCreateAdLabel,
 
-  // ── Fase 2B-D (próximos commits) ──
-  create_creative: notImplemented("create_creative"),
-  create_adset: notImplemented("create_adset"),
+  // ── Fase 2B (implementados neste commit) ──
+  verify_pre_publish: handleVerifyPrePublish,
+  create_creative: handleCreateCreative,
+  create_adset: handleCreateAdSet,
+
+  // ── Fase 2C-D (próximos commits) ──
   create_ad: notImplemented("create_ad"),
-  verify_pre_publish: notImplemented("verify_pre_publish"),
   verify_post_publish: notImplemented("verify_post_publish"),
   activate_ads: notImplemented("activate_ads"),
   persist_results: notImplemented("persist_results"),

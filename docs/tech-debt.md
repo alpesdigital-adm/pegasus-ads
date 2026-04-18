@@ -355,37 +355,54 @@ pra invalidar cache em rotações futuras.
 
 ---
 
-## TD-014 — DATABASE_URL demo no container Supavisor 🔴 open
+## TD-014 — DATABASE_URL demo no container Supavisor 🟢 done
 
 **Descoberto:** 2026-04-18 (scripts/phase-2-supavisor/01-inspect.sh output)
-**Dono:** Claude (janela de rotação geral do cluster)
-**Impacto:** o container `alpes-ads_supabase-supavisor-1` tem
-`DATABASE_URL` (que o Supavisor usa pra acessar seu próprio metadata DB,
-não o DB do tenant) configurado com valor demo (length=84, padrão
-`supabase/supavisor`). Só acessível dentro da docker network — não é
-exploitable externamente hoje, mas permite acesso administrativo total
-ao metadata (tenants, users, connection specs) por qualquer container da
-mesma network.
+**Atualizado:** 2026-04-18 (isolation strategy executada, ~10s downtime)
+**Dono:** Claude (implementação) + Leandro (autorização)
+**Impacto:** resolvido via user dedicado em vez de rotação direta.
+Supavisor não usa mais superuser pra acessar metadata DB.
 
-**Contexto:** os segredos críticos (API_JWT_SECRET, SECRET_KEY_BASE,
-VAULT_ENC_KEY, METRICS_JWT_SECRET) JÁ foram rotacionados durante TD-006.
-DATABASE_URL não entrou naquela rotação porque é credencial de outro
-database (Postgres metadata interno do Supavisor).
+**Estado final:**
+- ✅ Role `supavisor_meta` (LOGIN, NÃO-superuser, NÃO-createdb, NÃO-createrole)
+- ✅ GRANTs escopados em `_supabase` + schemas `_supavisor` + `public`
+- ✅ `DATABASE_URL` do container Supavisor aponta pra `supavisor_meta`
+- ✅ Smoke 5/5: eval, tenants visíveis, /api/docs 200, login 401 (rota
+  roteando ok), pool do pegasus-ads funcionando, RLS via pool, logs green
+- ✅ `supabase_admin` sumiu do pool — migration limpa
+- ✅ Senha em `/root/.supavisor-meta-password` (mode 600)
+- ✅ Backups preservados (`.env.pre-td014-*` + `docker-compose.override.yml.pre-td014-*`)
 
-**Como resolver:**
-1. Gerar senha nova pro user que o Supavisor usa (provavelmente
-   `postgres` ou `supabase_admin` no database `postgres`)
-2. `ALTER USER <user> WITH PASSWORD '<nova>'` no Postgres
-3. Atualizar `DATABASE_URL` env var do container Supavisor + restart
-4. Conferir que Supavisor reconecta com a nova credencial
+**Abordagem:** escolhido isolation (CASO B do inspect) porque Supavisor
+estava usando `supabase_admin` (superuser cluster-wide). Rotação direta
+quebraria CRM/Studio/Realtime — isolar via role dedicada é
+least-privilege sem coordenação cross-app.
 
-**Riscos:**
-- Se fizer com tenants ativos no Supavisor, pooling pode ficar unavailable
-  durante o restart (~5-10s). Janela pequena mas visível.
-- Se o user for `postgres` (super), qualquer outra coisa no cluster que
-  use credencial `postgres` quebra também. CRM / Studio / Realtime
-  precisam ser verificados.
+**Efeito colateral operacional (cluster management — documentar):**
+`docker compose up -d supavisor --force-recreate` recriou também
+`db + vector + realtime` por conta de envs interpoladas cross-service
+via easypanel. Downtime real ~10s, cluster healthy rápido. Mudanças
+futuras em env do Supabase stack via easypanel devem prever esse
+side-effect em janela de maintenance.
 
-**Quando:** janela de manutenção coordenada com time CRM. Não é P1 —
-rede privada limita a exposição. Pode entrar em backlog de hardening de
-cluster junto com TD-002 se rolar pooling bem.
+**Peer review — follow-ups não-bloqueadores:**
+- GRANT `CREATE ON SCHEMA _supavisor` pode ser excessivo (Supavisor
+  provavelmente só escreve rows, não cria tabelas em runtime). Teste
+  seguro: REVOKE + observar 24h.
+- `_supabase` schema ganhou ALL PRIVILEGES em todas tables — escopo
+  pode ser reduzido após auditar quais tables dele pertencem ao
+  Supavisor vs outras ferramentas (Studio/Realtime).
+- Sem monitoring ativo — se role for revogada/deletada, pooling
+  quebra silenciosamente. Adicionar healthcheck no cron:
+  `SELECT 1 FROM _supavisor.tenants LIMIT 1` via pool.
+- Senha sem política de rotação — considerar reset a cada 180d ou
+  quando SSH access à VPS mudar.
+
+**Rollback disponível (não recomendado, mas documentado):**
+```bash
+cd /etc/easypanel/projects/alpes-ads/supabase/code/supabase/code
+cp .env.pre-td014-* .env
+cp docker-compose.override.yml.pre-td014-* docker-compose.override.yml
+docker compose -p alpes-ads_supabase up -d supavisor --force-recreate
+# opcional: DROP ROLE supavisor_meta
+```

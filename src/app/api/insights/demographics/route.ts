@@ -1,16 +1,22 @@
 /**
  * /api/insights/demographics  — Tarefa 2.3: Breakdowns demográficos
  *
- * POST — Coleta insights com breakdown age × gender e faz upsert em metrics_demographics
+ * POST — Coleta insights com breakdown age × gender e upsert em metrics_demographics
  * GET  — Lê métricas demográficas agregadas por criativo
+ *
+ * MIGRADO NA FASE 1C (Wave 3):
+ *  - getDb() → withWorkspace (RLS)
+ *  - 3 queries tipadas em Drizzle (published_ads lookup, upsert, aggregate)
+ *  - uuid() manual removido (defaultRandom cobre)
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { getCampaignAdsInsights } from "@/lib/meta";
-import { getDb } from "@/lib/db";
+import { withWorkspace, sql } from "@/lib/db";
+import { publishedAds, metricsDemographics } from "@/lib/db/schema";
 import { requireAuth } from "@/lib/auth";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
-import { v4 as uuid } from "uuid";
+import { inArray } from "drizzle-orm";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -29,14 +35,7 @@ export async function POST(req: NextRequest) {
   const auth = await requireAuth(req);
   if (auth instanceof NextResponse) return auth;
 
-  const db = getDb();
-
-  interface Body {
-    campaign_id?: string;
-    date_from?: string;
-    date_to?: string;
-  }
-
+  interface Body { campaign_id?: string; date_from?: string; date_to?: string }
   let body: Body = {};
   try {
     if (req.headers.get("content-type")?.includes("application/json")) {
@@ -46,66 +45,96 @@ export async function POST(req: NextRequest) {
 
   const defaultRange = getDateRange(7);
   const dateFrom = body.date_from || defaultRange.from;
-  const dateTo   = body.date_to   || defaultRange.to;
+  const dateTo = body.date_to || defaultRange.to;
   const campaignId = body.campaign_id || KNOWN_CAMPAIGNS["T7_0003_RAT"].metaCampaignId;
 
-  const insights = await getCampaignAdsInsights(campaignId, dateFrom, dateTo, auth.workspace_id, "age,gender");
+  const insights = await getCampaignAdsInsights(
+    campaignId, dateFrom, dateTo, auth.workspace_id, "age,gender",
+  );
 
   if (insights.length === 0) {
     return NextResponse.json({ collected: 0, upserted: 0, errors: [] });
   }
 
-  // Mapa meta_ad_id → creative_id
-  const adIds = [...new Set(insights.map((r) => r.meta_ad_id).filter(Boolean))];
-  const adMapRows = await db.execute({
-    sql: `SELECT meta_ad_id, creative_id FROM published_ads WHERE meta_ad_id = ANY(ARRAY[${adIds.map(() => "?").join(",")}]::text[]) AND workspace_id = ?`,
-    args: [...adIds, auth.workspace_id],
-  });
-  const adMap = new Map<string, string>();
-  for (const row of adMapRows.rows) {
-    adMap.set(row.meta_ad_id as string, row.creative_id as string);
-  }
+  const adIds = [...new Set(insights.map((r) => r.meta_ad_id).filter(Boolean) as string[])];
 
-  const errors: string[] = [];
-  let upserted = 0;
-  let skipped = 0;
+  const { upserted, skipped, errors } = await withWorkspace(
+    auth.workspace_id,
+    async (tx) => {
+      // Mapa meta_ad_id → creative_id
+      const adMapRows = await tx
+        .select({
+          metaAdId: publishedAds.metaAdId,
+          creativeId: publishedAds.creativeId,
+        })
+        .from(publishedAds)
+        .where(inArray(publishedAds.metaAdId, adIds));
 
-  for (const insight of insights) {
-    const creativeId = adMap.get(insight.meta_ad_id);
-    if (!creativeId) { skipped++; continue; }
+      const adMap = new Map<string, string>();
+      for (const row of adMapRows) {
+        if (row.metaAdId && row.creativeId) {
+          adMap.set(row.metaAdId, row.creativeId);
+        }
+      }
 
-    const age    = insight.age    ?? "unknown";
-    const gender = insight.gender ?? "unknown";
+      const errs: string[] = [];
+      let up = 0;
+      let sk = 0;
 
-    try {
-      await db.execute({
-        sql: `INSERT INTO metrics_demographics
-                (id, creative_id, date, age, gender,
-                 spend, impressions, cpm, ctr, clicks, cpc, leads, cpl, meta_ad_id, workspace_id)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-              ON CONFLICT (creative_id, date, age, gender) DO UPDATE SET
-                spend       = EXCLUDED.spend,
-                impressions = EXCLUDED.impressions,
-                cpm         = EXCLUDED.cpm,
-                ctr         = EXCLUDED.ctr,
-                clicks      = EXCLUDED.clicks,
-                cpc         = EXCLUDED.cpc,
-                leads       = EXCLUDED.leads,
-                cpl         = EXCLUDED.cpl,
-                meta_ad_id  = COALESCE(EXCLUDED.meta_ad_id, metrics_demographics.meta_ad_id)`,
-        args: [
-          uuid(), creativeId, insight.date_start, age, gender,
-          insight.spend, insight.impressions, insight.cpm,
-          insight.ctr, insight.clicks, insight.cpc,
-          insight.leads, insight.cpl, insight.meta_ad_id,
-          auth.workspace_id,
-        ],
-      });
-      upserted++;
-    } catch (err) {
-      errors.push(`ad ${insight.meta_ad_id} (${age}/${gender}): ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
+      for (const insight of insights) {
+        const creativeId = adMap.get(insight.meta_ad_id);
+        if (!creativeId) { sk++; continue; }
+
+        const age = insight.age ?? "unknown";
+        const gender = insight.gender ?? "unknown";
+
+        try {
+          await tx
+            .insert(metricsDemographics)
+            .values({
+              workspaceId: auth.workspace_id,
+              creativeId,
+              date: insight.date_start,
+              age,
+              gender,
+              spend: insight.spend,
+              impressions: insight.impressions,
+              cpm: insight.cpm,
+              ctr: insight.ctr,
+              clicks: insight.clicks,
+              cpc: insight.cpc,
+              leads: insight.leads,
+              cpl: insight.cpl,
+              metaAdId: insight.meta_ad_id,
+            })
+            .onConflictDoUpdate({
+              target: [
+                metricsDemographics.creativeId,
+                metricsDemographics.date,
+                metricsDemographics.age,
+                metricsDemographics.gender,
+              ],
+              set: {
+                spend: sql`EXCLUDED.spend`,
+                impressions: sql`EXCLUDED.impressions`,
+                cpm: sql`EXCLUDED.cpm`,
+                ctr: sql`EXCLUDED.ctr`,
+                clicks: sql`EXCLUDED.clicks`,
+                cpc: sql`EXCLUDED.cpc`,
+                leads: sql`EXCLUDED.leads`,
+                cpl: sql`EXCLUDED.cpl`,
+                metaAdId: sql`COALESCE(EXCLUDED.meta_ad_id, metrics_demographics.meta_ad_id)`,
+              },
+            });
+          up++;
+        } catch (err) {
+          errs.push(`ad ${insight.meta_ad_id} (${age}/${gender}): ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
+      return { upserted: up, skipped: sk, errors: errs };
+    },
+  );
 
   return NextResponse.json({
     collected: insights.length,
@@ -122,32 +151,20 @@ export async function GET(req: NextRequest) {
   const auth = await requireAuth(req);
   if (auth instanceof NextResponse) return auth;
 
-  const db = getDb();
   const { searchParams } = req.nextUrl;
   const creativeId = searchParams.get("creative_id");
-  const dateFrom   = searchParams.get("date_from");
-  const dateTo     = searchParams.get("date_to");
+  const dateFrom = searchParams.get("date_from");
+  const dateTo = searchParams.get("date_to");
 
-  const conditions: string[] = ["md.workspace_id = ?"];
-  const args: unknown[] = [auth.workspace_id];
+  const rows = await withWorkspace(auth.workspace_id, async (tx) => {
+    // Filtros opcionais compostos como sql`` fragments
+    const filters = [
+      creativeId ? sql`AND md.creative_id = ${creativeId}` : sql``,
+      dateFrom ? sql`AND md.date >= ${dateFrom}` : sql``,
+      dateTo ? sql`AND md.date <= ${dateTo}` : sql``,
+    ];
 
-  if (creativeId) {
-    conditions.push(`md.creative_id = ?`);
-    args.push(creativeId);
-  }
-  if (dateFrom) {
-    conditions.push(`md.date >= ?`);
-    args.push(dateFrom);
-  }
-  if (dateTo) {
-    conditions.push(`md.date <= ?`);
-    args.push(dateTo);
-  }
-
-  const whereClause = `WHERE ${conditions.join(" AND ")}`;
-
-  const result = await db.execute({
-    sql: `
+    const result = await tx.execute(sql`
       SELECT
         md.creative_id,
         c.name                                      AS creative_name,
@@ -164,11 +181,14 @@ export async function GET(req: NextRequest) {
         COUNT(DISTINCT md.date)                     AS days
       FROM metrics_demographics md
       JOIN creatives c ON c.id = md.creative_id
-      ${whereClause}
+      WHERE 1=1
+        ${filters[0]}
+        ${filters[1]}
+        ${filters[2]}
       GROUP BY md.creative_id, c.name, md.age, md.gender
       ORDER BY md.creative_id, md.age, md.gender
-    `,
-    args,
+    `);
+    return result as unknown as Array<Record<string, unknown>>;
   });
 
   type DemoRow = {
@@ -186,31 +206,31 @@ export async function GET(req: NextRequest) {
 
   const byCreative: Record<string, { name: string; rows: DemoRow[] }> = {};
 
-  for (const row of result.rows) {
+  for (const row of rows) {
     const cid = row.creative_id as string;
     if (!byCreative[cid]) {
       byCreative[cid] = { name: row.creative_name as string, rows: [] };
     }
     byCreative[cid].rows.push({
-      creative_id:   cid,
+      creative_id: cid,
       creative_name: row.creative_name as string,
-      age:           row.age as string,
-      gender:        row.gender as string,
-      spend:         Number(row.spend),
-      impressions:   Number(row.impressions),
-      leads:         Number(row.leads),
-      cpl:           row.cpl !== null ? Number(row.cpl) : null,
-      avg_ctr:       Number(row.avg_ctr),
-      days:          Number(row.days),
+      age: row.age as string,
+      gender: row.gender as string,
+      spend: Number(row.spend),
+      impressions: Number(row.impressions),
+      leads: Number(row.leads),
+      cpl: row.cpl !== null ? Number(row.cpl) : null,
+      avg_ctr: Number(row.avg_ctr),
+      days: Number(row.days),
     });
   }
 
   return NextResponse.json({
     creatives: Object.entries(byCreative).map(([id, data]) => ({
-      creative_id:   id,
+      creative_id: id,
       creative_name: data.name,
-      demographics:  data.rows,
+      demographics: data.rows,
     })),
-    total_records: result.rows.length,
+    total_records: rows.length,
   });
 }

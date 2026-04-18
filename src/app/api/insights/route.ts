@@ -10,12 +10,14 @@
  *   date_to       = YYYY-MM-DD (padrão: hoje)
  *   creative_id   = filtrar por criativo específico (opcional)
  *
- * Retorna métricas agregadas do DB local (não chama a Meta API).
- * Para coletar dados novos, usar POST /api/insights/collect.
+ * MIGRADO NA FASE 1C (Wave 3):
+ *  - getDb() → withWorkspace (RLS)
+ *  - 3 aggregates em sql`` (ad-level, campaign-level, adset-level)
+ *  - Filtros manuais workspace_id removidos (5 instâncias no legado)
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getDb } from "@/lib/db";
+import { withWorkspace, sql } from "@/lib/db";
 import { requireAuth } from "@/lib/auth";
 
 export const runtime = "nodejs";
@@ -32,9 +34,7 @@ export async function GET(req: NextRequest) {
   const auth = await requireAuth(req);
   if (auth instanceof NextResponse) return auth;
 
-  const db = getDb();
   const { searchParams } = req.nextUrl;
-
   const level = searchParams.get("level") || "ad";
   const defaultRange = getDefaultRange();
   const dateFrom = searchParams.get("date_from") || defaultRange.from;
@@ -43,18 +43,8 @@ export async function GET(req: NextRequest) {
 
   try {
     if (level === "ad" || level === "creative") {
-      const whereClause = [
-        `m.date >= ?`,
-        `m.date <= ?`,
-        `m.workspace_id = ?`,
-        creativeId ? `m.creative_id = ?` : null,
-      ].filter(Boolean).join(" AND ");
-
-      const args: unknown[] = [dateFrom, dateTo, auth.workspace_id];
-      if (creativeId) args.push(creativeId);
-
-      const result = await db.execute({
-        sql: `
+      const rows = await withWorkspace(auth.workspace_id, async (tx) => {
+        const result = await tx.execute(sql`
           SELECT
             c.id                                                  AS creative_id,
             c.name                                                AS creative_name,
@@ -72,24 +62,26 @@ export async function GET(req: NextRequest) {
             MAX(m.date)                                           AS date_to
           FROM metrics m
           JOIN creatives c ON c.id = m.creative_id
-          WHERE ${whereClause}
+          WHERE m.date >= ${dateFrom}
+            AND m.date <= ${dateTo}
+            ${creativeId ? sql`AND m.creative_id = ${creativeId}` : sql``}
           GROUP BY c.id, c.name, c.status, m.meta_ad_id
           ORDER BY total_spend DESC
-        `,
-        args,
+        `);
+        return result as unknown as Array<Record<string, unknown>>;
       });
 
       return NextResponse.json({
         level: "ad",
         period: { from: dateFrom, to: dateTo },
-        count: result.rows.length,
-        data: result.rows,
+        count: rows.length,
+        data: rows,
       });
     }
 
     if (level === "campaign") {
-      const result = await db.execute({
-        sql: `
+      const rows = await withWorkspace(auth.workspace_id, async (tx) => {
+        const result = await tx.execute(sql`
           SELECT
             SUM(spend)                                                    AS total_spend,
             SUM(impressions)                                              AS total_impressions,
@@ -103,21 +95,21 @@ export async function GET(req: NextRequest) {
             MIN(date)                                                     AS date_from,
             MAX(date)                                                     AS date_to
           FROM metrics
-          WHERE date >= ? AND date <= ? AND workspace_id = ?
-        `,
-        args: [dateFrom, dateTo, auth.workspace_id],
+          WHERE date >= ${dateFrom} AND date <= ${dateTo}
+        `);
+        return result as unknown as Array<Record<string, unknown>>;
       });
 
       return NextResponse.json({
         level: "campaign",
         period: { from: dateFrom, to: dateTo },
-        data: result.rows[0],
+        data: rows[0],
       });
     }
 
-    // ── Nível ad set — agrupado por meta_ad_id prefixo (adset via published_ads) ──
-    const result = await db.execute({
-      sql: `
+    // ── Nível ad set — agrupado por published_ads ──
+    const rows = await withWorkspace(auth.workspace_id, async (tx) => {
+      const result = await tx.execute(sql`
         SELECT
           pa.meta_adset_id,
           pa.adset_name,
@@ -132,18 +124,18 @@ export async function GET(req: NextRequest) {
           COUNT(DISTINCT m.creative_id)                             AS ads_count
         FROM metrics m
         JOIN published_ads pa ON pa.meta_ad_id = m.meta_ad_id
-        WHERE m.date >= ? AND m.date <= ? AND m.workspace_id = ?
+        WHERE m.date >= ${dateFrom} AND m.date <= ${dateTo}
         GROUP BY pa.meta_adset_id, pa.adset_name
         ORDER BY total_spend DESC
-      `,
-      args: [dateFrom, dateTo, auth.workspace_id],
+      `);
+      return result as unknown as Array<Record<string, unknown>>;
     });
 
     return NextResponse.json({
       level: "adset",
       period: { from: dateFrom, to: dateTo },
-      count: result.rows.length,
-      data: result.rows,
+      count: rows.length,
+      data: rows,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Erro interno";

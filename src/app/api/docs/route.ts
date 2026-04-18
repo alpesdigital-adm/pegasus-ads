@@ -45,12 +45,6 @@ const OPENAPI_SPEC = {
         name: "x-api-key",
         description: "API key do workspace — criada via POST /api/workspaces/api-keys. Formato: pgs_xxxx",
       },
-      ApiKeyAuth: {
-        type: "apiKey",
-        in: "header",
-        name: "x-api-key",
-        description: "(Legacy) TEST_LOG_API_KEY — mantida para compatibilidade",
-      },
       CronAuth: {
         type: "http",
         scheme: "bearer",

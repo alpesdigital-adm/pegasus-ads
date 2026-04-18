@@ -1,12 +1,11 @@
 /**
  * Auth — Autenticação multi-tenant.
  *
- * Fase 2 PR 2c: removido todo o path legado (scrypt/bcrypt + sessions
- * table). Suporta dois modos:
+ * Fase 2 fechada: legacy scrypt/bcrypt + sessions removidos (PR 2c);
+ * TEST_LOG_API_KEY fallback removido (TD-003 resolvido). Suporta dois modos:
  *  1. Supabase Auth (cookie sb-access-token, JWT gotrue verificado HS256
  *     localmente)
- *  2. API Key (x-api-key header, hash em api_keys + fallback legado
- *     TEST_LOG_API_KEY — TD-003, remover 90d depois)
+ *  2. API Key (x-api-key header, hash em api_keys table per-workspace)
  *
  * Workspace ativo:
  *  - Hint via `?workspace_id=` (query) > `x-workspace-id` (header)
@@ -15,15 +14,9 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { dbAdmin, sql } from "./db";
-import {
-  users,
-  workspaceMembers,
-  apiKeys,
-  workspaces,
-  workspaceMetaAccounts,
-} from "./db/schema";
-import { and, asc, desc, eq, isNull } from "drizzle-orm";
+import { dbAdmin } from "./db";
+import { users, workspaceMembers, apiKeys } from "./db/schema";
+import { and, asc, eq, isNull } from "drizzle-orm";
 import crypto from "crypto";
 import {
   verifySupabaseJwt,
@@ -185,7 +178,7 @@ async function getSupabaseSession(
  *
  * Ordem:
  *  1. sb-access-token (Supabase Auth — gotrue JWT verificado HS256 local)
- *  2. x-api-key (standard api_keys + fallback TEST_LOG_API_KEY legado)
+ *  2. x-api-key (api_keys table — hash, revoke, per-workspace)
  */
 export async function authenticate(req: NextRequest): Promise<AuthContext | null> {
   const supabaseToken = req.cookies.get(SUPABASE_ACCESS_COOKIE)?.value;
@@ -203,31 +196,6 @@ export async function authenticate(req: NextRequest): Promise<AuthContext | null
   if (apiKey) {
     const ctx = await authenticateApiKey(apiKey);
     if (ctx) return ctx;
-
-    // TEST_LOG_API_KEY (backward compat — TD-003, remover 90d pós-Fase 2c)
-    if (apiKey === process.env.TEST_LOG_API_KEY) {
-      const rows = await dbAdmin
-        .select({ id: workspaces.id })
-        .from(workspaces)
-        .leftJoin(
-          workspaceMetaAccounts,
-          eq(workspaceMetaAccounts.workspaceId, workspaces.id),
-        )
-        .orderBy(
-          desc(sql`${workspaceMetaAccounts.metaAccountId} IS NOT NULL`),
-          asc(workspaces.createdAt),
-        )
-        .limit(1);
-
-      if (rows.length > 0) {
-        return {
-          user_id: "legacy",
-          workspace_id: rows[0].id as string,
-          role: "admin",
-          auth_method: "api_key",
-        };
-      }
-    }
   }
 
   return null;

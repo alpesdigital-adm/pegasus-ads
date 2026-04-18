@@ -135,17 +135,54 @@ depois de rotacionar segredos demo do cluster (TD-006). Não é P1.
 
 ---
 
-## TD-003 — `TEST_LOG_API_KEY` legacy 🔴 open
+## TD-003 — `TEST_LOG_API_KEY` legacy 🟢 done
 
 **Descoberto:** 2026-04-17 (plano v1.3, seção 6.6)
-**Dono:** Claude (Fase 2+)
-**Impacto:** fallback de auth via env var, fora do sistema de `api_keys`
-table. Se a env vazar, dá acesso irrestrito.
+**Atualizado:** 2026-04-18 (Apps Script parou de funcionar, Leandro
+autorizou remoção antecipada — escopo original era 90d pós-Fase 2)
+**Dono:** Claude
+**Impacto:** removido. Fallback `if (apiKey === process.env.TEST_LOG_API_KEY)`
+em `src/lib/auth.ts` `authenticate()` foi eliminado junto com o mock
+`user_id: "legacy"`. Agora só `api_keys` table (hash, revoke, per-workspace).
 
-**Como resolver:** após Supabase Auth em produção (Fase 2) e todos os
-clients migrados, remover o branch `TEST_LOG_API_KEY` do fluxo de auth.
+**Estado final:**
+- ✅ Bloco `TEST_LOG_API_KEY` removido de `src/lib/auth.ts`
+- ✅ Imports mortos (workspaces, workspaceMetaAccounts, desc, sql) limpos
+- ✅ OpenAPI spec `ApiKeyAuth` removido
+- ⚠️ Env `TEST_LOG_API_KEY` ainda pode estar setada em `.env` do prod —
+  pode ser removida sem impacto (nenhum código lê pra autenticar). Os
+  consumers internos que ainda referenciam (ver TD-013) usam APENAS pra
+  gerar payload do Apps Script (template), não pra validar requests.
 
-**Quando:** 90 dias após Fase 2 estabilizar.
+---
+
+## TD-013 — Consumers internos que dependiam do fallback TEST_LOG_API_KEY 🔴 open
+
+**Descoberto:** 2026-04-18 (durante remoção do TD-003)
+**Dono:** Claude (quando Apps Script voltar a ser priority ou sumir)
+**Impacto:** rotas `/api/cron/weekly-report`, `/api/pipeline/run-cycle`,
+e `/api/videos/temp/[filename]` fazem self-fetch passando
+`process.env.TEST_LOG_API_KEY` como header x-api-key. Com TD-003 fechado,
+essas auto-chamadas retornam 401 (a env não é mais aceita como auth).
+
+**Contexto:** são jobs internos que rodavam via Apps Script. Leandro
+confirmou que o Apps Script não funciona mais, então essas rotas hoje
+estão dead code de fato.
+
+**Como resolver (opções):**
+A. **Deletar as rotas** — se Apps Script não volta, podem sumir. Limpa
+   também `src/config/apps-script-template.ts`, `scripts/sync_test_log.gs`,
+   `src/app/api/setup/test-log-sheet/route.ts`,
+   `src/app/api/setup/apps-script/route.ts`.
+B. **Refatorar pra chamar a lógica diretamente** — em vez de self-fetch,
+   importar a função e chamar. Remove o round-trip HTTP e a dependência
+   de auth.
+C. **Criar uma api_keys interna** com escopo reduzido e usar ela como
+   auth dessas rotas. Mais trabalhoso, só justifica se queremos expor
+   esses endpoints externamente.
+
+**Quando:** quando decidir o futuro do ecossistema Apps Script — sumir,
+reviver, ou substituir por outra ferramenta de sync.
 
 ---
 

@@ -153,30 +153,39 @@ em `src/lib/auth.ts` `authenticate()` foi eliminado junto com o mock
 
 ---
 
-## TD-013 — Consumers internos que dependiam do fallback TEST_LOG_API_KEY 🔴 open
+## TD-013 — Apps Script ecosystem removido 🟢 done
 
 **Descoberto:** 2026-04-18 (durante remoção do TD-003)
-**Dono:** Claude (quando Apps Script voltar a ser priority ou sumir)
-**Impacto:** rotas `/api/cron/weekly-report`, `/api/pipeline/run-cycle`,
-e `/api/videos/temp/[filename]` fazem self-fetch passando
-`process.env.TEST_LOG_API_KEY` como header x-api-key. Com TD-003 fechado,
-essas auto-chamadas retornam 401 (a env não é mais aceita como auth).
+**Atualizado:** 2026-04-18 (opção A executada — delete total)
+**Dono:** Claude
+**Impacto:** resolvido via deleção completa do ecossistema Apps Script.
+Leandro confirmou que o Apps Script não funciona mais e não vai voltar.
 
-**Contexto:** são jobs internos que rodavam via Apps Script. Leandro
-confirmou que o Apps Script não funciona mais, então essas rotas hoje
-estão dead code de fato.
+**Deletados (6 arquivos + 3 diretórios):**
+- `src/app/api/setup/test-log-sheet/route.ts`
+- `src/app/api/setup/apps-script/route.ts` + dir `setup/`
+- `src/app/api/cron/weekly-report/route.ts` + dir
+- `src/app/api/pipeline/run-cycle/route.ts` + dir `pipeline/`
+- `src/config/apps-script-template.ts`
+- `scripts/sync_test_log.gs`
 
-**Como resolver (opções):**
-A. **Deletar as rotas** — se Apps Script não volta, podem sumir. Limpa
-   também `src/config/apps-script-template.ts`, `scripts/sync_test_log.gs`,
-   `src/app/api/setup/test-log-sheet/route.ts`,
-   `src/app/api/setup/apps-script/route.ts`.
-B. **Refatorar pra chamar a lógica diretamente** — em vez de self-fetch,
-   importar a função e chamar. Remove o round-trip HTTP e a dependência
-   de auth.
-C. **Criar uma api_keys interna** com escopo reduzido e usar ela como
-   auth dessas rotas. Mais trabalhoso, só justifica se queremos expor
-   esses endpoints externamente.
+**Editados (parcial):**
+- `src/app/api/videos/temp/[filename]/route.ts`: DELETE handler removido
+  (usava TEST_LOG_API_KEY); GET preservado (Meta API precisa, público)
+- `src/components/Header.tsx`: `TestLogButton` (componente + JSX mount)
+  removido; `AlertCounts`/`AlertRow` interfaces que estavam no meio
+  preservadas
+- `src/app/api/docs/route.ts`: entry OpenAPI de `/api/pipeline/run-cycle`
+  removida
+- 4 routes com comentário obsoleto atualizados (`publish-external`,
+  `publish-carousel`, `drive/list-creatives`, `videos/upload-temp`) pra
+  refletir que auth real é via api_keys + cookie Supabase
+
+**Não tocado (fora do escopo):**
+- `mcp-server/` — sub-projeto separado, provavelmente dead também mas
+  não vale a pena mexer sem confirmar
+- Referências em docs (`plano-migracao`, `api-reference`, `fase1c-route-audit`)
+  — ficam como trilha histórica, não geram bugs
 
 **Quando:** quando decidir o futuro do ecossistema Apps Script — sumir,
 reviver, ou substituir por outra ferramenta de sync.

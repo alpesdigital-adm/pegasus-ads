@@ -480,33 +480,6 @@ const OPENAPI_SPEC = {
       },
     },
 
-    // ── Pipeline ───────────────────────────────────────────────────────────
-    "/api/pipeline/run-cycle": {
-      post: {
-        tags: ["Pipeline"],
-        summary: "Executar ciclo end-to-end",
-        description: "Encadeia: coleta métricas → avalia kill rules → gera hipóteses A/B.",
-        requestBody: {
-          content: {
-            "application/json": {
-              schema: {
-                type: "object",
-                properties: {
-                  campaign_key: { type: "string" },
-                  top_n: { type: "integer" },
-                  skip_collect: { type: "boolean" },
-                  skip_hypotheses: { type: "boolean" },
-                },
-              },
-            },
-          },
-        },
-        responses: {
-          "200": { description: "Resultado do ciclo" },
-        },
-      },
-    },
-
     // ── Relatório ──────────────────────────────────────────────────────────
     "/api/reports/weekly": {
       get: {

@@ -21,7 +21,7 @@
  * Auto-discovery: se ad_names não fornecido, descobre todos os pares F+S
  * na pasta e publica apenas os que NÃO existem na campanha.
  *
- * Protegido por x-api-key (TEST_LOG_API_KEY).
+ * Protegido por x-api-key (api_keys table) ou cookie Supabase session.
  */
 import { NextRequest, NextResponse } from "next/server";
 // NOTE: esta rota não toca DB diretamente — lógica é 100% Meta API +

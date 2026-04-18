@@ -218,17 +218,35 @@ Neon inteiro some — leva as tabelas junto.
 
 ---
 
-## TD-005 — `settings` global x `workspace_settings` 🔴 open
+## TD-005 — `settings` global dropada 🟢 done
 
 **Descoberto:** 2026-04-17 (plano v1.3, seção 2.1)
-**Dono:** Claude (Fase 5)
-**Impacto:** duas tabelas de settings — `settings` (global, key TEXT) e
-`workspace_settings` (multi-tenant). A primeira é legado.
+**Atualizado:** 2026-04-18 (consolidação executada antes da Fase 5)
+**Dono:** Claude
+**Impacto:** resolvido. Tabela `settings` global foi dropada —
+auditoria mostrou que tinha só 2 classes de uso:
+  1. `last_ad_number` (override manual do NamingService) → movido
+     pra `workspace_settings` (faz mais sentido ser per-workspace:
+     numeração já é escopada por RLS em creatives/published_ads).
+  2. `apps_script_id`, `test_log_*` → órfãs após TD-013 (Apps Script
+     ecosystem deletado), sem readers.
 
-**Como resolver:** consolidar em `workspace_settings` adicionando rows com
-`workspace_id = NULL` para settings globais OU criar enum `scope` separado.
+**Estado final:**
+- ✅ Migration 0009 — move `last_ad_number` pro `workspace_settings`
+  do workspace mais antigo + `DROP TABLE settings CASCADE` (inclui
+  as órfãs do Apps Script)
+- ✅ `src/lib/creative-naming.ts` — usa `getWorkspaceSetting` em
+  vez de query na tabela global
+- ✅ `/api/settings` — operando em `workspace_settings` via
+  withWorkspace/RLS. API contract passou a ser per-workspace
+  (zero frontend caller afetado — auditoria confirmou que a page
+  `/settings` só gerencia Meta accounts, não usa esse endpoint).
+- ✅ Schema `settings` removido de `src/lib/db/schema/prompts.ts`
 
-**Quando:** Fase 5 (cleanup).
+**Sem schema `scope` enum nem `workspace_id NULL`** — abordagem rejeitada.
+A única key realmente global (`last_ad_number`) acabou sendo
+conceitualmente per-workspace mesmo. Não sobrou nenhum caso legítimo
+pra setting global, então não faz sentido preservar a complexidade.
 
 ---
 

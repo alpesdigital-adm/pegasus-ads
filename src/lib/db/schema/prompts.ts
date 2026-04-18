@@ -24,11 +24,5 @@ export const prompts = pgTable("prompts", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
-// ─── settings (LEGADO global) ─────────────────────────────────────────────
-// Settings globais fora de workspace. Migrar para workspace_settings na Fase 5
-// (TD-005). NÃO tem workspace_id — NÃO entra no RLS.
-export const settings = pgTable("settings", {
-  key: text("key").primaryKey(),
-  value: text("value").notNull(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-});
+// Tabela `settings` global foi removida na migration 0009 (TD-005).
+// Use `workspace_settings` (em schema/workspaces.ts) pra config per-workspace.

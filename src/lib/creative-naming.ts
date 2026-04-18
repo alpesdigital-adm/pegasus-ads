@@ -12,15 +12,19 @@
  * declaração manual.
  *
  * MIGRADO NA FASE 1C (Wave 7 libs):
- *  - getDb() → withWorkspace + dbAdmin
+ *  - getDb() → withWorkspace (RLS per-workspace)
  *  - getNextAdNumber agora exige workspaceId (antes era global, risco de
  *    colisão cross-tenant)
- *  - settings (global) via dbAdmin — TD-005 overlap
+ *
+ * TD-005 resolvido (2026-04-18):
+ *  - Removida dep da tabela `settings` global. Override manual do
+ *    last_ad_number agora mora em workspace_settings (per-workspace).
  */
 
-import { withWorkspace, dbAdmin } from "./db";
-import { creatives, publishedAds, settings } from "./db/schema";
-import { eq, sql } from "drizzle-orm";
+import { withWorkspace } from "./db";
+import { creatives, publishedAds } from "./db/schema";
+import { sql } from "drizzle-orm";
+import { getWorkspaceSetting } from "./workspace";
 
 interface NamingConfig {
   prefix: string;
@@ -46,10 +50,10 @@ export function detectPlacementSuffix(width: number, height: number): "F" | "S" 
 /**
  * Busca o próximo número de AD disponível DENTRO do workspace.
  *
- * Fontes (todas escopadas ao workspace exceto settings, que é global):
- * 1. creatives (workspace via RLS)
- * 2. published_ads (workspace via RLS)
- * 3. settings (global, key=last_ad_number — override manual)
+ * Fontes (todas escopadas ao workspace):
+ * 1. creatives (RLS)
+ * 2. published_ads (RLS)
+ * 3. workspace_settings.last_ad_number (override manual per-workspace)
  */
 export async function getNextAdNumber(workspaceId: string): Promise<number> {
   const regex = /AD(\d+)/i;
@@ -94,18 +98,12 @@ export async function getNextAdNumber(workspaceId: string): Promise<number> {
 
   let maxNumber = Math.max(maxFromCreatives, maxFromAds);
 
-  try {
-    const rows = await dbAdmin
-      .select({ value: settings.value })
-      .from(settings)
-      .where(eq(settings.key, "last_ad_number"))
-      .limit(1);
-    if (rows.length > 0) {
-      const n = parseInt(rows[0].value, 10);
-      if (!isNaN(n) && n > maxNumber) maxNumber = n;
-    }
-  } catch {
-    // ignore
+  // Override manual via workspace_settings (TD-005 — antes era tabela
+  // settings global; agora é per-workspace alinhado com o resto).
+  const override = await getWorkspaceSetting(workspaceId, "last_ad_number");
+  if (override) {
+    const n = parseInt(override, 10);
+    if (!isNaN(n) && n > maxNumber) maxNumber = n;
   }
 
   return maxNumber + 1;

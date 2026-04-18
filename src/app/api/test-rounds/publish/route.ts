@@ -5,6 +5,9 @@
  *  - test_round_id: string (required)
  *  - activation_mode?: 'after_all' | 'immediate' (só usado quando
  *    USE_STAGING_QUEUE=true; default 'after_all' pela spec)
+ *  - name_prefix?: string (só usado quando USE_STAGING_QUEUE=true;
+ *    prefixo aplicado em todos os nomes Meta criados — ad, adset,
+ *    creative, labels. Default "". Útil pra smoke tests: "TEST__")
  *
  * Comportamento:
  *  - USE_STAGING_QUEUE=true (prod): cria batch via staging-queue factory,
@@ -88,11 +91,14 @@ export async function POST(request: NextRequest) {
     if (isStagingQueueEnabled()) {
       const activationMode =
         body.activation_mode === "immediate" ? "immediate" : "after_all";
+      const namePrefix =
+        typeof body.name_prefix === "string" ? body.name_prefix : "";
 
       const result = await createTestRoundBatch({
         testRoundId: body.test_round_id,
         workspaceId: auth.workspace_id,
         activationMode,
+        namePrefix,
       });
 
       return NextResponse.json(
@@ -100,6 +106,7 @@ export async function POST(request: NextRequest) {
           batch_id: result.batchId,
           variant_pair_count: result.variantPairCount,
           activation_mode: activationMode,
+          name_prefix: namePrefix || null,
           status: "pending",
           message:
             "Batch enfileirado. Poll em GET /api/batches/{batch_id}/status.",

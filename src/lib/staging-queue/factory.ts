@@ -32,6 +32,13 @@ export interface CreateTestRoundBatchInput {
   testRoundId: string;
   workspaceId: string;
   activationMode?: "after_all" | "immediate";
+  /**
+   * Prefixo aplicado em todos os nomes criados na Meta (ad, adset, creative,
+   * labels). Default: "" (sem prefixo). Usado principalmente em smoke tests
+   * pra identificar entities facilmente no Ads Manager (ex: "TEST__").
+   * Propaga pro persist_results → published_ads.ad_name/adset_name.
+   */
+  namePrefix?: string;
 }
 
 export interface CreateTestRoundBatchResult {
@@ -45,6 +52,7 @@ export async function createTestRoundBatch(
 ): Promise<CreateTestRoundBatchResult> {
   const { testRoundId, workspaceId } = params;
   const activationMode = params.activationMode ?? "after_all";
+  const namePrefix = params.namePrefix ?? "";
 
   // ── 1. Carrega test_round + campaign (fail-fast no que é estático) ──
   const roundRows = await dbAdmin.execute<{
@@ -130,7 +138,7 @@ export async function createTestRoundBatch(
     );
   }
   const adSetTemplate: AdSetTemplate = {
-    name: String(tpl.name ?? ""),
+    name: `${namePrefix}${String(tpl.name ?? "")}`,
     dailyBudgetCents: String(
       campaignConfig.daily_budget ?? tpl.daily_budget ?? "8000",
     ),
@@ -205,6 +213,7 @@ export async function createTestRoundBatch(
 
     for (let i = 0; i < variantPairs.length; i++) {
       const pair = variantPairs[i];
+      const prefixedAdName = `${namePrefix}${pair.adName}`;
       const offsets = {
         verify: stepSpecs.length,
         uploadFeed: -1,
@@ -221,7 +230,7 @@ export async function createTestRoundBatch(
         ordinal: ordinal++,
         isCritical: "true",
         inputData: {
-          adName: pair.adName,
+          adName: prefixedAdName,
           adSetName: adSetTemplate.name,
           feedImageReady: true,
           storiesImageReady: true,
@@ -242,7 +251,7 @@ export async function createTestRoundBatch(
         inputData: {
           accountId,
           blobUrl: pair.feed!.blobUrl,
-          filename: `${pair.adName}F.png`,
+          filename: `${prefixedAdName}F.png`,
           placement: "feed",
           variantPairIndex: i,
         },
@@ -256,7 +265,7 @@ export async function createTestRoundBatch(
         inputData: {
           accountId,
           blobUrl: pair.stories!.blobUrl,
-          filename: `${pair.adName}S.png`,
+          filename: `${prefixedAdName}S.png`,
           placement: "stories",
           variantPairIndex: i,
         },
@@ -269,7 +278,7 @@ export async function createTestRoundBatch(
         isCritical: "true",
         inputData: {
           accountId,
-          labelName: `${pair.adName}_feed`,
+          labelName: `${prefixedAdName}_feed`,
           placement: "feed",
           variantPairIndex: i,
         },
@@ -282,7 +291,7 @@ export async function createTestRoundBatch(
         isCritical: "true",
         inputData: {
           accountId,
-          labelName: `${pair.adName}_stories`,
+          labelName: `${prefixedAdName}_stories`,
           placement: "stories",
           variantPairIndex: i,
         },
@@ -310,7 +319,7 @@ export async function createTestRoundBatch(
           accountId,
           pageId,
           instagramUserId,
-          adName: pair.adName,
+          adName: prefixedAdName,
           adContent,
           urlTags: UTM_TEMPLATE,
           variantPairIndex: i,
@@ -326,7 +335,7 @@ export async function createTestRoundBatch(
         isCritical: "true",
         inputData: {
           accountId,
-          adName: pair.adName,
+          adName: prefixedAdName,
           activationMode,
           variantPairIndex: i,
           // metaAdsetId, metaCreativeId vêm via propagação.
@@ -364,7 +373,12 @@ export async function createTestRoundBatch(
       inputData: {
         testRoundId,
         batchId: bId,
-        variantPairs,
+        // Prefixa variantPairs.adName pra persist_results gravar com prefixo
+        // nos published_ads (coerente com o que foi pra Meta).
+        variantPairs: variantPairs.map((p) => ({
+          ...p,
+          adName: `${namePrefix}${p.adName}`,
+        })),
         adSetTemplateName: adSetTemplate.name,
       },
     });
@@ -471,6 +485,7 @@ export async function createTestRoundBatch(
       testRoundId,
       variantPairs: variantPairs.length,
       activationMode,
+      namePrefix: namePrefix || "(none)",
     },
     "test_round batch created",
   );

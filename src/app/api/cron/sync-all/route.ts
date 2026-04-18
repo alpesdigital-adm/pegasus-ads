@@ -20,7 +20,10 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 
 const ACCOUNT_ID = "act_3601611403432716";
-const ACCOUNT_ID_NUM = 3601611403432716; // integer for classified_insights.account_id column
+// NOTA: account_id/insight_id em classified_insights viraram UUID nullable
+// na Fase 1B/migration 0003. Route passa NULL (coerência com sentinela
+// legada de "sem ref") até Fase 1C refatorar para Drizzle + UPSERT em
+// ad_insights primeiro.
 const CPL_TARGET = 30;
 
 function isAuthorized(req: NextRequest): boolean {
@@ -91,7 +94,7 @@ export async function GET(req: NextRequest) {
                   insight_id, account_id, date, campaign_id, campaign_name, adset_id, adset_name,
                   ad_id, ad_name, spend, impressions, link_clicks, landing_page_views,
                   leads, effective_status
-                ) VALUES (0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (date, ad_id) DO UPDATE SET
                   spend = EXCLUDED.spend,
                   impressions = EXCLUDED.impressions,
@@ -103,7 +106,6 @@ export async function GET(req: NextRequest) {
                   adset_name = EXCLUDED.adset_name,
                   ad_name = EXCLUDED.ad_name`,
           args: [
-            ACCOUNT_ID_NUM,
             row.date_start,
             row.meta_campaign_id || row.campaign_id || "",
             row.campaign_name || "",

@@ -5,16 +5,25 @@
 // Criada no Neon em 2026-04-12 fora do initDb() — usada pelo /api/cron/sync-all
 // e pela /insights page.
 //
-// FKs (resolvidas — ad_accounts e ad_insights agora existem nos schemas):
-//   - account_id → ad_accounts(id): adicionado. Antes era bigint (vestigial),
-//     agora UUID com reference.
-//   - insight_id → ad_insights(id): adicionado. Antes era integer sem FK.
+// HISTÓRIA DAS FKs (post-mortem Fase 1B cutover — 2026-04-17):
+//   - v1.3 plano previa FK insight_id → ad_insights(id) e account_id → ad_accounts(id)
+//   - A FK de insight_id era **especulativa** — Neon original tinha insight_id
+//     como integer sem FK real, e /api/cron/sync-all sempre inseria literal 0
+//     como sentinela ("sem ad_insights correspondente"). Idem account_id:
+//     era o Meta account ID (bigint), não um ref ao pk de ad_accounts.
+//   - Migration 0002 tentou ALTER TYPE integer→uuid direto — falhou (sem cast).
+//     Gêmeo VPS contornou via DROP COLUMN + ADD COLUMN uuid, perdendo as FKs
+//     no runtime. Schema Drizzle e DB divergiram.
+//   - Cutover 2026-04-17 caiu porque o route passou `(0, $bigint, ...)` numa
+//     tabela com colunas UUID NOT NULL.
 //
-// Conversão na Fase 1B:
-//   - id integer → uuid (gen_random_uuid)
-//   - account_id bigint → uuid (via mapping ad_accounts)
-//   - insight_id integer → uuid (via mapping ad_insights)
-//   - varchar(N) mantém para compatibilidade com queries existentes
+// ESTADO ATUAL (migration 0003):
+//   - insight_id: nullable, sem FK (compatível com legado + futuro proper
+//     populate via Drizzle na Fase 1C)
+//   - account_id: nullable, sem FK (Meta account ID é bigint externo, não
+//     pertence ao grafo Drizzle)
+//   - Refactor futuro (Fase 1C): substituir por `meta_account_id text` +
+//     migrar route para Drizzle com UPSERT em ad_insights primeiro.
 // =============================================================================
 
 import {
@@ -29,18 +38,16 @@ import {
   unique,
   index,
 } from "drizzle-orm/pg-core";
-import { adAccounts } from "./ad-accounts";
-import { adInsights } from "./insights";
 
 export const classifiedInsights = pgTable(
   "classified_insights",
   {
     id: uuid("id").primaryKey().defaultRandom(),
 
-    insightId: uuid("insight_id")
-      .notNull()
-      .references(() => adInsights.id),
-    accountId: uuid("account_id").references(() => adAccounts.id),
+    // Nullable, sem FK — ver histórico no topo do arquivo.
+    // Mantém UUID por compat com dados já migrados (2756 rows).
+    insightId: uuid("insight_id"),
+    accountId: uuid("account_id"),
 
     date: date("date").notNull(),
     campaignId: varchar("campaign_id", { length: 50 }).notNull(),

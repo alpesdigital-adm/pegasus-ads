@@ -31,6 +31,11 @@ done
 
 COMPOSE_DIR="/etc/easypanel/projects/alpes-ads/supabase/code/supabase/code"
 ENV_FILE="$COMPOSE_DIR/.env"
+# IMPORTANTE: o docker-compose.yml tem `name: supabase`, mas o easypanel
+# lança o stack com project name `alpes-ads_supabase`. Passar -p garante
+# que o --force-recreate atinja os containers existentes em vez de
+# criar um stack paralelo chamado "supabase".
+COMPOSE_PROJECT="alpes-ads_supabase"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GEN_SCRIPT="$SCRIPT_DIR/generate-supabase-jwts.js"
 BACKUP="$ENV_FILE.backup-td006-$(date +%Y%m%d-%H%M%S)"
@@ -117,21 +122,23 @@ log "  ✓ JWT_SECRET, ANON_KEY, SERVICE_ROLE_KEY atualizados no .env"
 
 # --- 5/8 parar kong ---------------------------------------------------------
 log "5/8 Parando kong (evita tráfego enquanto troca)"
-run "docker stop alpes-ads_supabase-kong-1 >/dev/null"
+run "docker stop ${COMPOSE_PROJECT}-kong-1 >/dev/null"
 log "  ✓ kong parado"
 
 # --- 6/8 recriar consumers JWT ---------------------------------------------
 log "6/8 Recriando containers JWT consumers: ${JWT_CONSUMERS[*]}"
-# docker compose relê .env a cada 'up -d'; --force-recreate garante novo env
+# docker compose relê .env a cada 'up -d'; --force-recreate garante novo env.
+# -p força o project name correto (o yml tem name=supabase, mas easypanel
+# usa alpes-ads_supabase — sem -p cria stack paralelo).
 if [[ $DRY_RUN -eq 0 ]]; then
-  (cd "$COMPOSE_DIR" && docker compose up -d --force-recreate --no-deps "${JWT_CONSUMERS[@]}" 2>&1 | tail -20)
+  (cd "$COMPOSE_DIR" && docker compose -p "$COMPOSE_PROJECT" up -d --force-recreate --no-deps "${JWT_CONSUMERS[@]}" 2>&1 | tail -20)
 fi
 log "  ✓ consumers recriados com secret novo"
 
 # --- 7/8 recriar kong ------------------------------------------------------
 log "7/8 Recriando kong com ANON_KEY/SERVICE_KEY novas"
 if [[ $DRY_RUN -eq 0 ]]; then
-  (cd "$COMPOSE_DIR" && docker compose up -d --force-recreate --no-deps kong 2>&1 | tail -5)
+  (cd "$COMPOSE_DIR" && docker compose -p "$COMPOSE_PROJECT" up -d --force-recreate --no-deps kong 2>&1 | tail -5)
 fi
 log "  ✓ kong up"
 
@@ -139,22 +146,26 @@ log "  ✓ kong up"
 log "8/8 Validando"
 if [[ $DRY_RUN -eq 0 ]]; then
   sleep 8  # dar tempo pro kong subir
+  # URL pública do Supabase vem do .env do CRM (é a URL que o kong aceita).
+  # Fallback pro hostname interno do container se não achar.
+  AUTH_URL=$(awk -F= '/^NEXT_PUBLIC_SUPABASE_URL=/{print $2}' /apps/pegasus-crm/.env 2>/dev/null || echo "")
+  [[ -z "$AUTH_URL" ]] && AUTH_URL="https://supabase.alpesd.com.br"
   HTTP=$(curl -sS -o /dev/null -w '%{http_code}' \
-    "https://supabase.alpesd.com.br/auth/v1/settings" \
+    "$AUTH_URL/auth/v1/settings" \
     -H "apikey: $NEW_ANON_KEY" --max-time 15 || echo "000")
   if [[ "$HTTP" != "200" ]]; then
-    echo "  ✗ Auth endpoint retornou $HTTP" >&2
+    echo "  ✗ Auth endpoint ($AUTH_URL) retornou $HTTP" >&2
     echo
     echo "ROLLBACK:" >&2
     echo "  cp '$BACKUP' '$ENV_FILE' && \\" >&2
-    echo "  (cd '$COMPOSE_DIR' && docker compose up -d --force-recreate ${JWT_CONSUMERS[*]} kong)" >&2
+    echo "  (cd '$COMPOSE_DIR' && docker compose -p '$COMPOSE_PROJECT' up -d --force-recreate --no-deps ${JWT_CONSUMERS[*]} kong)" >&2
     exit 1
   fi
-  log "  ✓ Auth endpoint OK (HTTP 200)"
+  log "  ✓ Auth endpoint OK (HTTP 200) — $AUTH_URL"
 
   # Cleanup de refresh tokens órfãos (todos invalidados pela rotação)
   log "  Limpando auth.refresh_tokens (sessões invalidadas)"
-  docker exec alpes-ads_supabase-db-1 \
+  docker exec "${COMPOSE_PROJECT}-db-1" \
     psql -U supabase_admin -d postgres -c 'DELETE FROM auth.refresh_tokens;' >/dev/null 2>&1 || true
 fi
 

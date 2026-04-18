@@ -12,6 +12,27 @@ precisam ser endereçadas. Atualize o status ao resolver cada item (não apague
 
 ---
 
+## TD-009 — Cutover Neon → Supabase concluído 🟢 done
+
+**Descoberto:** 2026-04-17 (Fase 1B prep)
+**Atualizado:** 2026-04-18 (cutover validado e em produção)
+**Dono:** Claude + gêmeo VPS
+**Impacto:** Cutover end-to-end concluído em 2026-04-18.
+
+**Estado final:**
+- `pegasus.alpesd.com.br` → green container → `pegasus_ads` (Supabase self-hosted)
+- `pegasus-blue.alpesd.com.br` → blue container → Neon (rollback 24-48h)
+- `pegasus-green.alpesd.com.br` → green (acesso direto staging)
+- Login validado e2e: cookie do Neon migrado pra pegasus_ads, /api/auth/me 200
+- Sync-all rodando: 168 upserts, 88 kills, 35 alerts no primeiro POST
+- 4 colunas legacy de `users` (account_id, role, is_active, last_login_at)
+  consolidadas no schema Drizzle + migration 0004 idempotente
+
+**Pendência menor:** após 24-48h estável, rodar `scripts/cutover/04-remove-blue.sh`
+para remover blue container + atualizar `deploy.sh`. Brain memória #173/#174.
+
+---
+
 ## TD-001 — Remover integração Vercel do repo 🔴 open
 
 **Descoberto:** 2026-04-17 (PR #1 da migração)

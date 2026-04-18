@@ -1,10 +1,24 @@
-import { pgTable, uuid, text, timestamp, check } from "drizzle-orm/pg-core";
+import {
+  pgTable,
+  uuid,
+  text,
+  timestamp,
+  check,
+  varchar,
+  integer,
+  boolean,
+} from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { workspaces } from "./workspaces";
 
 // ─── users — LEGADO (remover na Fase 5) ───────────────────────────────────
 // Fase 2 migra usuários para auth.users (Supabase gotrue). Tabela mantida
-// como backup por 30 dias antes de DROP TABLE.
+// como bridge ativa (commit ea7b4a6 — cutover 2026-04-18) até Fase 2 estar
+// estável + 30 dias.
+//
+// As 4 últimas colunas (account_id/role/is_active/last_login_at) existiam no
+// Neon mas não estavam neste schema — descobertas durante a bridge. Mantidas
+// aqui pra evitar drift entre Drizzle e DB. Vão embora junto com a tabela.
 export const users = pgTable("users", {
   id: uuid("id").primaryKey().defaultRandom(),
   email: text("email").notNull().unique(),
@@ -13,6 +27,11 @@ export const users = pgTable("users", {
   passwordHash: text("password_hash"),
   googleId: text("google_id").unique(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  // Legacy (descobertas no cutover 2026-04-18 — bridge step 0):
+  accountId: integer("account_id"),
+  role: varchar("role", { length: 20 }).notNull().default("viewer"),
+  isActive: boolean("is_active").default(true),
+  lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
 });
 
 // ─── sessions — LEGADO (remover na Fase 5) ────────────────────────────────

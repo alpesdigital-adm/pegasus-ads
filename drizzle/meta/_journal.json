@@ -29,6 +29,13 @@
       "when": 1776471024574,
       "tag": "0003_0003_relax_classified_fks",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1776472532181,
+      "tag": "0004_0004_align_users_legacy_cols",
+      "breakpoints": true
     }
   ]
 }

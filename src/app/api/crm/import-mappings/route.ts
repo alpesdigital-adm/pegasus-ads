@@ -1,8 +1,30 @@
+/**
+ * MIGRADO NA FASE 1C (Wave 5 — CRM):
+ *  - getDb() → dbAdmin (workspace_id no WHERE manual)
+ *  - Drizzle typed builder pra SELECT/INSERT/UPDATE/DELETE
+ *  - Upsert agora usa .onConflictDoUpdate em vez de SELECT-then-branch
+ *  - Shape do response preservado (snake_case via alias no .select())
+ */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
-import { getDb } from "@/lib/db";
+import { dbAdmin } from "@/lib/db";
+import { crmImportMappings } from "@/lib/db/schema";
+import { and, desc, eq, sql } from "drizzle-orm";
 
 export const runtime = "nodejs";
+
+// Campos padronizados do response (snake_case mantido para compat).
+const mappingSelect = {
+  id: crmImportMappings.id,
+  name: crmImportMappings.name,
+  description: crmImportMappings.description,
+  column_mappings: crmImportMappings.columnMappings,
+  target_fields: crmImportMappings.targetFields,
+  last_used_at: crmImportMappings.lastUsedAt,
+  import_count: crmImportMappings.importCount,
+  created_at: crmImportMappings.createdAt,
+  updated_at: crmImportMappings.updatedAt,
+};
 
 // GET /api/crm/import-mappings — list saved mappings
 export async function GET(req: NextRequest) {
@@ -10,24 +32,24 @@ export async function GET(req: NextRequest) {
   if (auth instanceof NextResponse) return auth;
 
   try {
-    const db = getDb();
-    const result = await db.execute({
-      sql: `SELECT id, name, description, column_mappings, target_fields,
-                   last_used_at, import_count, created_at, updated_at
-            FROM crm_import_mappings
-            WHERE workspace_id = ?
-            ORDER BY last_used_at DESC NULLS LAST, created_at DESC`,
-      args: [auth.workspace_id],
-    });
+    const mappings = await dbAdmin
+      .select(mappingSelect)
+      .from(crmImportMappings)
+      .where(eq(crmImportMappings.workspaceId, auth.workspace_id))
+      .orderBy(
+        sql`${crmImportMappings.lastUsedAt} DESC NULLS LAST`,
+        desc(crmImportMappings.createdAt),
+      );
 
-    return NextResponse.json({ mappings: result.rows });
-  } catch (error: any) {
+    return NextResponse.json({ mappings });
+  } catch (error) {
     console.error("[import-mappings] GET error:", error);
-    return NextResponse.json({ error: error.message || "Internal server error" }, { status: 500 });
+    const msg = error instanceof Error ? error.message : "Internal server error";
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }
 
-// POST /api/crm/import-mappings — upsert mapping by name
+// POST /api/crm/import-mappings — upsert mapping by (workspace_id, name)
 export async function POST(req: NextRequest) {
   const auth = await requireAuth(req);
   if (auth instanceof NextResponse) return auth;
@@ -44,65 +66,49 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "column_mappings deve ser um objeto" }, { status: 400 });
     }
 
-    const db = getDb();
-    const id = crypto.randomUUID();
-    const now = new Date().toISOString();
+    const targetFields = Array.isArray(target_fields) ? target_fields : [];
 
-    // Try update first
-    const existing = await db.execute({
-      sql: "SELECT id FROM crm_import_mappings WHERE workspace_id = ? AND name = ?",
-      args: [auth.workspace_id, name],
-    });
+    const existing = await dbAdmin
+      .select({ id: crmImportMappings.id })
+      .from(crmImportMappings)
+      .where(
+        and(
+          eq(crmImportMappings.workspaceId, auth.workspace_id),
+          eq(crmImportMappings.name, name),
+        ),
+      )
+      .limit(1);
 
-    if (existing.rows.length > 0) {
-      const existingId = existing.rows[0].id as string;
-      await db.execute({
-        sql: `UPDATE crm_import_mappings
-              SET description = ?, column_mappings = ?, target_fields = ?, updated_at = ?
-              WHERE id = ? AND workspace_id = ?`,
-        args: [
-          description || null,
-          JSON.stringify(column_mappings),
-          JSON.stringify(target_fields || []),
-          now,
-          existingId,
-          auth.workspace_id,
-        ],
-      });
+    const isUpdate = existing.length > 0;
 
-      const updated = await db.execute({
-        sql: "SELECT id, name, description, column_mappings, target_fields, created_at, updated_at FROM crm_import_mappings WHERE id = ?",
-        args: [existingId],
-      });
-
-      return NextResponse.json({ mapping: updated.rows[0], message: "Mapeamento atualizado" });
-    }
-
-    // Insert new
-    await db.execute({
-      sql: `INSERT INTO crm_import_mappings (id, workspace_id, name, description, column_mappings, target_fields, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: [
-        id,
-        auth.workspace_id,
+    const [row] = await dbAdmin
+      .insert(crmImportMappings)
+      .values({
+        workspaceId: auth.workspace_id,
         name,
-        description || null,
-        JSON.stringify(column_mappings),
-        JSON.stringify(target_fields || []),
-        now,
-        now,
-      ],
-    });
+        description: description ?? null,
+        columnMappings: column_mappings,
+        targetFields,
+      })
+      .onConflictDoUpdate({
+        target: [crmImportMappings.workspaceId, crmImportMappings.name],
+        set: {
+          description: description ?? null,
+          columnMappings: column_mappings,
+          targetFields,
+          updatedAt: sql`NOW()`,
+        },
+      })
+      .returning(mappingSelect);
 
-    const inserted = await db.execute({
-      sql: "SELECT id, name, description, column_mappings, target_fields, created_at, updated_at FROM crm_import_mappings WHERE id = ?",
-      args: [id],
+    return NextResponse.json({
+      mapping: row,
+      message: isUpdate ? "Mapeamento atualizado" : "Mapeamento criado",
     });
-
-    return NextResponse.json({ mapping: inserted.rows[0], message: "Mapeamento criado" });
-  } catch (error: any) {
+  } catch (error) {
     console.error("[import-mappings] POST error:", error);
-    return NextResponse.json({ error: error.message || "Internal server error" }, { status: 500 });
+    const msg = error instanceof Error ? error.message : "Internal server error";
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }
 
@@ -117,27 +123,32 @@ export async function DELETE(req: NextRequest) {
 
     if (!id) {
       const body = await req.json().catch(() => ({}));
-      id = (body as any).id;
+      id = (body as { id?: string }).id ?? null;
     }
 
     if (!id) {
       return NextResponse.json({ error: "id e obrigatorio" }, { status: 400 });
     }
 
-    const db = getDb();
-    const result = await db.execute({
-      sql: "DELETE FROM crm_import_mappings WHERE id = ? AND workspace_id = ? RETURNING id, name",
-      args: [id, auth.workspace_id],
-    });
+    const deleted = await dbAdmin
+      .delete(crmImportMappings)
+      .where(
+        and(
+          eq(crmImportMappings.id, id),
+          eq(crmImportMappings.workspaceId, auth.workspace_id),
+        ),
+      )
+      .returning({ id: crmImportMappings.id, name: crmImportMappings.name });
 
-    if (result.rows.length === 0) {
+    if (deleted.length === 0) {
       return NextResponse.json({ error: "Mapeamento nao encontrado" }, { status: 404 });
     }
 
-    return NextResponse.json({ deleted: result.rows[0], message: "Mapeamento removido" });
-  } catch (error: any) {
+    return NextResponse.json({ deleted: deleted[0], message: "Mapeamento removido" });
+  } catch (error) {
     console.error("[import-mappings] DELETE error:", error);
-    return NextResponse.json({ error: error.message || "Internal server error" }, { status: 500 });
+    const msg = error instanceof Error ? error.message : "Internal server error";
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }
 
@@ -154,24 +165,34 @@ export async function PATCH(req: NextRequest) {
       return NextResponse.json({ error: "id e obrigatorio" }, { status: 400 });
     }
 
-    const db = getDb();
-    const now = new Date().toISOString();
+    const updated = await dbAdmin
+      .update(crmImportMappings)
+      .set({
+        lastUsedAt: sql`NOW()`,
+        importCount: sql`${crmImportMappings.importCount} + 1`,
+        updatedAt: sql`NOW()`,
+      })
+      .where(
+        and(
+          eq(crmImportMappings.id, id),
+          eq(crmImportMappings.workspaceId, auth.workspace_id),
+        ),
+      )
+      .returning({
+        id: crmImportMappings.id,
+        name: crmImportMappings.name,
+        import_count: crmImportMappings.importCount,
+        last_used_at: crmImportMappings.lastUsedAt,
+      });
 
-    const result = await db.execute({
-      sql: `UPDATE crm_import_mappings
-            SET last_used_at = ?, import_count = import_count + 1, updated_at = ?
-            WHERE id = ? AND workspace_id = ?
-            RETURNING id, name, import_count, last_used_at`,
-      args: [now, now, id, auth.workspace_id],
-    });
-
-    if (result.rows.length === 0) {
+    if (updated.length === 0) {
       return NextResponse.json({ error: "Mapeamento nao encontrado" }, { status: 404 });
     }
 
-    return NextResponse.json({ mapping: result.rows[0] });
-  } catch (error: any) {
+    return NextResponse.json({ mapping: updated[0] });
+  } catch (error) {
     console.error("[import-mappings] PATCH error:", error);
-    return NextResponse.json({ error: error.message || "Internal server error" }, { status: 500 });
+    const msg = error instanceof Error ? error.message : "Internal server error";
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }

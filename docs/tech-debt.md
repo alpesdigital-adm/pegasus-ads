@@ -12,28 +12,30 @@ precisam ser endereçadas. Atualize o status ao resolver cada item (não apague
 
 ---
 
-## TD-011 — /api/attribution ignora param `campaign_key` 🔴 open
+## TD-011 — /api/attribution removida 🟢 done
 
-**Descoberto:** 2026-04-18 (Fase 1C Wave 2 — auditoria da rota pelo gêmeo VPS)
-**Dono:** Leandro (decisão de produto) + Claude (implementação)
-**Impacto:** a rota aceita `?campaign_key=...` na querystring, mas o
-SELECT agregado nunca usa esse valor como filtro. Métricas retornadas
-são globais (todos os criativos do workspace ≠ killed), não da campanha
-específica.
+**Descoberto:** 2026-04-18 (Fase 1C Wave 2 — auditoria pelo gêmeo VPS)
+**Atualizado:** 2026-04-18 (removida na Wave 7 — decisão de produto)
+**Dono:** Leandro (decisão) + Claude (implementação)
+**Impacto:** rota removida do repo. A avaliação do cowork (Claude do CRM,
+que era o único consumidor externo potencial) revelou que:
+- `live_metrics` ficava zerado para campanhas atuais (coeficientes
+  hardcoded do T4, sem query real em dados ativos)
+- `top_creatives_by_cpl` retornava vazio
+- O modelo era **projeção estática com coeficientes fixos**, não
+  atribuição de verdade
+- `/api/campaigns/[id]/drill` já cobre 100% do uso acionável
 
-**Contexto:** bug presente desde antes da migração Drizzle. O response
-documenta `campaign_key` como identificador da consulta, mas os números
-(`total_spend`, `total_leads`) não refletem isso.
+**Estado final:**
+- ✅ `src/app/api/attribution/route.ts` deletada
+- ✅ Entrada no OpenAPI (`/api/docs`) removida
+- ✅ Coeficientes T4 validados (CPL R$32,77, conv. rates, multi-ebook
+  effect) preservados em `docs/business/t4-attribution-coefficients.md`
+  como inteligência de negócio pra projeção/reconstrução futura
 
-**Como resolver:**
-1. Sign-off do Leandro sobre a intenção original (era pra filtrar ou não?)
-2. Se SIM: adicionar JOIN com campaigns + WHERE c.campaign_key =
-   campaign.metaCampaignId (ou equivalente) no aggregate
-3. Se NÃO: remover o param do OpenAPI spec + doc + tipo de response pra
-   refletir que é global
-
-**Quando:** não é bloqueador. Valor numérico da API pode ter sido
-consumido "errado" por dashboards — revisar antes de consertar.
+**Reconstrução futura:** se virar prioridade ter atribuição real, construir
+feature nova que cruze Neon (UTM) com CRM (matrícula) por email/cpf, com
+janela rolante — não remendar a rota antiga.
 
 ---
 

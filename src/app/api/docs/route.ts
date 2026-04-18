@@ -378,27 +378,6 @@ const OPENAPI_SPEC = {
       },
     },
 
-    // ── Atribuição ─────────────────────────────────────────────────────────
-    "/api/attribution": {
-      get: {
-        tags: ["Analytics"],
-        summary: "Modelo de atribuição first-touch + any-touch",
-        description:
-          "Retorna análise de atribuição com constantes validadas do T4 (16.136 leads, CPL R$32,77).",
-        parameters: [
-          { name: "campaign_key", in: "query", schema: { type: "string" } },
-          {
-            name: "period",
-            in: "query",
-            schema: { type: "string", enum: ["7d", "30d", "all"] },
-          },
-        ],
-        responses: {
-          "200": { description: "Dados de atribuição" },
-        },
-      },
-    },
-
     // ── Budget ─────────────────────────────────────────────────────────────
     "/api/budget/suggest": {
       get: {

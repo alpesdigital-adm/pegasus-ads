@@ -6,10 +6,25 @@
  * 2. API Key (chamadas externas)
  *
  * Cada request autenticada carrega workspace_id no contexto.
+ *
+ * MIGRADO NA FASE 1C (Wave 1 auth):
+ *  - getDb().execute() → dbAdmin (BYPASSRLS — auth acontece antes do
+ *    contexto de workspace_id estar definido)
+ *  - 7 queries CRUD em Drizzle typed builder
+ *  - ORDER BY complexo do TEST_LOG_API_KEY usa sql`` no orderBy
+ *  - Todas as funções preservam comportamento exato do legado
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getDb } from "./db";
+import { dbAdmin, sql } from "./db";
+import {
+  sessions,
+  workspaceMembers,
+  apiKeys,
+  workspaces,
+  workspaceMetaAccounts,
+} from "./db/schema";
+import { and, asc, desc, eq, gt, isNull } from "drizzle-orm";
 import crypto from "crypto";
 
 // ── Types ──
@@ -61,66 +76,78 @@ export function generateSessionToken(): string {
 
 export async function createSession(
   userId: string,
-  workspaceId: string
+  workspaceId: string,
 ): Promise<string> {
-  const db = getDb();
   const token = generateSessionToken();
-  const expiresAt = new Date(Date.now() + SESSION_DURATION_MS).toISOString();
+  const expiresAt = new Date(Date.now() + SESSION_DURATION_MS);
 
-  await db.execute({
-    sql: `INSERT INTO sessions (token, user_id, workspace_id, expires_at)
-          VALUES (?, ?, ?, ?)`,
-    args: [token, userId, workspaceId, expiresAt],
+  await dbAdmin.insert(sessions).values({
+    token,
+    userId,
+    workspaceId,
+    expiresAt,
   });
 
   return token;
 }
 
 export async function getSession(token: string): Promise<AuthContext | null> {
-  const db = getDb();
-  const result = await db.execute({
-    sql: `SELECT s.user_id, s.workspace_id, wm.role
-          FROM sessions s
-          JOIN workspace_members wm ON wm.user_id = s.user_id AND wm.workspace_id = s.workspace_id
-          WHERE s.token = ? AND s.expires_at > NOW()`,
-    args: [token],
-  });
+  const rows = await dbAdmin
+    .select({
+      userId: sessions.userId,
+      workspaceId: sessions.workspaceId,
+      role: workspaceMembers.role,
+    })
+    .from(sessions)
+    .innerJoin(
+      workspaceMembers,
+      and(
+        eq(workspaceMembers.userId, sessions.userId),
+        eq(workspaceMembers.workspaceId, sessions.workspaceId),
+      ),
+    )
+    .where(and(eq(sessions.token, token), gt(sessions.expiresAt, new Date())))
+    .limit(1);
 
-  if (result.rows.length === 0) return null;
-  const row = result.rows[0];
+  if (rows.length === 0) return null;
+  const row = rows[0];
   return {
-    user_id: row.user_id as string,
-    workspace_id: row.workspace_id as string,
+    user_id: row.userId as string,
+    workspace_id: row.workspaceId as string,
     role: row.role as "owner" | "admin" | "member",
     auth_method: "session",
   };
 }
 
 export async function deleteSession(token: string): Promise<void> {
-  const db = getDb();
-  await db.execute({ sql: `DELETE FROM sessions WHERE token = ?`, args: [token] });
+  await dbAdmin.delete(sessions).where(eq(sessions.token, token));
 }
 
 export async function switchWorkspace(
   token: string,
-  newWorkspaceId: string
+  newWorkspaceId: string,
 ): Promise<boolean> {
-  const db = getDb();
-
   // Verify user has access to the new workspace
   const session = await getSession(token);
   if (!session) return false;
 
-  const memberCheck = await db.execute({
-    sql: `SELECT 1 FROM workspace_members WHERE user_id = ? AND workspace_id = ?`,
-    args: [session.user_id, newWorkspaceId],
-  });
-  if (memberCheck.rows.length === 0) return false;
+  const memberCheck = await dbAdmin
+    .select({ workspaceId: workspaceMembers.workspaceId })
+    .from(workspaceMembers)
+    .where(
+      and(
+        eq(workspaceMembers.userId, session.user_id),
+        eq(workspaceMembers.workspaceId, newWorkspaceId),
+      ),
+    )
+    .limit(1);
 
-  await db.execute({
-    sql: `UPDATE sessions SET workspace_id = ? WHERE token = ?`,
-    args: [newWorkspaceId, token],
-  });
+  if (memberCheck.length === 0) return false;
+
+  await dbAdmin
+    .update(sessions)
+    .set({ workspaceId: newWorkspaceId })
+    .where(eq(sessions.token, token));
 
   return true;
 }
@@ -128,27 +155,37 @@ export async function switchWorkspace(
 // ── API Key Authentication ──
 
 async function authenticateApiKey(apiKey: string): Promise<AuthContext | null> {
-  const db = getDb();
-  const result = await db.execute({
-    sql: `SELECT ak.workspace_id, ak.user_id, wm.role
-          FROM api_keys ak
-          JOIN workspace_members wm ON wm.user_id = ak.user_id AND wm.workspace_id = ak.workspace_id
-          WHERE ak.key_hash = ? AND ak.revoked_at IS NULL`,
-    args: [hashApiKey(apiKey)],
-  });
+  const keyHash = hashApiKey(apiKey);
 
-  if (result.rows.length === 0) return null;
-  const row = result.rows[0];
+  const rows = await dbAdmin
+    .select({
+      workspaceId: apiKeys.workspaceId,
+      userId: apiKeys.userId,
+      role: workspaceMembers.role,
+    })
+    .from(apiKeys)
+    .innerJoin(
+      workspaceMembers,
+      and(
+        eq(workspaceMembers.userId, apiKeys.userId),
+        eq(workspaceMembers.workspaceId, apiKeys.workspaceId),
+      ),
+    )
+    .where(and(eq(apiKeys.keyHash, keyHash), isNull(apiKeys.revokedAt)))
+    .limit(1);
+
+  if (rows.length === 0) return null;
+  const row = rows[0];
 
   // Update last_used_at
-  await db.execute({
-    sql: `UPDATE api_keys SET last_used_at = NOW() WHERE key_hash = ?`,
-    args: [hashApiKey(apiKey)],
-  });
+  await dbAdmin
+    .update(apiKeys)
+    .set({ lastUsedAt: new Date() })
+    .where(eq(apiKeys.keyHash, keyHash));
 
   return {
-    user_id: row.user_id as string,
-    workspace_id: row.workspace_id as string,
+    user_id: row.userId as string,
+    workspace_id: row.workspaceId as string,
     role: row.role as "owner" | "admin" | "member",
     auth_method: "api_key",
   };
@@ -184,21 +221,29 @@ export async function authenticate(req: NextRequest): Promise<AuthContext | null
     const ctx = await authenticateApiKey(apiKey);
     if (ctx) return ctx;
 
-    // 2b. Legacy TEST_LOG_API_KEY (backward compat)
+    // 2b. Legacy TEST_LOG_API_KEY (backward compat — TD-003, remover 90d pós-Fase 2)
     if (apiKey === process.env.TEST_LOG_API_KEY) {
-      const db = getDb();
       // Prefer workspace with Meta account configured (for kill rules etc.)
-      const result = await db.execute({
-        sql: `SELECT w.id FROM workspaces w
-              LEFT JOIN workspace_meta_accounts wma ON wma.workspace_id = w.id
-              ORDER BY (wma.meta_account_id IS NOT NULL) DESC, w.created_at ASC
-              LIMIT 1`,
-        args: [],
-      });
-      if (result.rows.length > 0) {
+      // Drizzle não tem LEFT JOIN com ORDER BY em expressão simples, mas o
+      // builder aceita sql`` em orderBy — mantém: workspaces com Meta account
+      // vêm primeiro (DESC de IS NOT NULL), empate pelo workspace mais antigo.
+      const rows = await dbAdmin
+        .select({ id: workspaces.id })
+        .from(workspaces)
+        .leftJoin(
+          workspaceMetaAccounts,
+          eq(workspaceMetaAccounts.workspaceId, workspaces.id),
+        )
+        .orderBy(
+          desc(sql`${workspaceMetaAccounts.metaAccountId} IS NOT NULL`),
+          asc(workspaces.createdAt),
+        )
+        .limit(1);
+
+      if (rows.length > 0) {
         return {
           user_id: "legacy",
-          workspace_id: result.rows[0].id as string,
+          workspace_id: rows[0].id as string,
           role: "admin",
           auth_method: "api_key",
         };
@@ -213,7 +258,7 @@ export async function authenticate(req: NextRequest): Promise<AuthContext | null
  * Middleware wrapper — retorna 401 se não autenticado.
  */
 export async function requireAuth(
-  req: NextRequest
+  req: NextRequest,
 ): Promise<AuthContext | NextResponse> {
   const ctx = await authenticate(req);
   if (!ctx) {
@@ -223,7 +268,7 @@ export async function requireAuth(
         message: "Authentication required. Provide a session cookie or x-api-key header.",
         docs: "GET /api/docs for authentication details.",
       },
-      { status: 401 }
+      { status: 401 },
     );
   }
   return ctx;

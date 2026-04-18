@@ -10,11 +10,18 @@
  * - 400 VALIDATION_ERROR: campos obrigatórios ausentes ou email inválido
  * - 409 EMAIL_EXISTS: email já cadastrado
  * - 500 INTERNAL_ERROR: falha ao criar usuário
+ *
+ * MIGRADO NA FASE 1C (Wave 1 auth):
+ *  - initDb() → dbAdmin
+ *  - 2 queries próprias (SELECT email + INSERT user) em Drizzle
+ *  - createWorkspace continua legado (migrada depois junto com workspace.ts)
  */
 import { NextRequest, NextResponse } from "next/server";
-import { initDb } from "@/lib/db";
+import { dbAdmin } from "@/lib/db";
+import { users } from "@/lib/db/schema";
 import { createSession, setSessionCookie } from "@/lib/auth";
 import { createWorkspace } from "@/lib/workspace";
+import { eq } from "drizzle-orm";
 import crypto from "crypto";
 
 export async function POST(req: NextRequest) {
@@ -33,50 +40,57 @@ export async function POST(req: NextRequest) {
             name: !name ? "required" : undefined,
           },
         },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return NextResponse.json(
         { error: "VALIDATION_ERROR", message: "Invalid email format" },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
     if (password.length < 8) {
       return NextResponse.json(
         { error: "VALIDATION_ERROR", message: "Password must be at least 8 characters" },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
-    const db = (await initDb());
+    const emailLower = String(email).toLowerCase();
 
     // Check existing email
-    const existing = await db.execute({
-      sql: `SELECT id FROM users WHERE email = ?`,
-      args: [email.toLowerCase()],
-    });
-    if (existing.rows.length > 0) {
+    const existing = await dbAdmin
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.email, emailLower))
+      .limit(1);
+
+    if (existing.length > 0) {
       return NextResponse.json(
         { error: "EMAIL_EXISTS", message: "A user with this email already exists" },
-        { status: 409 }
+        { status: 409 },
       );
     }
 
-    // Create user
-    const userId = crypto.randomUUID();
+    // Create user (scrypt password: hash:salt)
     const salt = crypto.randomBytes(16).toString("hex");
     const passwordHash = crypto.scryptSync(password, salt, 64).toString("hex") + ":" + salt;
 
-    await db.execute({
-      sql: `INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)`,
-      args: [userId, email.toLowerCase(), name, passwordHash],
-    });
+    const inserted = await dbAdmin
+      .insert(users)
+      .values({
+        email: emailLower,
+        name,
+        passwordHash,
+      })
+      .returning({ id: users.id });
 
-    // Create default workspace
-    const slug = email.split("@")[0].toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 30);
+    const userId = inserted[0].id as string;
+
+    // Create default workspace (via library legado, migração pendente)
+    const slug = emailLower.split("@")[0].replace(/[^a-z0-9-]/g, "-").slice(0, 30);
     const wsName = workspace_name || `${name}'s Workspace`;
     const workspaceId = await createWorkspace({
       name: wsName,
@@ -87,17 +101,20 @@ export async function POST(req: NextRequest) {
     // Create session
     const token = await createSession(userId, workspaceId);
 
-    const response = NextResponse.json({
-      user: { id: userId, email: email.toLowerCase(), name },
-      workspace: { id: workspaceId, name: wsName },
-    }, { status: 201 });
+    const response = NextResponse.json(
+      {
+        user: { id: userId, email: emailLower, name },
+        workspace: { id: workspaceId, name: wsName },
+      },
+      { status: 201 },
+    );
 
     return setSessionCookie(response, token);
   } catch (error) {
     console.error("[auth/register]", error);
     return NextResponse.json(
       { error: "INTERNAL_ERROR", message: error instanceof Error ? error.message : "Registration failed" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

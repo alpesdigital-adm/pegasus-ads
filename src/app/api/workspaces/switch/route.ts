@@ -9,13 +9,15 @@
  * - 401 UNAUTHORIZED: não autenticado
  * - 400 VALIDATION_ERROR: workspace_id ausente
  * - 403 NO_ACCESS: usuário não é membro do workspace
+ *
+ * MIGRADO NA FASE 1C (Wave 1 auth):
+ *  - initDb() removido — schema é gerenciado por Drizzle migrations.
+ *  - switchWorkspace já usa Drizzle via auth.ts migrado.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuth, switchWorkspace, AuthContext } from "@/lib/auth";
-import { initDb } from "@/lib/db";
+import { requireAuth, switchWorkspace } from "@/lib/auth";
 
 export async function POST(req: NextRequest) {
-  await initDb();
   const authResult = await requireAuth(req);
   if (authResult instanceof NextResponse) return authResult;
 
@@ -25,7 +27,7 @@ export async function POST(req: NextRequest) {
   if (!workspace_id) {
     return NextResponse.json(
       { error: "VALIDATION_ERROR", message: "Field required: workspace_id" },
-      { status: 400 }
+      { status: 400 },
     );
   }
 
@@ -33,7 +35,7 @@ export async function POST(req: NextRequest) {
   if (!token) {
     return NextResponse.json(
       { error: "UNAUTHORIZED", message: "Session cookie required for workspace switch" },
-      { status: 401 }
+      { status: 401 },
     );
   }
 
@@ -41,7 +43,7 @@ export async function POST(req: NextRequest) {
   if (!switched) {
     return NextResponse.json(
       { error: "NO_ACCESS", message: "You are not a member of this workspace" },
-      { status: 403 }
+      { status: 403 },
     );
   }
 

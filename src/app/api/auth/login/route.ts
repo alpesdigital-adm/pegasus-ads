@@ -9,10 +9,16 @@
  * Se workspace_id omitido, usa o primeiro workspace do usuario.
  *
  * Suporta bcrypt ($2b$...) e scrypt (hash:salt) password hashes.
+ *
+ * MIGRADO NA FASE 1C (Wave 1 auth):
+ *  - initDb() → dbAdmin (auth happens cross-workspace)
+ *  - 3 queries em Drizzle typed builder
  */
 import { NextRequest, NextResponse } from "next/server";
-import { initDb } from "@/lib/db";
+import { dbAdmin } from "@/lib/db";
+import { users, workspaceMembers } from "@/lib/db/schema";
 import { createSession, setSessionCookie } from "@/lib/auth";
+import { and, asc, eq } from "drizzle-orm";
 import crypto from "crypto";
 import bcryptjs from "bcryptjs";
 
@@ -40,59 +46,74 @@ export async function POST(req: NextRequest) {
     if (!email || !password) {
       return NextResponse.json(
         { error: "VALIDATION_ERROR", message: "Fields required: email, password" },
-        { status: 400 }
+        { status: 400 },
       );
     }
-
-    const db = await initDb();
 
     // Find user
-    const userResult = await db.execute({
-      sql: `SELECT id, email, name, password_hash, avatar_url FROM users WHERE email = ?`,
-      args: [email.toLowerCase()],
-    });
+    const userRows = await dbAdmin
+      .select({
+        id: users.id,
+        email: users.email,
+        name: users.name,
+        passwordHash: users.passwordHash,
+        avatarUrl: users.avatarUrl,
+      })
+      .from(users)
+      .where(eq(users.email, String(email).toLowerCase()))
+      .limit(1);
 
-    if (userResult.rows.length === 0) {
+    if (userRows.length === 0) {
       return NextResponse.json(
         { error: "INVALID_CREDENTIALS", message: "Invalid email or password" },
-        { status: 401 }
+        { status: 401 },
       );
     }
 
-    const user = userResult.rows[0];
-    const passwordValid = await verifyPassword(password, user.password_hash as string);
+    const user = userRows[0];
+    const passwordValid = await verifyPassword(password, user.passwordHash as string);
 
     if (!passwordValid) {
       return NextResponse.json(
         { error: "INVALID_CREDENTIALS", message: "Invalid email or password" },
-        { status: 401 }
+        { status: 401 },
       );
     }
 
     // Resolve workspace
-    let wsId = workspace_id;
+    let wsId: string | undefined = workspace_id;
     if (!wsId) {
-      const wsResult = await db.execute({
-        sql: `SELECT workspace_id FROM workspace_members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1`,
-        args: [user.id as string],
-      });
-      if (wsResult.rows.length === 0) {
+      const wsRows = await dbAdmin
+        .select({ workspaceId: workspaceMembers.workspaceId })
+        .from(workspaceMembers)
+        .where(eq(workspaceMembers.userId, user.id as string))
+        .orderBy(asc(workspaceMembers.createdAt))
+        .limit(1);
+
+      if (wsRows.length === 0) {
         return NextResponse.json(
           { error: "NO_WORKSPACE_ACCESS", message: "User has no workspaces" },
-          { status: 403 }
+          { status: 403 },
         );
       }
-      wsId = wsResult.rows[0].workspace_id;
+      wsId = wsRows[0].workspaceId as string;
     } else {
       // Verify access
-      const accessCheck = await db.execute({
-        sql: `SELECT 1 FROM workspace_members WHERE user_id = ? AND workspace_id = ?`,
-        args: [user.id as string, wsId],
-      });
-      if (accessCheck.rows.length === 0) {
+      const accessCheck = await dbAdmin
+        .select({ workspaceId: workspaceMembers.workspaceId })
+        .from(workspaceMembers)
+        .where(
+          and(
+            eq(workspaceMembers.userId, user.id as string),
+            eq(workspaceMembers.workspaceId, wsId),
+          ),
+        )
+        .limit(1);
+
+      if (accessCheck.length === 0) {
         return NextResponse.json(
           { error: "NO_WORKSPACE_ACCESS", message: "User does not have access to this workspace" },
-          { status: 403 }
+          { status: 403 },
         );
       }
     }
@@ -101,7 +122,12 @@ export async function POST(req: NextRequest) {
     const token = await createSession(user.id as string, wsId as string);
 
     const response = NextResponse.json({
-      user: { id: user.id, email: user.email, name: user.name, avatar_url: user.avatar_url },
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        avatar_url: user.avatarUrl,
+      },
       workspace_id: wsId,
     });
 
@@ -110,7 +136,7 @@ export async function POST(req: NextRequest) {
     console.error("[auth/login]", error);
     return NextResponse.json(
       { error: "INTERNAL_ERROR", message: error instanceof Error ? error.message : "Login failed" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

@@ -1,6 +1,15 @@
+/**
+ * GET /api/auth/google/callback
+ *
+ * Callback do OAuth Google — troca code por tokens e persiste.
+ *
+ * MIGRADO NA FASE 1C (Wave 1 auth):
+ *  - initDb() removido — schema é gerenciado por Drizzle migrations.
+ *  - saveTokens continua via google-drive.ts (library legado — migração
+ *    pendente junto com google-drive.ts).
+ */
 import { NextRequest, NextResponse } from "next/server";
 import { exchangeCodeForToken, saveTokens } from "@/lib/google-drive";
-import { initDb } from "@/lib/db";
 import { requireAuth } from "@/lib/auth";
 
 export async function GET(request: NextRequest) {
@@ -22,13 +31,10 @@ export async function GET(request: NextRequest) {
       return NextResponse.redirect(new URL("/?error=no_code", request.url));
     }
 
-    // Initialize DB first
-    await initDb();
-
     // Exchange code for tokens
     const tokens = await exchangeCodeForToken(code);
 
-    // Save tokens to DB
+    // Save tokens to DB (via google-drive.ts legacy — migra com workspace.ts)
     await saveTokens(auth.workspace_id, tokens);
 
     // Redirect back to app with success message

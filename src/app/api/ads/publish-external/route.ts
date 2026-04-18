@@ -24,7 +24,8 @@
  * Protegido por x-api-key (TEST_LOG_API_KEY).
  */
 import { NextRequest, NextResponse } from "next/server";
-import { getDb } from "@/lib/db";
+// NOTE: esta rota não toca DB diretamente — lógica é 100% Meta API +
+// google-drive. getDb() antigo era dead code e foi removido na Fase 1C.
 import { requireAuth } from "@/lib/auth";
 import * as meta from "@/lib/meta";
 import { listFilesInFolder, downloadFile, DriveFile } from "@/lib/google-drive";
@@ -98,7 +99,6 @@ export async function POST(req: NextRequest) {
   if (auth instanceof NextResponse) return auth;
 
   try {
-    const db = getDb();
     const body = await req.json();
     const campaignKey = body.campaign_key || "T7_0003_RAT";
 

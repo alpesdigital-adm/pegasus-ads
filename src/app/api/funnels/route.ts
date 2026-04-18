@@ -1,13 +1,21 @@
 /**
  * GET  /api/funnels           — Lista funis cadastrados com métricas agregadas
- * POST /api/funnels           — Cadastra novo funil
+ * POST /api/funnels           — Cadastra novo funil (UPSERT por key)
  *
  * Multi-funil (tarefa 4.3).
+ *
+ * MIGRADO NA FASE 1C (Wave 2):
+ *  - getDb() → withWorkspace (RLS scoped)
+ *  - Aggregate query (JOIN + GROUP BY + CASE) em sql`` — mais legível
+ *  - INSERT + ON CONFLICT via Drizzle onConflictDoUpdate
+ *  - UPDATE de creatives.funnel_key em Drizzle
+ *  - randomUUID() removido (.defaultRandom() cobre)
  */
 import { NextRequest, NextResponse } from "next/server";
-import { getDb } from "@/lib/db";
+import { withWorkspace, sql } from "@/lib/db";
+import { funnels, creatives } from "@/lib/db/schema";
 import { requireAuth } from "@/lib/auth";
-import { randomUUID } from "crypto";
+import { and, eq, ilike } from "drizzle-orm";
 
 export const runtime = "nodejs";
 
@@ -16,16 +24,13 @@ export async function GET(req: NextRequest) {
   if (auth instanceof NextResponse) return auth;
 
   try {
-    const db = getDb();
     const { searchParams } = new URL(req.url);
     const activeOnly = searchParams.get("active_only") === "true";
 
-    const where = activeOnly
-      ? "WHERE f.active = TRUE AND f.workspace_id = ?"
-      : "WHERE f.workspace_id = ?";
-
-    const res = await db.execute({
-      sql: `
+    // Aggregate com LEFT JOIN duplo + CASE WHEN — mantém sql`` por legibilidade.
+    // RLS enforça workspace_id no f (funnels) e c (creatives) via SET LOCAL.
+    const result = await withWorkspace(auth.workspace_id, async (tx) => {
+      return tx.execute(sql`
         SELECT
           f.*,
           COUNT(DISTINCT c.id)            AS total_creatives,
@@ -34,21 +39,23 @@ export async function GET(req: NextRequest) {
           COUNT(DISTINCT CASE WHEN c.status = 'killed'  THEN c.id END)  AS killed_creatives,
           COALESCE(SUM(m.spend), 0)       AS total_spend,
           COALESCE(SUM(m.leads), 0)       AS total_leads,
-          CASE WHEN SUM(m.leads) > 0 THEN ROUND((SUM(m.spend) / SUM(m.leads))::numeric, 2) ELSE NULL END AS avg_cpl
+          CASE WHEN SUM(m.leads) > 0
+               THEN ROUND((SUM(m.spend) / SUM(m.leads))::numeric, 2)
+               ELSE NULL END              AS avg_cpl
         FROM funnels f
-        LEFT JOIN creatives c ON c.funnel_key = f.key AND c.workspace_id = f.workspace_id
+        LEFT JOIN creatives c ON c.funnel_key = f.key
         LEFT JOIN metrics m ON m.creative_id = c.id
-        ${where}
+        ${activeOnly ? sql`WHERE f.active = TRUE` : sql``}
         GROUP BY f.id, f.key, f.name, f.prefix, f.ebook_title, f.cpl_target,
                  f.meta_campaign_id, f.meta_account_id, f.active, f.created_at, f.workspace_id
         ORDER BY f.key
-      `,
-      args: [auth.workspace_id],
+      `);
     });
 
+    const rows = result as unknown as Array<Record<string, unknown>>;
     return NextResponse.json({
-      total: res.rows.length,
-      funnels: res.rows.map(r => ({
+      total: rows.length,
+      funnels: rows.map((r) => ({
         ...r,
         total_creatives: parseInt(r.total_creatives as string),
         active_creatives: parseInt(r.active_creatives as string),
@@ -70,7 +77,6 @@ export async function POST(req: NextRequest) {
   if (auth instanceof NextResponse) return auth;
 
   try {
-    const db = getDb();
     const body = await req.json();
     const {
       key, name, prefix, ebook_title = null,
@@ -79,34 +85,78 @@ export async function POST(req: NextRequest) {
     } = body;
 
     if (!key || !name || !prefix) {
-      return NextResponse.json({ error: "key, name, prefix são obrigatórios" }, { status: 400 });
+      return NextResponse.json(
+        { error: "key, name, prefix são obrigatórios" },
+        { status: 400 },
+      );
     }
 
-    const id = randomUUID();
-    await db.execute({
-      sql: `INSERT INTO funnels (id, key, name, prefix, ebook_title, cpl_target, meta_campaign_id, meta_account_id, active, workspace_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (key) DO UPDATE SET
-              name = EXCLUDED.name, prefix = EXCLUDED.prefix,
-              ebook_title = EXCLUDED.ebook_title, cpl_target = EXCLUDED.cpl_target,
-              meta_campaign_id = EXCLUDED.meta_campaign_id,
-              meta_account_id = EXCLUDED.meta_account_id, active = EXCLUDED.active`,
-      args: [id, key, name, prefix, ebook_title, cpl_target, meta_campaign_id, meta_account_id, active, auth.workspace_id],
-    });
+    const { funnel, creativesUpdated } = await withWorkspace(
+      auth.workspace_id,
+      async (tx) => {
+        // UPSERT do funnel (ON CONFLICT key)
+        await tx
+          .insert(funnels)
+          .values({
+            workspaceId: auth.workspace_id,
+            key,
+            name,
+            prefix,
+            ebookTitle: ebook_title,
+            cplTarget: cpl_target,
+            metaCampaignId: meta_campaign_id,
+            metaAccountId: meta_account_id,
+            active,
+          })
+          .onConflictDoUpdate({
+            target: funnels.key,
+            set: {
+              name: sql`EXCLUDED.name`,
+              prefix: sql`EXCLUDED.prefix`,
+              ebookTitle: sql`EXCLUDED.ebook_title`,
+              cplTarget: sql`EXCLUDED.cpl_target`,
+              metaCampaignId: sql`EXCLUDED.meta_campaign_id`,
+              metaAccountId: sql`EXCLUDED.meta_account_id`,
+              active: sql`EXCLUDED.active`,
+            },
+          });
 
-    // Atualizar funnel_key nos criativos que matcham o prefixo no workspace
-    const updated = await db.execute({
-      sql: `UPDATE creatives SET funnel_key = ? WHERE name ILIKE ? AND funnel_key IS DISTINCT FROM ? AND workspace_id = ?`,
-      args: [key, `${prefix}%`, key, auth.workspace_id],
-    });
+        // Atualizar funnel_key nos criativos que matcham o prefixo.
+        // IS DISTINCT FROM trata NULL como valor (inclui funnelKey IS NULL)
+        // — Drizzle não tem helper, uso sql`` para preservar a semântica original.
+        const updatedRows = await tx
+          .update(creatives)
+          .set({ funnelKey: key })
+          .where(
+            and(
+              ilike(creatives.name, `${prefix}%`),
+              sql`${creatives.funnelKey} IS DISTINCT FROM ${key}`,
+            ),
+          )
+          .returning({ id: creatives.id });
 
-    const result = await db.execute({ sql: "SELECT * FROM funnels WHERE key = ? AND workspace_id = ?", args: [key, auth.workspace_id] });
+        // SELECT o funnel atualizado
+        const funnelRows = await tx
+          .select()
+          .from(funnels)
+          .where(eq(funnels.key, key))
+          .limit(1);
 
-    return NextResponse.json({
-      ok: true,
-      funnel: result.rows[0],
-      creatives_updated: updated.rowCount,
-    }, { status: 201 });
+        return {
+          funnel: funnelRows[0],
+          creativesUpdated: updatedRows.length,
+        };
+      },
+    );
+
+    return NextResponse.json(
+      {
+        ok: true,
+        funnel,
+        creatives_updated: creativesUpdated,
+      },
+      { status: 201 },
+    );
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }

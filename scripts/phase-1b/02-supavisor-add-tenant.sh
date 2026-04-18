@@ -172,24 +172,42 @@ docker inspect "$CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}'
 cat /tmp/supavisor-env.txt
 echo
 
-# 2. Tentar MODO 1 (SQL) — localizar database de tenants
+# 2. Tentar MODO 1 (SQL) — localizar database e schema de tenants
 log "Modo 1: procurando database de tenants (SQL)"
 TENANT_DB=""
-for candidate in _supavisor supabase_supavisor postgres; do
+TENANT_SCHEMA=""
+# Nota 2026-04-18: em supabase/postgres 17 self-hosted, tenants vivem em
+# _supabase._supavisor.tenants (não em postgres public). Ordem ajustada.
+for candidate in _supabase _supavisor supabase_supavisor postgres; do
   exists=$(docker exec "$DB_CONTAINER" psql -U supabase_admin -d postgres -tAc \
     "SELECT 1 FROM pg_database WHERE datname = '$candidate'" 2>/dev/null || true)
-  if [[ "$exists" == "1" ]]; then
-    has_tenants=$(docker exec "$DB_CONTAINER" psql -U supabase_admin -d "$candidate" -tAc \
-      "SELECT 1 FROM information_schema.tables WHERE table_name = 'tenants'" 2>/dev/null || true)
-    if [[ "$has_tenants" == "1" ]]; then
-      TENANT_DB="$candidate"
-      break
-    fi
+  [[ "$exists" == "1" ]] || continue
+  # Detecta schema que contem a tabela tenants (pode ser _supavisor ou public)
+  schema=$(docker exec "$DB_CONTAINER" psql -U supabase_admin -d "$candidate" -tAc \
+    "SELECT table_schema FROM information_schema.tables WHERE table_name = 'tenants' ORDER BY CASE table_schema WHEN '_supavisor' THEN 0 ELSE 1 END LIMIT 1" 2>/dev/null || true)
+  if [[ -n "$schema" ]]; then
+    TENANT_DB="$candidate"
+    TENANT_SCHEMA="$schema"
+    break
   fi
 done
 
 if [[ -n "$TENANT_DB" ]]; then
-  ok "Database de tenants: $TENANT_DB — uso modo SQL"
+  ok "Tenants em $TENANT_DB.$TENANT_SCHEMA"
+  # Sanity: versões novas do Supavisor (>=1.1x) usam schema _supavisor com
+  # tenants (config) + users (credenciais com db_pass_encrypted bytea).
+  # A função configure_via_sql desta revisão pressupõe colunas antigas
+  # (db_user/db_password em tenants). Abortar se schema moderno detectado.
+  has_legacy_cols=$(docker exec "$DB_CONTAINER" psql -U supabase_admin -d "$TENANT_DB" -tAc \
+    "SELECT 1 FROM information_schema.columns WHERE table_schema='$TENANT_SCHEMA' AND table_name='tenants' AND column_name='db_user'" 2>/dev/null || true)
+  if [[ "$has_legacy_cols" != "1" ]]; then
+    err "Supavisor moderno detectado (schema _supavisor, users em tabela separada com bytea encryption)."
+    err "Este script só suporta schema legado. Configuração manual necessária — ver TD-002 em docs/tech-debt.md."
+    err "Ainda assim, preview do que existe:"
+    docker exec "$DB_CONTAINER" psql -U supabase_admin -d "$TENANT_DB" -c \
+      "SELECT external_id, db_host, db_database, require_user FROM $TENANT_SCHEMA.tenants ORDER BY external_id" || true
+    exit 2
+  fi
   configure_via_sql "$TENANT_DB"
 else
   warn "Nenhum database com tabela 'tenants' encontrado — tentando HTTP API"

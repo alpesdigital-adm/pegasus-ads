@@ -65,34 +65,51 @@ não confundir falha real de CI com ruído residual.
 
 ---
 
-## TD-002 — Configurar Supavisor no pegasus_ads 🟡 in-progress
+## TD-002 — Configurar Supavisor no pegasus_ads 🟡 in-progress (deferred)
 
 **Descoberto:** 2026-04-17 (Fase 0 da migração)
-**Atualizado:** 2026-04-17 (Fase 1B — step 02 skipado por bug pipefail no
-script; será feito como parte do cutover manual)
-**Dono:** Claude / Leandro (pre-cutover)
+**Atualizado:** 2026-04-18 (pós-cutover: investigação revelou
+schema/versão do Supavisor incompatível com o script — deferido)
+**Dono:** Claude / Leandro (pós-cutover estabilizado)
 **Impacto:** o cluster já tem Supavisor (`alpes-ads_supabase-supavisor-1`),
-mas o `.env` do pegasus-ads hoje aponta conexão direta ao Postgres
-(`alpes-ads_supabase-db:5432`). Falta configurar o Supavisor para o
-novo database `pegasus_ads` e trocar o `DATABASE_URL` para passar pelo
-pooler em transaction mode (ganho de multiplexing).
+mas NINGUÉM usa hoje (CRM e Ads ambos em conexão direta porta 5432).
+Supavisor seria ganho de multiplexing/pool, não bloqueador.
 
-**Contexto:** o plano v1.3 (seção 4.1) assumia PgBouncer em porta 6543.
-Na verdade o stack usa **Supavisor** (Supabase moderno), que faz o
-mesmo papel em outra porta/config. `DATABASE_URL_ADMIN` continua em
-conexão direta (drizzle-kit + migrations não devem passar pelo pooler).
+**Contexto (expandido 2026-04-18):**
+- O cluster roda Supavisor moderno: tenants em
+  `_supabase._supavisor.tenants` + usuários em `_supavisor.users` com
+  `db_pass_encrypted bytea` (AES-GCM via API_JWT_SECRET)
+- Script `scripts/phase-1b/02-supavisor-add-tenant.sh` assumia schema
+  antigo (colunas `db_user/db_password` inline em tenants) — agora
+  detecta o schema moderno e ABORTA com erro claro, em vez de tentar
+  INSERT inválido
+- HTTP API em `:4000/api/tenants` retorna 404 (esta versão não expõe
+  management REST)
+- CRM NÃO usa Supavisor (mesmo padrão direto porta 5432) — precedente
+  de "viver sem pooling" já está estabelecido
+- `API_JWT_SECRET` continua com valor demo público (TD-006 overlap)
 
-**Como resolver:**
-1. Dentro de `alpes-ads_supabase-supavisor-1`, adicionar tenant
-   `pegasus_ads` (confere como o CRM fez — provavelmente via env
-   `POOLER_TENANT_ID` ou config file)
-2. Atualizar o plano v1.4 trocando "PgBouncer" por "Supavisor" nas
-   seções 4.1 / 4.3 / 5.8
-3. Trocar `DATABASE_URL` do pegasus-ads para a URL via Supavisor
-4. Validar que `SET LOCAL app.workspace_id` funciona no transaction
-   mode do Supavisor (ponto de atenção da seção 5.8 do plano)
+**Riscos pendentes:** RLS `SET LOCAL app.workspace_id` pode não
+persistir em transaction-mode (precisa validar antes de swapear
+DATABASE_URL em prod)
 
-**Quando:** antes da Fase 1 cair em produção.
+**Como resolver (ordem):**
+1. Rotacionar `API_JWT_SECRET` + `SECRET_KEY_BASE` do Supavisor
+   (coordenar com time CRM — depende do plano TD-006)
+2. Criar tenant via SQL direto em `_supavisor.tenants`
+   (require_user=false, sem auth) + row em `_supavisor.users` com
+   db_pass_encrypted correto (cifrar com chave derivada do novo
+   API_JWT_SECRET — ou usar Supavisor CLI/Elixir shell dentro do
+   container: `docker exec ... bin/supavisor rpc ...`)
+3. Reiniciar Supavisor, validar conexão pooled com `psql`
+4. Testar `SET LOCAL app.workspace_id` + query em RLS scope dentro de
+   transaction — confirmar que persiste
+5. Trocar `DATABASE_URL` do pegasus-ads para a URL via Supavisor,
+   rebuildar green
+6. Monitorar 1h — se quebrar, reverter para direto em 30s
+
+**Quando:** depois do cutover estabilizar (monitor 24-48h OK) E
+depois de rotacionar segredos demo do cluster (TD-006). Não é P1.
 
 ---
 

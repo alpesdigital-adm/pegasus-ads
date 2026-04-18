@@ -3,10 +3,16 @@
  *
  * Relatório hierárquico de performance de criativos.
  * Retorna dados em 3 níveis: Conceito → Ângulo → Ad (com breakdown diário).
+ *
+ * MIGRADO NA FASE 1C (Wave 5):
+ *  - getDb() → withWorkspace (RLS escopa ad_creatives/classified_insights/crm_leads)
+ *  - 4 queries em sql`` com filtros dinâmicos via fragments
+ *  - Filtros workspace_id manuais removidos (RLS cobre)
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
-import { getDb } from "@/lib/db";
+import { withWorkspace } from "@/lib/db";
+import { sql } from "drizzle-orm";
 
 export const runtime = "nodejs";
 
@@ -16,148 +22,134 @@ export async function GET(req: NextRequest) {
 
   const sp = req.nextUrl.searchParams;
   const days = parseInt(sp.get("days") || "7", 10);
-  const filterOffer = sp.get("offer") || "";
-  const filterConcept = sp.get("concept") || "";
-  const filterLaunch = sp.get("launch") || "";
-  const filterFormat = sp.get("format") || "";
-  const filterCampaign = sp.get("campaign") || "";
-  const filterAdset = sp.get("adset") || "";
+  const fOffer = sp.get("offer") || "";
+  const fConcept = sp.get("concept") || "";
+  const fLaunch = sp.get("launch") || "";
+  const fFormat = sp.get("format") || "";
+  const fCampaign = sp.get("campaign") || "";
+  const fAdset = sp.get("adset") || "";
 
   try {
-    const db = getDb();
+    const filters = [
+      fOffer ? sql`AND o.key = ${fOffer}` : sql``,
+      fConcept ? sql`AND con.code = ${fConcept}` : sql``,
+      fLaunch ? sql`AND l.key = ${fLaunch}` : sql``,
+      fFormat ? sql`AND ac.format = ${fFormat}` : sql``,
+      fCampaign ? sql`AND ci.campaign_name = ${fCampaign}` : sql``,
+      fAdset ? sql`AND ci.adset_name = ${fAdset}` : sql``,
+    ];
 
-    // ── 1. Filter options (for dropdowns) ──
-    const filtersResult = await db.execute({
-      sql: `
-        SELECT
-          DISTINCT o.key AS offer_key, o.name AS offer_name,
-          con.code AS concept_code, con.name AS concept_name,
-          l.key AS launch_key, l.name AS launch_name,
-          ac.format
-        FROM ad_creatives ac
-        JOIN offers o ON ac.offer_id = o.id
-        JOIN launches l ON ac.launch_id = l.id
-        LEFT JOIN angles ang ON ac.angle_id = ang.id
-        LEFT JOIN concepts con ON ang.concept_id = con.id
-        WHERE ac.workspace_id = ?
-      `,
-      args: [auth.workspace_id],
-    });
+    const { filtersRows, campaignRows, mainRows, crmRows } = await withWorkspace(
+      auth.workspace_id,
+      async (tx) => {
+        // ── Filter options ──
+        const f = await tx.execute(sql`
+          SELECT
+            DISTINCT o.key AS offer_key, o.name AS offer_name,
+            con.code AS concept_code, con.name AS concept_name,
+            l.key AS launch_key, l.name AS launch_name,
+            ac.format
+          FROM ad_creatives ac
+          JOIN offers o ON ac.offer_id = o.id
+          JOIN launches l ON ac.launch_id = l.id
+          LEFT JOIN angles ang ON ac.angle_id = ang.id
+          LEFT JOIN concepts con ON ang.concept_id = con.id
+        `);
 
-    // Unique filter values
-    const offers = [...new Map(filtersResult.rows.map((r: any) => [r.offer_key, { key: r.offer_key, name: r.offer_name }])).values()];
-    const concepts = [...new Map(filtersResult.rows.filter((r: any) => r.concept_code).map((r: any) => [r.concept_code, { code: r.concept_code, name: r.concept_name }])).values()];
-    const launches = [...new Map(filtersResult.rows.map((r: any) => [r.launch_key, { key: r.launch_key, name: r.launch_name }])).values()];
-    const formats = [...new Set(filtersResult.rows.map((r: any) => r.format))].filter(Boolean).sort();
+        const c = await tx.execute(sql`
+          SELECT DISTINCT ci.campaign_name, ci.adset_name
+          FROM classified_insights ci
+          INNER JOIN ad_creatives ac ON ci.ad_name = ac.ad_name
+          WHERE ci.date >= CURRENT_DATE - (${days}::INTEGER * INTERVAL '1 day')
+          ORDER BY ci.campaign_name, ci.adset_name
+        `);
 
-    // Campaign + adset options from classified_insights
-    const campaignResult = await db.execute({
-      sql: `
-        SELECT DISTINCT ci.campaign_name, ci.adset_name
-        FROM classified_insights ci
-        INNER JOIN ad_creatives ac ON ci.ad_name = ac.ad_name
-        WHERE ac.workspace_id = ?
-          AND ci.date >= CURRENT_DATE - CAST(? AS INTEGER) * INTERVAL '1 day'
-        ORDER BY ci.campaign_name, ci.adset_name
-      `,
-      args: [auth.workspace_id, days],
-    });
-    const campaigns = [...new Set(campaignResult.rows.map((r: any) => r.campaign_name))].sort();
-    const adsets = [...new Set(campaignResult.rows.map((r: any) => r.adset_name))].sort();
+        // ── Main hierarchical ──
+        const m = await tx.execute(sql`
+          SELECT
+            o.key AS offer_key,
+            o.name AS offer_name,
+            COALESCE(con.code, 'PRE') AS concept_code,
+            COALESCE(con.name, ac.concept_label, 'Pre-Conceito') AS concept_name,
+            COALESCE(ang.code, '-') AS angle_code,
+            COALESCE(ang.name, '-') AS angle_name,
+            COALESCE(ac.motor, ang.motor, '-') AS motor,
+            ac.ad_name,
+            ac.format,
+            ac.hook,
+            ac.status AS ad_status,
+            CAST(ci.date AS TEXT) AS date,
+            ci.campaign_name,
+            ci.adset_name,
+            CAST(ci.spend AS FLOAT) AS spend,
+            ci.impressions,
+            ci.link_clicks AS clicks,
+            ci.landing_page_views AS lpv,
+            ci.leads AS leads_meta
+          FROM ad_creatives ac
+          JOIN offers o ON ac.offer_id = o.id
+          JOIN launches l ON ac.launch_id = l.id
+          LEFT JOIN angles ang ON ac.angle_id = ang.id
+          LEFT JOIN concepts con ON ang.concept_id = con.id
+          INNER JOIN classified_insights ci ON ci.ad_name = ac.ad_name
+          WHERE ci.date >= CURRENT_DATE - (${days}::INTEGER * INTERVAL '1 day')
+            ${filters[0]} ${filters[1]} ${filters[2]}
+            ${filters[3]} ${filters[4]} ${filters[5]}
+          ORDER BY o.key, concept_code, angle_code, ac.ad_name, ci.date
+        `);
 
-    // ── 2. Build WHERE clauses ──
-    const wheres: string[] = ["ac.workspace_id = ?", "ci.date >= CURRENT_DATE - CAST(? AS INTEGER) * INTERVAL '1 day'"];
-    const args: any[] = [auth.workspace_id, days];
+        // ── CRM leads ──
+        const crm = await tx.execute(sql`
+          SELECT
+            cl.utm_content AS ad_name,
+            cl.utm_campaign AS campaign_name,
+            cl.utm_term AS adset_name,
+            COUNT(*) AS leads_crm,
+            SUM(CASE WHEN cl.is_qualified THEN 1 ELSE 0 END) AS leads_qualified,
+            CAST(CAST(cl.subscribed_at AS DATE) AS TEXT) AS dt
+          FROM crm_leads cl
+          INNER JOIN ad_creatives ac ON cl.utm_content = ac.ad_name
+          WHERE cl.subscribed_at >= CURRENT_DATE - (${days}::INTEGER * INTERVAL '1 day')
+          GROUP BY cl.utm_content, cl.utm_campaign, cl.utm_term, CAST(cl.subscribed_at AS DATE)
+        `);
 
-    if (filterOffer) {
-      wheres.push("o.key = ?");
-      args.push(filterOffer);
-    }
-    if (filterConcept) {
-      wheres.push("con.code = ?");
-      args.push(filterConcept);
-    }
-    if (filterLaunch) {
-      wheres.push("l.key = ?");
-      args.push(filterLaunch);
-    }
-    if (filterFormat) {
-      wheres.push("ac.format = ?");
-      args.push(filterFormat);
-    }
-    if (filterCampaign) {
-      wheres.push("ci.campaign_name = ?");
-      args.push(filterCampaign);
-    }
-    if (filterAdset) {
-      wheres.push("ci.adset_name = ?");
-      args.push(filterAdset);
-    }
+        return {
+          filtersRows: f as unknown as Array<Record<string, unknown>>,
+          campaignRows: c as unknown as Array<Record<string, unknown>>,
+          mainRows: m as unknown as Array<Record<string, unknown>>,
+          crmRows: crm as unknown as Array<Record<string, unknown>>,
+        };
+      },
+    );
 
-    const whereClause = wheres.join(" AND ");
+    // ── Filter options ──
+    const offers = [...new Map(
+      filtersRows.map((r) => [r.offer_key as string, { key: r.offer_key, name: r.offer_name }]),
+    ).values()];
+    const concepts = [...new Map(
+      filtersRows.filter((r) => r.concept_code).map((r) => [
+        r.concept_code as string,
+        { code: r.concept_code, name: r.concept_name },
+      ]),
+    ).values()];
+    const launches = [...new Map(
+      filtersRows.map((r) => [r.launch_key as string, { key: r.launch_key, name: r.launch_name }]),
+    ).values()];
+    const formats = [...new Set(filtersRows.map((r) => r.format as string))].filter(Boolean).sort();
+    const campaigns = [...new Set(campaignRows.map((r) => r.campaign_name as string))].sort();
+    const adsets = [...new Set(campaignRows.map((r) => r.adset_name as string))].sort();
 
-    // ── 3. Main hierarchical query ──
-    const result = await db.execute({
-      sql: `
-        SELECT
-          o.key AS offer_key,
-          o.name AS offer_name,
-          COALESCE(con.code, 'PRE') AS concept_code,
-          COALESCE(con.name, ac.concept_label, 'Pre-Conceito') AS concept_name,
-          COALESCE(ang.code, '-') AS angle_code,
-          COALESCE(ang.name, '-') AS angle_name,
-          COALESCE(ac.motor, ang.motor, '-') AS motor,
-          ac.ad_name,
-          ac.format,
-          ac.hook,
-          ac.status AS ad_status,
-          CAST(ci.date AS TEXT) AS date,
-          ci.campaign_name,
-          ci.adset_name,
-          CAST(ci.spend AS FLOAT) AS spend,
-          ci.impressions,
-          ci.link_clicks AS clicks,
-          ci.landing_page_views AS lpv,
-          ci.leads AS leads_meta
-        FROM ad_creatives ac
-        JOIN offers o ON ac.offer_id = o.id
-        JOIN launches l ON ac.launch_id = l.id
-        LEFT JOIN angles ang ON ac.angle_id = ang.id
-        LEFT JOIN concepts con ON ang.concept_id = con.id
-        INNER JOIN classified_insights ci ON ci.ad_name = ac.ad_name
-        WHERE ${whereClause}
-        ORDER BY o.key, concept_code, angle_code, ac.ad_name, ci.date
-      `,
-      args,
-    });
-
-    // ── 4. CRM leads (trio UTM) ──
-    const crmResult = await db.execute({
-      sql: `
-        SELECT
-          cl.utm_content AS ad_name,
-          cl.utm_campaign AS campaign_name,
-          cl.utm_term AS adset_name,
-          COUNT(*) AS leads_crm,
-          SUM(CASE WHEN cl.is_qualified THEN 1 ELSE 0 END) AS leads_qualified,
-          CAST(CAST(cl.subscribed_at AS DATE) AS TEXT) AS dt
-        FROM crm_leads cl
-        INNER JOIN ad_creatives ac ON cl.utm_content = ac.ad_name AND ac.workspace_id = cl.workspace_id
-        WHERE cl.workspace_id = ?
-          AND cl.subscribed_at >= CURRENT_DATE - CAST(? AS INTEGER) * INTERVAL '1 day'
-        GROUP BY cl.utm_content, cl.utm_campaign, cl.utm_term, CAST(cl.subscribed_at AS DATE)
-      `,
-      args: [auth.workspace_id, days],
-    });
-
-    // Index CRM data by ad_name|campaign|adset|date
+    // ── Index CRM ──
     const crmIndex: Record<string, { leads_crm: number; leads_qualified: number }> = {};
-    for (const r of crmResult.rows as any[]) {
+    for (const r of crmRows) {
       const key = `${r.ad_name}|${r.campaign_name}|${r.adset_name}|${r.dt}`;
-      crmIndex[key] = { leads_crm: Number(r.leads_crm), leads_qualified: Number(r.leads_qualified) };
+      crmIndex[key] = {
+        leads_crm: Number(r.leads_crm),
+        leads_qualified: Number(r.leads_qualified),
+      };
     }
 
-    // ── 5. Build hierarchical structure ──
+    // ── Build hierarchical structure ──
     interface DayRow {
       date: string;
       campaign: string;
@@ -170,7 +162,6 @@ export async function GET(req: NextRequest) {
       leads_crm: number;
       leads_qualified: number;
     }
-
     interface AdNode {
       ad_name: string;
       format: string;
@@ -186,7 +177,6 @@ export async function GET(req: NextRequest) {
       leads_qualified: number;
       days: DayRow[];
     }
-
     interface AngleNode {
       code: string;
       name: string;
@@ -200,7 +190,6 @@ export async function GET(req: NextRequest) {
       leads_qualified: number;
       ads: AdNode[];
     }
-
     interface ConceptNode {
       code: string;
       name: string;
@@ -217,50 +206,43 @@ export async function GET(req: NextRequest) {
     }
 
     const conceptsMap = new Map<string, ConceptNode>();
-
-    for (const row of result.rows as any[]) {
+    for (const row of mainRows) {
       const cKey = `${row.offer_key}|${row.concept_code}`;
-      const aKey = `${cKey}|${row.angle_code}`;
-      const adKey = row.ad_name;
-
       const crmKey = `${row.ad_name}|${row.campaign_name}|${row.adset_name}|${row.date}`;
       const crm = crmIndex[crmKey] || { leads_crm: 0, leads_qualified: 0 };
 
-      // Concept node
       if (!conceptsMap.has(cKey)) {
         conceptsMap.set(cKey, {
-          code: row.concept_code,
-          name: row.concept_name,
-          offer_key: row.offer_key,
-          offer_name: row.offer_name,
+          code: row.concept_code as string,
+          name: row.concept_name as string,
+          offer_key: row.offer_key as string,
+          offer_name: row.offer_name as string,
           spend: 0, impressions: 0, clicks: 0, lpv: 0, leads_meta: 0, leads_crm: 0, leads_qualified: 0,
           angles: [],
         });
       }
       const concept = conceptsMap.get(cKey)!;
 
-      // Angle node
-      let angle = concept.angles.find(a => a.code === row.angle_code);
+      let angle = concept.angles.find((a) => a.code === row.angle_code);
       if (!angle) {
         angle = {
-          code: row.angle_code,
-          name: row.angle_name,
-          motor: row.motor,
+          code: row.angle_code as string,
+          name: row.angle_name as string,
+          motor: row.motor as string,
           spend: 0, impressions: 0, clicks: 0, lpv: 0, leads_meta: 0, leads_crm: 0, leads_qualified: 0,
           ads: [],
         };
         concept.angles.push(angle);
       }
 
-      // Ad node
-      let ad = angle.ads.find(a => a.ad_name === adKey);
+      let ad = angle.ads.find((a) => a.ad_name === row.ad_name);
       if (!ad) {
         ad = {
-          ad_name: row.ad_name,
-          format: row.format,
-          hook: row.hook || "",
-          motor: row.motor,
-          status: row.ad_status,
+          ad_name: row.ad_name as string,
+          format: row.format as string,
+          hook: (row.hook as string) || "",
+          motor: row.motor as string,
+          status: row.ad_status as string,
           spend: 0, impressions: 0, clicks: 0, lpv: 0, leads_meta: 0, leads_crm: 0, leads_qualified: 0,
           days: [],
         };
@@ -273,17 +255,15 @@ export async function GET(req: NextRequest) {
       const lpv = Number(row.lpv) || 0;
       const leads_meta = Number(row.leads_meta) || 0;
 
-      // Day row
       ad.days.push({
-        date: row.date,
-        campaign: row.campaign_name,
-        adset: row.adset_name,
+        date: row.date as string,
+        campaign: row.campaign_name as string,
+        adset: row.adset_name as string,
         spend, impressions, clicks, lpv, leads_meta,
         leads_crm: crm.leads_crm,
         leads_qualified: crm.leads_qualified,
       });
 
-      // Aggregate up
       ad.spend += spend;
       ad.impressions += impressions;
       ad.clicks += clicks;
@@ -309,7 +289,6 @@ export async function GET(req: NextRequest) {
       concept.leads_qualified += crm.leads_qualified;
     }
 
-    // Sort each level by spend desc
     const conceptsList = [...conceptsMap.values()].sort((a, b) => b.spend - a.spend);
     for (const c of conceptsList) {
       c.angles.sort((a, b) => b.spend - a.spend);
@@ -321,7 +300,6 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // ── 6. Totals ──
     const totals = {
       spend: conceptsList.reduce((s, c) => s + c.spend, 0),
       impressions: conceptsList.reduce((s, c) => s + c.impressions, 0),
@@ -332,7 +310,10 @@ export async function GET(req: NextRequest) {
       leads_qualified: conceptsList.reduce((s, c) => s + c.leads_qualified, 0),
       total_concepts: conceptsList.length,
       total_angles: conceptsList.reduce((s, c) => s + c.angles.length, 0),
-      total_ads: conceptsList.reduce((s, c) => s + c.angles.reduce((sa, a) => sa + a.ads.length, 0), 0),
+      total_ads: conceptsList.reduce(
+        (s, c) => s + c.angles.reduce((sa, a) => sa + a.ads.length, 0),
+        0,
+      ),
     };
 
     return NextResponse.json({
@@ -340,9 +321,9 @@ export async function GET(req: NextRequest) {
       totals,
       concepts: conceptsList,
     });
-
-  } catch (err: any) {
-    console.error("Creative performance report error:", err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("Creative performance report error:", message);
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

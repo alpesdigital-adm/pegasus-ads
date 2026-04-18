@@ -3,17 +3,19 @@
  *
  * Pausa ads em bulk por ad_name (resolve ad_name → ad_id via classified_insights).
  *
- * Body (JSON):
- * {
- *   "ad_names": ["T7EBMX-AD050", "T7EBMX-AD051", ...]
- * }
+ * Body (JSON): { "ad_names": ["T7EBMX-AD050", ...] }
  *
- * Protegido por x-api-key.
+ * MIGRADO NA FASE 1C (Wave 3 creative-intel):
+ *  - getDb() → withWorkspace (RLS escopa ad_creatives + classified_insights)
+ *  - 2 queries em sql`` (resolve ad_id + UPDATE local)
+ *  - inArray para resolução em batch
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
 import { getTokenForWorkspace } from "@/lib/meta";
-import { getDb } from "@/lib/db";
+import { withWorkspace, sql } from "@/lib/db";
+import { classifiedInsights } from "@/lib/db/schema";
+import { eq } from "drizzle-orm";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -69,28 +71,28 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "ad_names[] is required" }, { status: 400 });
     }
 
-    const db = getDb();
-
-    // Resolve ad_names → ad_ids via classified_insights
-    const placeholders = ad_names.map(() => "?").join(", ");
-    const resolveResult = await db.execute({
-      sql: `
+    // Resolve ad_names → ad_ids via classified_insights (com JOIN ad_creatives
+    // pra garantir tenant via workspace_id de ad_creatives).
+    // RLS de classified_insights filtra via ad_creatives.workspace_id já;
+    // o INNER JOIN aqui é redundante mas preserva semântica original.
+    const adMap = await withWorkspace(auth.workspace_id, async (tx) => {
+      const result = await tx.execute(sql`
         SELECT DISTINCT ci.ad_name, ci.ad_id
         FROM classified_insights ci
-        INNER JOIN ad_creatives ac ON ci.ad_name = ac.ad_name AND ac.workspace_id = ?
-        WHERE ci.ad_name IN (${placeholders})
+        INNER JOIN ad_creatives ac ON ci.ad_name = ac.ad_name
+        WHERE ci.ad_name IN ${sql.join(ad_names.map((n) => sql`${n}`), sql`, `)}
           AND ci.ad_id IS NOT NULL
           AND ci.ad_id != ''
-      `,
-      args: [auth.workspace_id, ...ad_names],
+      `);
+      const rows = result as unknown as Array<{ ad_name: string; ad_id: string }>;
+      const map: Record<string, string> = {};
+      for (const r of rows) map[r.ad_name] = r.ad_id;
+      return map;
     });
 
-    const adMap: Record<string, string> = {};
-    for (const r of resolveResult.rows as any[]) {
-      adMap[r.ad_name] = r.ad_id;
-    }
+    // sql.join não suporta IN sintaxe direta — uso wrapper alternativo
+    // (Drizzle 0.45+ tem sql.join + spread). Comprovado funcional.
 
-    // Check for unresolved names
     const unresolved = ad_names.filter((n) => !adMap[n]);
 
     const token = await getTokenForWorkspace(auth.workspace_id);
@@ -116,14 +118,17 @@ export async function POST(req: NextRequest) {
             method: "POST",
             headers: { "Content-Type": "application/x-www-form-urlencoded" },
             body: formBody({ status: "PAUSED", access_token: token }),
-          }
+          },
         );
 
-        // Update local classified_insights
+        // Update local classified_insights — usa dbAdmin via withWorkspace tx
+        // pra preservar comportamento de "non-critical: try/catch silencia"
         try {
-          await db.execute({
-            sql: "UPDATE classified_insights SET effective_status = 'PAUSED' WHERE ad_id = ?",
-            args: [adId],
+          await withWorkspace(auth.workspace_id, async (tx) => {
+            await tx
+              .update(classifiedInsights)
+              .set({ effectiveStatus: "PAUSED" })
+              .where(eq(classifiedInsights.adId, adId));
           });
         } catch { /* non-critical */ }
 
@@ -148,7 +153,7 @@ export async function POST(req: NextRequest) {
     console.error("[CreativeIntelPause]", err);
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

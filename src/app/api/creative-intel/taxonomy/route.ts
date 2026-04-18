@@ -3,10 +3,16 @@
  *
  * Returns the full creative hierarchy: offers → concepts → angles
  * with aggregate metrics (spend, leads_crm, cpl, ad_count).
+ *
+ * MIGRADO NA FASE 1C (Wave 3 creative-intel):
+ *  - getDb() → withWorkspace (RLS escopa ad_creatives, crm_leads,
+ *    classified_insights via ad_creatives JOIN policy)
+ *  - 2 queries em sql`` com JOIN multi-tabela e date filter dinâmico
+ *  - Filtros manuais workspace_id removidos (3 instâncias)
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
-import { getDb } from "@/lib/db";
+import { withWorkspace, sql } from "@/lib/db";
 
 export const runtime = "nodejs";
 
@@ -17,16 +23,16 @@ export async function GET(req: NextRequest) {
   const days = parseInt(req.nextUrl.searchParams.get("days") || "9999", 10);
 
   try {
-    const db = getDb();
-
+    // Date filter dinâmico — só aplica se days < 9999 (sentinel "lifetime")
     const dateFilter = days < 9999
-      ? "AND ci.date >= CURRENT_DATE - CAST(? AS INTEGER) * INTERVAL '1 day'"
-      : "";
-    const args: any[] = [auth.workspace_id];
-    if (days < 9999) args.push(days);
+      ? sql`AND ci.date >= CURRENT_DATE - (${days}::INTEGER * INTERVAL '1 day')`
+      : sql``;
+    const crmDateFilter = days < 9999
+      ? sql`AND cl.subscribed_at >= CURRENT_DATE - (${days}::INTEGER * INTERVAL '1 day')`
+      : sql``;
 
-    const result = await db.execute({
-      sql: `
+    const { mainRows, crmRows } = await withWorkspace(auth.workspace_id, async (tx) => {
+      const main = await tx.execute(sql`
         SELECT
           o.key AS offer_key,
           o.name AS offer_name,
@@ -45,36 +51,35 @@ export async function GET(req: NextRequest) {
         LEFT JOIN angles ang ON ac.angle_id = ang.id
         LEFT JOIN concepts con ON ang.concept_id = con.id
         LEFT JOIN classified_insights ci ON ci.ad_name = ac.ad_name ${dateFilter}
-        WHERE ac.workspace_id = ?
         GROUP BY o.key, o.name, o.offer_type, o.cpl_target,
                  con.code, con.name, ac.concept_label,
                  ang.code, ang.name, ac.motor, ang.motor, ac.ad_name
         ORDER BY o.key, concept_code, angle_code, ac.ad_name
-      `,
-      args: days < 9999 ? [auth.workspace_id, days] : [auth.workspace_id],
-    });
+      `);
 
-    // CRM leads
-    const crmDateFilter = days < 9999
-      ? "AND cl.subscribed_at >= CURRENT_DATE - CAST(? AS INTEGER) * INTERVAL '1 day'"
-      : "";
-    const crmResult = await db.execute({
-      sql: `
+      const crm = await tx.execute(sql`
         SELECT
           cl.utm_content AS ad_name,
           COUNT(*) AS leads_crm,
           SUM(CASE WHEN cl.is_qualified THEN 1 ELSE 0 END) AS leads_qualified
         FROM crm_leads cl
-        INNER JOIN ad_creatives ac ON cl.utm_content = ac.ad_name AND ac.workspace_id = cl.workspace_id
-        WHERE cl.workspace_id = ? ${crmDateFilter}
+        INNER JOIN ad_creatives ac ON cl.utm_content = ac.ad_name
+        WHERE 1=1 ${crmDateFilter}
         GROUP BY cl.utm_content
-      `,
-      args: days < 9999 ? [auth.workspace_id, days] : [auth.workspace_id],
+      `);
+
+      return {
+        mainRows: main as unknown as Array<Record<string, unknown>>,
+        crmRows: crm as unknown as Array<Record<string, unknown>>,
+      };
     });
 
     const crmMap: Record<string, { crm: number; qual: number }> = {};
-    for (const r of crmResult.rows as any[]) {
-      crmMap[r.ad_name] = { crm: Number(r.leads_crm), qual: Number(r.leads_qualified) };
+    for (const r of crmRows) {
+      crmMap[r.ad_name as string] = {
+        crm: Number(r.leads_crm),
+        qual: Number(r.leads_qualified),
+      };
     }
 
     // Build hierarchy
@@ -84,35 +89,42 @@ export async function GET(req: NextRequest) {
 
     const offersMap = new Map<string, OfferNode>();
 
-    for (const row of result.rows as any[]) {
-      const adCrm = crmMap[row.ad_name] || { crm: 0, qual: 0 };
+    for (const row of mainRows) {
+      const adCrm = crmMap[row.ad_name as string] || { crm: 0, qual: 0 };
       const spend = Number(row.spend) || 0;
 
-      // Offer
-      if (!offersMap.has(row.offer_key)) {
-        offersMap.set(row.offer_key, {
-          key: row.offer_key, name: row.offer_name, offer_type: row.offer_type,
+      if (!offersMap.has(row.offer_key as string)) {
+        offersMap.set(row.offer_key as string, {
+          key: row.offer_key as string,
+          name: row.offer_name as string,
+          offer_type: row.offer_type as string,
           cpl_target: row.cpl_target ? Number(row.cpl_target) : null,
           spend: 0, leads_crm: 0, cpl_crm: 0, ad_count: 0, concepts: [],
         });
       }
-      const offer = offersMap.get(row.offer_key)!;
+      const offer = offersMap.get(row.offer_key as string)!;
 
-      // Concept
-      let concept = offer.concepts.find(c => c.code === row.concept_code);
+      let concept = offer.concepts.find((c) => c.code === row.concept_code);
       if (!concept) {
-        concept = { code: row.concept_code, name: row.concept_name, spend: 0, leads_crm: 0, cpl_crm: 0, ad_count: 0, angles: [] };
+        concept = {
+          code: row.concept_code as string,
+          name: row.concept_name as string,
+          spend: 0, leads_crm: 0, cpl_crm: 0, ad_count: 0, angles: [],
+        };
         offer.concepts.push(concept);
       }
 
-      // Angle
-      let angle = concept.angles.find(a => a.code === row.angle_code);
+      let angle = concept.angles.find((a) => a.code === row.angle_code);
       if (!angle) {
-        angle = { code: row.angle_code, name: row.angle_name, motor: row.motor, spend: 0, leads_crm: 0, cpl_crm: 0, ad_count: 0 };
+        angle = {
+          code: row.angle_code as string,
+          name: row.angle_name as string,
+          motor: row.motor as string,
+          spend: 0, leads_crm: 0, cpl_crm: 0, ad_count: 0,
+        };
         concept.angles.push(angle);
       }
 
-      // Aggregate
       angle.spend += spend;
       angle.leads_crm += adCrm.crm;
       angle.ad_count += 1;
@@ -126,7 +138,6 @@ export async function GET(req: NextRequest) {
       offer.ad_count += 1;
     }
 
-    // Compute CPL
     for (const offer of offersMap.values()) {
       offer.cpl_crm = offer.leads_crm > 0 ? Math.round((offer.spend / offer.leads_crm) * 100) / 100 : 0;
       for (const c of offer.concepts) {
@@ -139,9 +150,12 @@ export async function GET(req: NextRequest) {
       offer.concepts.sort((a, b) => b.spend - a.spend);
     }
 
-    return NextResponse.json({ offers: [...offersMap.values()].sort((a, b) => b.spend - a.spend) });
-  } catch (err: any) {
-    console.error("GET /api/creative-intel/taxonomy error:", err.message);
+    return NextResponse.json({
+      offers: [...offersMap.values()].sort((a, b) => b.spend - a.spend),
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("GET /api/creative-intel/taxonomy error:", message);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

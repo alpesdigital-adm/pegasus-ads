@@ -2,10 +2,16 @@
  * GET /api/creative-intel/ads?days=7&offer=&concept=&angle=&format=&detail=false
  *
  * Individual ad detail with optional daily breakdown.
+ *
+ * MIGRADO NA FASE 1C (Wave 3 creative-intel):
+ *  - getDb() → withWorkspace (RLS escopa ad_creatives + crm_leads)
+ *  - 3 queries em sql`` + 1 query daily-breakdown N+1 (preservado:
+ *    legado fazia query por ad, mantido pra evitar mudança de shape)
+ *  - 7 filtros workspace_id manuais removidos
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
-import { getDb } from "@/lib/db";
+import { withWorkspace, sql } from "@/lib/db";
 
 export const runtime = "nodejs";
 
@@ -24,90 +30,111 @@ export async function GET(req: NextRequest) {
   const fAdset = sp.get("adset") || "";
 
   try {
-    const db = getDb();
+    const filters = [
+      days < 9999 ? sql`AND ci.date >= CURRENT_DATE - (${days}::INTEGER * INTERVAL '1 day')` : sql``,
+      fOffer ? sql`AND o.key = ${fOffer}` : sql``,
+      fConcept ? sql`AND COALESCE(con.code, 'PRE') = ${fConcept}` : sql``,
+      fAngle ? sql`AND COALESCE(ang.code, '-') = ${fAngle}` : sql``,
+      fFormat ? sql`AND ac.format = ${fFormat}` : sql``,
+      fCampaign ? sql`AND ci.campaign_name = ${fCampaign}` : sql``,
+      fAdset ? sql`AND ci.adset_name = ${fAdset}` : sql``,
+    ];
+    const crmDateFilter = days < 9999
+      ? sql`AND cl.subscribed_at >= CURRENT_DATE - (${days}::INTEGER * INTERVAL '1 day')`
+      : sql``;
 
-    const wheres: string[] = ["ac.workspace_id = ?"];
-    const args: any[] = [auth.workspace_id];
+    const { mainRows, crmRows, dailyByAd } = await withWorkspace(
+      auth.workspace_id,
+      async (tx) => {
+        const main = await tx.execute(sql`
+          SELECT
+            ac.ad_name,
+            ac.format,
+            ac.hook,
+            COALESCE(ac.motor, ang.motor, '-') AS motor,
+            ac.status,
+            o.key AS offer_key,
+            COALESCE(con.code, 'PRE') AS concept_code,
+            COALESCE(con.name, ac.concept_label, 'Pre-Conceito') AS concept_name,
+            COALESCE(ang.code, '-') AS angle_code,
+            COALESCE(ang.name, '-') AS angle_name,
+            MAX(ci.ad_id) AS ad_id,
+            CAST(COALESCE(SUM(CAST(ci.spend AS FLOAT)), 0) AS FLOAT) AS spend,
+            COALESCE(SUM(ci.impressions), 0) AS impressions,
+            COALESCE(SUM(ci.link_clicks), 0) AS clicks,
+            COALESCE(SUM(ci.leads), 0) AS leads_meta
+          FROM ad_creatives ac
+          JOIN offers o ON ac.offer_id = o.id
+          LEFT JOIN angles ang ON ac.angle_id = ang.id
+          LEFT JOIN concepts con ON ang.concept_id = con.id
+          INNER JOIN classified_insights ci ON ci.ad_name = ac.ad_name
+          WHERE 1=1
+            ${filters[0]} ${filters[1]} ${filters[2]} ${filters[3]}
+            ${filters[4]} ${filters[5]} ${filters[6]}
+          GROUP BY ac.ad_name, ac.format, ac.hook, ac.motor, ang.motor, ac.status,
+                   o.key, con.code, con.name, ac.concept_label, ang.code, ang.name
+          ORDER BY SUM(CAST(ci.spend AS FLOAT)) DESC
+        `);
+        const mainData = main as unknown as Array<Record<string, unknown>>;
 
-    if (days < 9999) {
-      wheres.push("ci.date >= CURRENT_DATE - CAST(? AS INTEGER) * INTERVAL '1 day'");
-      args.push(days);
-    }
-    if (fOffer) { wheres.push("o.key = ?"); args.push(fOffer); }
-    if (fConcept) { wheres.push("COALESCE(con.code, 'PRE') = ?"); args.push(fConcept); }
-    if (fAngle) { wheres.push("COALESCE(ang.code, '-') = ?"); args.push(fAngle); }
-    if (fFormat) { wheres.push("ac.format = ?"); args.push(fFormat); }
-    if (fCampaign) { wheres.push("ci.campaign_name = ?"); args.push(fCampaign); }
-    if (fAdset) { wheres.push("ci.adset_name = ?"); args.push(fAdset); }
+        const crm = await tx.execute(sql`
+          SELECT cl.utm_content AS ad_name,
+                 COUNT(*) AS leads_crm,
+                 SUM(CASE WHEN cl.is_qualified THEN 1 ELSE 0 END) AS leads_qualified
+          FROM crm_leads cl
+          INNER JOIN ad_creatives ac ON cl.utm_content = ac.ad_name
+          WHERE 1=1 ${crmDateFilter}
+          GROUP BY cl.utm_content
+        `);
+        const crmData = crm as unknown as Array<Record<string, unknown>>;
 
-    // Main query: one row per ad
-    const result = await db.execute({
-      sql: `
-        SELECT
-          ac.ad_name,
-          ac.format,
-          ac.hook,
-          COALESCE(ac.motor, ang.motor, '-') AS motor,
-          ac.status,
-          o.key AS offer_key,
-          COALESCE(con.code, 'PRE') AS concept_code,
-          COALESCE(con.name, ac.concept_label, 'Pre-Conceito') AS concept_name,
-          COALESCE(ang.code, '-') AS angle_code,
-          COALESCE(ang.name, '-') AS angle_name,
-          MAX(ci.ad_id) AS ad_id,
-          CAST(COALESCE(SUM(CAST(ci.spend AS FLOAT)), 0) AS FLOAT) AS spend,
-          COALESCE(SUM(ci.impressions), 0) AS impressions,
-          COALESCE(SUM(ci.link_clicks), 0) AS clicks,
-          COALESCE(SUM(ci.leads), 0) AS leads_meta
-        FROM ad_creatives ac
-        JOIN offers o ON ac.offer_id = o.id
-        LEFT JOIN angles ang ON ac.angle_id = ang.id
-        LEFT JOIN concepts con ON ang.concept_id = con.id
-        INNER JOIN classified_insights ci ON ci.ad_name = ac.ad_name
-        WHERE ${wheres.join(" AND ")}
-        GROUP BY ac.ad_name, ac.format, ac.hook, ac.motor, ang.motor, ac.status,
-                 o.key, con.code, con.name, ac.concept_label, ang.code, ang.name
-        ORDER BY SUM(CAST(ci.spend AS FLOAT)) DESC
-      `,
-      args,
-    });
+        // Daily breakdown se solicitado — N+1 preservado do legado
+        const daysFilter = days < 9999
+          ? sql`AND ci.date >= CURRENT_DATE - (${days}::INTEGER * INTERVAL '1 day')`
+          : sql``;
+        const daily: Record<string, Array<Record<string, unknown>>> = {};
+        if (detail) {
+          for (const row of mainData) {
+            const adName = row.ad_name as string;
+            const dayResult = await tx.execute(sql`
+              SELECT
+                CAST(ci.date AS TEXT) AS date,
+                ci.campaign_name AS campaign,
+                ci.adset_name AS adset,
+                CAST(COALESCE(ci.spend, 0) AS FLOAT) AS spend,
+                COALESCE(ci.impressions, 0) AS impressions,
+                COALESCE(ci.link_clicks, 0) AS clicks,
+                COALESCE(ci.leads, 0) AS leads_meta
+              FROM classified_insights ci
+              WHERE ci.ad_name = ${adName} ${daysFilter}
+              ORDER BY ci.date DESC
+            `);
+            daily[adName] = dayResult as unknown as Array<Record<string, unknown>>;
+          }
+        }
 
-    // CRM per ad
-    const crmWheres: string[] = ["cl.workspace_id = ?"];
-    const crmArgs: any[] = [auth.workspace_id];
-    if (days < 9999) {
-      crmWheres.push("cl.subscribed_at >= CURRENT_DATE - CAST(? AS INTEGER) * INTERVAL '1 day'");
-      crmArgs.push(days);
-    }
-
-    const crmResult = await db.execute({
-      sql: `
-        SELECT cl.utm_content AS ad_name,
-               COUNT(*) AS leads_crm,
-               SUM(CASE WHEN cl.is_qualified THEN 1 ELSE 0 END) AS leads_qualified
-        FROM crm_leads cl
-        INNER JOIN ad_creatives ac ON cl.utm_content = ac.ad_name AND ac.workspace_id = cl.workspace_id
-        WHERE ${crmWheres.join(" AND ")}
-        GROUP BY cl.utm_content
-      `,
-      args: crmArgs,
-    });
+        return { mainRows: mainData, crmRows: crmData, dailyByAd: daily };
+      },
+    );
 
     const crmMap: Record<string, { crm: number; qual: number }> = {};
-    for (const r of crmResult.rows as any[]) {
-      crmMap[r.ad_name] = { crm: Number(r.leads_crm), qual: Number(r.leads_qualified) };
+    for (const r of crmRows) {
+      crmMap[r.ad_name as string] = {
+        crm: Number(r.leads_crm),
+        qual: Number(r.leads_qualified),
+      };
     }
 
-    // Build response
-    const data = (result.rows as any[]).map(row => {
-      const crm = crmMap[row.ad_name] || { crm: 0, qual: 0 };
+    const data = mainRows.map((row) => {
+      const adName = row.ad_name as string;
+      const crm = crmMap[adName] || { crm: 0, qual: 0 };
       const spend = Number(row.spend);
       const impressions = Number(row.impressions);
       const clicks = Number(row.clicks);
       const leadsMeta = Number(row.leads_meta);
 
       return {
-        ad_name: row.ad_name,
+        ad_name: adName,
         ad_id: row.ad_id || "",
         format: row.format,
         hook: row.hook || "",
@@ -128,52 +155,24 @@ export async function GET(req: NextRequest) {
         leads_qualified: crm.qual,
         cpl_meta: leadsMeta > 0 ? Math.round((spend / leadsMeta) * 100) / 100 : 0,
         cpl_crm: crm.crm > 0 ? Math.round((spend / crm.crm) * 100) / 100 : 0,
-        days: [] as any[],
+        days: detail
+          ? (dailyByAd[adName] ?? []).map((d) => ({
+              date: d.date,
+              campaign: d.campaign,
+              adset: d.adset,
+              spend: Number(d.spend),
+              impressions: Number(d.impressions),
+              clicks: Number(d.clicks),
+              leads_meta: Number(d.leads_meta),
+            }))
+          : [],
       };
     });
 
-    // Daily breakdown if requested
-    if (detail) {
-      for (const ad of data) {
-        const dayWheres = ["ci.ad_name = ?"];
-        const dayArgs: any[] = [ad.ad_name];
-        if (days < 9999) {
-          dayWheres.push("ci.date >= CURRENT_DATE - CAST(? AS INTEGER) * INTERVAL '1 day'");
-          dayArgs.push(days);
-        }
-
-        const dayResult = await db.execute({
-          sql: `
-            SELECT
-              CAST(ci.date AS TEXT) AS date,
-              ci.campaign_name AS campaign,
-              ci.adset_name AS adset,
-              CAST(COALESCE(ci.spend, 0) AS FLOAT) AS spend,
-              COALESCE(ci.impressions, 0) AS impressions,
-              COALESCE(ci.link_clicks, 0) AS clicks,
-              COALESCE(ci.leads, 0) AS leads_meta
-            FROM classified_insights ci
-            WHERE ${dayWheres.join(" AND ")}
-            ORDER BY ci.date DESC
-          `,
-          args: dayArgs,
-        });
-
-        ad.days = (dayResult.rows as any[]).map(d => ({
-          date: d.date,
-          campaign: d.campaign,
-          adset: d.adset,
-          spend: Number(d.spend),
-          impressions: Number(d.impressions),
-          clicks: Number(d.clicks),
-          leads_meta: Number(d.leads_meta),
-        }));
-      }
-    }
-
     return NextResponse.json({ data });
-  } catch (err: any) {
-    console.error("GET /api/creative-intel/ads error:", err.message);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("GET /api/creative-intel/ads error:", message);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

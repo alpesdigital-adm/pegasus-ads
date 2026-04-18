@@ -81,17 +81,21 @@ clients migrados, remover o branch `TEST_LOG_API_KEY` do fluxo de auth.
 
 ---
 
-## TD-004 — Tabelas `users` e `sessions` obsoletas 🔴 open
+## TD-004 — Tabelas `users` e `sessions` obsoletas 🟡 in-progress
 
 **Descoberto:** 2026-04-17 (plano v1.3, seção 6.7)
-**Dono:** Claude (Fase 5)
-**Impacto:** duas tabelas cujos dados foram migrados para `auth.users`
-do Supabase na Fase 2 mas ainda existem no DB como backup.
+**Atualizado:** 2026-04-18 (cutover bridge — `users`/`sessions` migrados para
+pegasus_ads via `scripts/cutover/05-bridge-users-sessions.sh` porque sem eles
+login quebraria pós-swap; Fase 2 ainda em backlog)
+**Dono:** Claude (Fase 5, condicional à Fase 2 estabilizar)
+**Impacto:** duas tabelas que agora vivem em DOIS lugares — pegasus_ads
+(bridge ativa) e Neon (legado). Ambas continuam idênticas em estrutura. Vão
+ser substituídas por `auth.users` (gotrue) na Fase 2.
 
-**Como resolver:** `DROP TABLE users, sessions` após 30 dias de Fase 2
-estabilizada sem regressões de auth.
+**Como resolver:** após Fase 2 + 30 dias estável sem regressão, `DROP TABLE
+users, sessions` no pegasus_ads (Neon já vai estar desligado nesse ponto).
 
-**Quando:** 30 dias após Fase 2.
+**Quando:** 30 dias após Fase 2 + cleanup do Neon.
 
 ---
 

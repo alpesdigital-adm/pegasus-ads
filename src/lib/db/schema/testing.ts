@@ -33,6 +33,11 @@ export const testRounds = pgTable("test_rounds", {
   decidedAt: timestamp("decided_at", { withTimezone: true }),
   decision: text("decision"), // winner|loser|inconclusive
   decisionReason: text("decision_reason"),
+  // Marca quando o round virou 'live' (batch terminou com ads ativos na Meta).
+  // Adicionado em migration 0011. Nullable — rounds em draft/reviewing/failed
+  // nunca publicam. Distinto de updatedAt (toda transição) e decidedAt (decisão
+  // de winner/loser).
+  publishedAt: timestamp("published_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });

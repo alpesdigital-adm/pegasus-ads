@@ -273,9 +273,12 @@ export const stepEvents = pgTable(
   "step_events",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    stepId: uuid("step_id")
-      .notNull()
-      .references(() => publicationSteps.id, { onDelete: "cascade" }),
+    // NULLABLE desde migration 0011: finalizeBatch emite evento "meta" de
+    // batch-level (transição test_rounds.status com racional) que não
+    // pertence a nenhum step. Eventos de step continuam sempre com step_id.
+    stepId: uuid("step_id").references(() => publicationSteps.id, {
+      onDelete: "cascade",
+    }),
     batchId: uuid("batch_id")
       .notNull()
       .references(() => publicationBatches.id, { onDelete: "cascade" }),
@@ -285,7 +288,8 @@ export const stepEvents = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
 
     // 'pending'|'ready'|'running'|'succeeded'|'retryable_failed'|'failed'|'skipped'|'cancelled'|'progress'
-    // 'progress' é evento intra-step, não transição de state machine
+    // 'progress' é evento intra-step, não transição de state machine.
+    // Eventos batch-level usam outros valores (ex: 'finalized', 'test_round_live').
     fromStatus: text("from_status").notNull(),
     toStatus: text("to_status").notNull(),
 

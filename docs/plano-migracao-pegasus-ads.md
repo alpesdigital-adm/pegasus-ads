@@ -1,8 +1,29 @@
 # Plano de Migração — Pegasus Ads
 
-**Versão:** 1.3 — 2026-04-17  
-**Status:** Proposta (pré-aprovação de fases)  
+**Versão:** 1.5 — 2026-04-18  
+**Status:** Fases 0, 1A, 1B + cutover CONCLUÍDOS — Fase 1C em backlog  
 **Autor:** Claude (análise) + Leandro (decisões e validação)
+
+**Changelog v1.5 (2026-04-18):**
+- Cutover Neon → Supabase executado end-to-end em 2026-04-18 (TD-009)
+- Bridge `users` + `sessions` adicionada (decisão pragmática — Fase 2 vai
+  substituir por `auth.users` depois). Drop diferido 30 dias pós-Fase 2.
+- Schema drift de `users` (4 colunas legacy: account_id, role, is_active,
+  last_login_at) consolidado no Drizzle + migration 0004 idempotente
+- `classified_insights.insight_id` / `account_id`: FKs especulativas
+  removidas (nunca existiram no Neon original) — migration 0003 relaxa
+  para nullable sem FK
+- `vercel.json` removido (dead weight — VPS ignora; crontab local cobre os
+  jobs que Vercel rodava)
+- URLs hardcoded `pegasus-ads.vercel.app` → `pegasus.alpesd.com.br` em 5
+  arquivos (defaults, footers, docs — runtime usa env vars)
+
+**Changelog v1.4 (2026-04-17):**
+- Cluster real verificado: Postgres **15.8** (não 16), superuser `supabase_admin`
+- Pooler real detectado: **Supavisor** (não PgBouncer) — todas as referências
+  a PgBouncer neste doc foram atualizadas para Supavisor
+- Fase 1 subdividida em sub-fases 1A (foundation) / 1B (data migration) /
+  1C+ (route migration) por causa do tamanho
 
 ---
 
@@ -14,7 +35,7 @@ O Pegasus Ads opera com uma stack fragmentada que dificulta manutenção e integ
 
 | Aspecto | Pegasus Ads (atual) | Pegasus CRM (referência) |
 |---|---|---|
-| **DB** | Neon serverless (`@neondatabase/serverless`) | Supabase self-hosted (Postgres 16, PgBouncer) |
+| **DB** | Neon serverless (`@neondatabase/serverless`) | Supabase self-hosted (Postgres 15.8, Supavisor) |
 | **ORM** | Raw SQL, `CREATE TABLE IF NOT EXISTS` imperativo (680 linhas em `db.ts`) | Drizzle ORM 0.45.2, schemas modulares por domínio |
 | **Auth** | Custom: bcrypt passwords, session tokens em tabela, cookie `pegasus_session` | Supabase Auth (gotrue compartilhado) |
 | **Design System** | CSS custom dark-only (hex), classes `.btn-*`, GSAP, SVG inline | shadcn/ui v4 `base-nova`, Tailwind 4 OKLCH, lucide-react, Zustand theme |
@@ -258,7 +279,7 @@ function migrateId(oldId: string): string {
 │  └──────────┬───────────────────────┘    │
 │             │                            │
 │  ┌──────────▼───────────────────────┐    │
-│  │  PgBouncer (porta 6543)          │    │
+│  │  Supavisor (porta configurável)  │    │
 │  │  pool_mode = transaction         │    │
 │  └──────────────────────────────────┘    │
 │                                          │
@@ -285,9 +306,10 @@ GRANT USAGE ON SCHEMA public TO pegasus_ads_app;
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO pegasus_ads_app;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO pegasus_ads_app;
 
--- 4. PgBouncer: adicionar pool para pegasus_ads
--- Em pgbouncer.ini [databases]:
--- pegasus_ads = host=localhost port=5432 dbname=pegasus_ads auth_user=supabase_admin
+-- 4. Supavisor: adicionar tenant pegasus_ads
+-- Executar no container alpes-ads_supabase-supavisor-1:
+-- (endpoint de tenants via API HTTP ou SQL direto no _supavisor db)
+-- ver scripts/phase-1b-supavisor-tenant.sh
 ```
 
 ### 4.3 Connection string
@@ -296,8 +318,8 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO pegasus_ads_app
 # Direto (para migrations)
 DATABASE_URL=postgresql://pegasus_ads_app:***@localhost:5432/pegasus_ads
 
-# Via PgBouncer (para aplicação)
-DATABASE_URL=postgresql://pegasus_ads_app:***@localhost:6543/pegasus_ads?pgbouncer=true
+# Via Supavisor (para aplicação — transaction mode)
+DATABASE_URL=postgresql://pegasus_ads_app.pegasus_ads:***@alpes-ads_supabase-supavisor:6543/pegasus_ads
 ```
 
 ### 4.4 Dual client (padrão CRM, com RLS)
@@ -312,7 +334,7 @@ import * as schema from './schema';
 // Usa role pegasus_ads_app (com RLS policies ativas)
 // O workspace_id é injetado via SET LOCAL em cada transação
 const appConnection = postgres(process.env.DATABASE_URL!, {
-  prepare: false,  // PgBouncer transaction mode
+  prepare: false,  // Supavisor transaction mode
   max: 10,
 });
 export const db = drizzle(appConnection, { schema });
@@ -547,11 +569,11 @@ BEGIN
 END $$;
 ```
 
-### 5.8 Contraditório: RLS + PgBouncer transaction mode
+### 5.8 Contraditório: RLS + Supavisor transaction mode
 
-**Problema potencial:** `SET LOCAL` só persiste dentro de uma transação. Com PgBouncer em `transaction mode`, cada statement pode ir para uma conexão diferente. Se a query não estiver dentro de uma transação explícita, o `SET LOCAL` se perde.
+**Problema potencial:** `SET LOCAL` só persiste dentro de uma transação. Com Supavisor em `transaction mode`, cada statement pode ir para uma conexão diferente. Se a query não estiver dentro de uma transação explícita, o `SET LOCAL` se perde.
 
-**Solução:** O helper `withWorkspace()` usa `db.transaction()` que garante que o `SET LOCAL` e todas as queries subsequentes rodam na mesma conexão. Este padrão já é validado no CRM com o mesmo PgBouncer setup.
+**Solução:** O helper `withWorkspace()` usa `db.transaction()` que garante que o `SET LOCAL` e todas as queries subsequentes rodam na mesma conexão. **PONTO DE ATENÇÃO v1.4:** a premissa de que "CRM validou esse padrão com o mesmo pooler" precisa ser re-confirmada, porque o CRM em prod ainda usa conexão direta (não passa pelo Supavisor). Validação empírica é pré-requisito da Fase 1B.
 
 **Ponto de atenção:** Queries fora de `withWorkspace()` usando a role `pegasus_ads_app` receberão **zero rows** (porque `app.workspace_id` não está setado e o policy retorna false). Isso é uma feature, não um bug — funciona como fail-safe.
 
@@ -1494,7 +1516,7 @@ Isso fecha o ciclo: **importar → analisar → promover a blueprint → replica
 
 - [ ] Criar database `pegasus_ads` no cluster Supabase
 - [ ] Criar roles `pegasus_ads_app` (RLS enforced) e `pegasus_ads_admin` (BYPASSRLS)
-- [ ] Configurar PgBouncer para o novo database
+- [x] ~~Configurar PgBouncer para o novo database~~ → substituído por "Configurar tenant Supavisor" (Fase 1B — ver TD-002)
 - [ ] Configurar Drizzle Kit (`drizzle.config.ts`)
 - [ ] Instalar dependências novas (`drizzle-orm`, `postgres`, `drizzle-kit`)
 - [ ] Gerar migration inicial (`drizzle-kit generate`) a partir dos schemas Drizzle
@@ -1643,7 +1665,7 @@ Isso fecha o ciclo: **importar → analisar → promover a blueprint → replica
 | bcrypt hash incompatível com gotrue | Médio | Média | Verificar formato antes; se incompatível, forçar password reset |
 | 84 rotas API quebram durante migração ORM | Alto | Média | Adapter `execute()` permite migração gradual; rotas não migradas continuam funcionando |
 | GSAP removal quebra animações críticas | Baixo | Baixa | Substituir por `transition-*` Tailwind, que são mais performantes |
-| PgBouncer `prepare: false` causa regressão em queries complexas | Médio | Baixa | Pattern já validado no CRM; testar queries com CTE e window functions |
+| Supavisor `prepare: false` causa regressão em queries complexas | Médio | Média | Pattern parcialmente validado (CRM usa conexão direta ainda); testar queries com CTE e window functions antes da Fase 1B cutover |
 | Supabase Storage quota insuficiente | Baixo | Baixa | Storage self-hosted, quota é configurável |
 
 ---
@@ -1667,7 +1689,7 @@ Isso fecha o ciclo: **importar → analisar → promover a blueprint → replica
 ### 15.3 "Por que database separado e não schema separado?"
 
 **Argumento a favor do schema separado:** Mais fácil de cross-query (JOIN entre CRM e Ads direto).
-**Argumento a favor do database separado:** Isolamento total de permissões, backup independente, migration sem risco de afetar o outro projeto, PgBouncer pool separado, evolução independente de versões/extensions.
+**Argumento a favor do database separado:** Isolamento total de permissões, backup independente, migration sem risco de afetar o outro projeto, pooler tenant separado (Supavisor), evolução independente de versões/extensions.
 **Decisão:** Database separado. Cross-queries entre CRM e Ads podem ser feitas via `dblink` ou Foreign Data Wrappers se necessário no futuro, mas são raras o suficiente para justificar via API.
 
 ---

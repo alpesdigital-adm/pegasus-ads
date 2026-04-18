@@ -7,15 +7,21 @@
  * Permite comparar Instagram Feed vs Instagram Stories vs Facebook Feed, etc.
  *
  * Query params:
- *   creative_id?    - filtrar por criativo específico (ou AD base name)
+ *   creative_id?    - filtrar por criativo específico
  *   date_from?      - YYYY-MM-DD (padrão: 30 dias atrás)
  *   date_to?        - YYYY-MM-DD (padrão: hoje)
  *   group_by?       - "platform" | "position" | "both" (padrão: "both")
  *   cpl_target?     - número (padrão: 25)
+ *
+ * MIGRADO NA FASE 1C (Wave 3):
+ *  - getDb() → withWorkspace (RLS)
+ *  - 3 aggregates em sql`` (count + main breakdown + optional by_creative)
+ *  - Filtros manuais workspace_id removidos
+ *  - GROUP BY dinâmico preservado via sql.raw() pattern
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getDb } from "@/lib/db";
+import { withWorkspace, sql } from "@/lib/db";
 import { requireAuth } from "@/lib/auth";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
 
@@ -33,7 +39,6 @@ export async function GET(req: NextRequest) {
   const auth = await requireAuth(req);
   if (auth instanceof NextResponse) return auth;
 
-  const db = getDb();
   const { searchParams } = req.nextUrl;
 
   const creativeId = searchParams.get("creative_id");
@@ -43,20 +48,97 @@ export async function GET(req: NextRequest) {
   const groupBy = searchParams.get("group_by") || "both";
   const cplTarget = parseFloat(searchParams.get("cpl_target") || String(DEFAULT_CPL_TARGET));
 
-  // ── 1. Verificar se há dados de breakdowns ──
-  const countArgs: unknown[] = [dateFrom, dateTo, auth.workspace_id];
-  if (creativeId) countArgs.push(creativeId);
+  // Filtro opcional por creative_id — reusado nas duas queries principais
+  const creativeFilter = creativeId ? sql`AND creative_id = ${creativeId}` : sql``;
 
-  const countRow = await db.execute({
-    sql: `
-      SELECT COUNT(*) AS total FROM metrics_breakdowns
-      WHERE date BETWEEN ? AND ? AND workspace_id = ?
-      ${creativeId ? "AND creative_id = ?" : ""}
-    `,
-    args: countArgs,
-  });
+  // GROUP BY dinâmico: constantes identificadas via groupBy param
+  // (sql.raw não existe — uso sql`` com strings literais controladas).
+  const { selectCols, groupCols } = (() => {
+    if (groupBy === "platform") {
+      return {
+        selectCols: sql`publisher_platform, '' AS platform_position`,
+        groupCols: sql`publisher_platform`,
+      };
+    }
+    if (groupBy === "position") {
+      return {
+        selectCols: sql`'' AS publisher_platform, platform_position`,
+        groupCols: sql`platform_position`,
+      };
+    }
+    return {
+      selectCols: sql`publisher_platform, platform_position`,
+      groupCols: sql`publisher_platform, platform_position`,
+    };
+  })();
 
-  const totalRecords = Number((countRow.rows[0] as Record<string, unknown>)?.total ?? 0);
+  const { totalRecords, breakdownRows, byCreativeRows } = await withWorkspace(
+    auth.workspace_id,
+    async (tx) => {
+      // ── 1. Verificar se há dados de breakdowns ──
+      const countResult = await tx.execute(sql`
+        SELECT COUNT(*) AS total FROM metrics_breakdowns
+        WHERE date BETWEEN ${dateFrom} AND ${dateTo}
+        ${creativeFilter}
+      `);
+      const countRows = countResult as unknown as Array<Record<string, unknown>>;
+      const total = Number(countRows[0]?.total ?? 0);
+
+      if (total === 0) {
+        return { totalRecords: 0, breakdownRows: [], byCreativeRows: null };
+      }
+
+      // ── 2. Aggregação por plataforma/posição ──
+      const breakdownResult = await tx.execute(sql`
+        SELECT
+          ${selectCols},
+          SUM(spend)                  AS total_spend,
+          SUM(impressions)            AS total_impressions,
+          SUM(clicks)                 AS total_clicks,
+          SUM(leads)                  AS total_leads,
+          AVG(cpm)                    AS avg_cpm,
+          AVG(ctr)                    AS avg_ctr,
+          COUNT(DISTINCT creative_id) AS creative_count,
+          COUNT(DISTINCT date)        AS days_count
+        FROM metrics_breakdowns
+        WHERE date BETWEEN ${dateFrom} AND ${dateTo}
+        ${creativeFilter}
+        GROUP BY ${groupCols}
+        ORDER BY total_spend DESC
+      `);
+
+      // ── 3. Opcional: detalhamento por criativo ──
+      let byCreativeResult:
+        | Array<Record<string, unknown>>
+        | null = null;
+      if (creativeId) {
+        const cRes = await tx.execute(sql`
+          SELECT
+            c.name AS creative_name,
+            mb.publisher_platform,
+            mb.platform_position,
+            SUM(mb.spend)       AS total_spend,
+            SUM(mb.impressions) AS total_impressions,
+            SUM(mb.clicks)      AS total_clicks,
+            SUM(mb.leads)       AS total_leads,
+            AVG(mb.ctr)         AS avg_ctr
+          FROM metrics_breakdowns mb
+          JOIN creatives c ON c.id = mb.creative_id
+          WHERE mb.creative_id = ${creativeId}
+            AND mb.date BETWEEN ${dateFrom} AND ${dateTo}
+          GROUP BY c.name, mb.publisher_platform, mb.platform_position
+          ORDER BY total_spend DESC
+        `);
+        byCreativeResult = cRes as unknown as Array<Record<string, unknown>>;
+      }
+
+      return {
+        totalRecords: total,
+        breakdownRows: breakdownResult as unknown as Array<Record<string, unknown>>,
+        byCreativeRows: byCreativeResult,
+      };
+    },
+  );
 
   if (totalRecords === 0) {
     return NextResponse.json({
@@ -67,56 +149,15 @@ export async function GET(req: NextRequest) {
     });
   }
 
-  // ── 2. Montar GROUP BY baseado em groupBy param ──
-  let selectCols: string;
-  let groupCols: string;
-
-  if (groupBy === "platform") {
-    selectCols = "publisher_platform, '' AS platform_position";
-    groupCols = "publisher_platform";
-  } else if (groupBy === "position") {
-    selectCols = "'' AS publisher_platform, platform_position";
-    groupCols = "platform_position";
-  } else {
-    // "both" (padrão)
-    selectCols = "publisher_platform, platform_position";
-    groupCols = "publisher_platform, platform_position";
-  }
-
-  const filterArgs: unknown[] = [dateFrom, dateTo, auth.workspace_id];
-  if (creativeId) filterArgs.push(creativeId);
-
-  // ── 3. Aggregação por plataforma/posição ──
-  const breakdownResult = await db.execute({
-    sql: `
-      SELECT
-        ${selectCols},
-        SUM(spend)                                                    AS total_spend,
-        SUM(impressions)                                              AS total_impressions,
-        SUM(clicks)                                                   AS total_clicks,
-        SUM(leads)                                                    AS total_leads,
-        AVG(cpm)                                                      AS avg_cpm,
-        AVG(ctr)                                                      AS avg_ctr,
-        COUNT(DISTINCT creative_id)                                   AS creative_count,
-        COUNT(DISTINCT date)                                          AS days_count
-      FROM metrics_breakdowns
-      WHERE date BETWEEN ? AND ? AND workspace_id = ?
-      ${creativeId ? "AND creative_id = ?" : ""}
-      GROUP BY ${groupCols}
-      ORDER BY total_spend DESC
-    `,
-    args: filterArgs,
-  });
-
   // ── 4. Calcular totais para shares ──
-  const grandTotalSpend = breakdownResult.rows.reduce(
-    (acc, row) => acc + Number(row.total_spend ?? 0), 0
+  const grandTotalSpend = breakdownRows.reduce(
+    (acc, row) => acc + Number(row.total_spend ?? 0), 0,
   );
-  const grandTotalLeads = breakdownResult.rows.reduce(
-    (acc, row) => acc + Number(row.total_leads ?? 0), 0
+  const grandTotalLeads = breakdownRows.reduce(
+    (acc, row) => acc + Number(row.total_leads ?? 0), 0,
   );
 
-  const breakdowns = breakdownResult.rows.map((row) => {
+  const breakdowns = breakdownRows.map((row) => {
     const spend = Number(row.total_spend ?? 0);
     const leads = Number(row.total_leads ?? 0);
     const cpl = leads > 0 ? Math.round((spend / leads) * 100) / 100 : null;
@@ -145,47 +186,23 @@ export async function GET(req: NextRequest) {
     };
   });
 
-  // ── 5. Opcional: detalhamento por criativo se creative_id específico ──
-  let byCreative = undefined;
-  if (creativeId) {
-    const creativeResult = await db.execute({
-      sql: `
-        SELECT
-          c.name AS creative_name,
-          mb.publisher_platform,
-          mb.platform_position,
-          SUM(mb.spend)       AS total_spend,
-          SUM(mb.impressions) AS total_impressions,
-          SUM(mb.clicks)      AS total_clicks,
-          SUM(mb.leads)       AS total_leads,
-          AVG(mb.ctr)         AS avg_ctr
-        FROM metrics_breakdowns mb
-        JOIN creatives c ON c.id = mb.creative_id
-        WHERE mb.creative_id = ?
-          AND mb.date BETWEEN ? AND ?
-          AND mb.workspace_id = ?
-        GROUP BY c.name, mb.publisher_platform, mb.platform_position
-        ORDER BY total_spend DESC
-      `,
-      args: [creativeId, dateFrom, dateTo, auth.workspace_id],
-    });
-
-    byCreative = creativeResult.rows.map((row) => {
-      const spend = Number(row.total_spend ?? 0);
-      const leads = Number(row.total_leads ?? 0);
-      return {
-        creative_name: row.creative_name,
-        publisher_platform: row.publisher_platform,
-        platform_position: row.platform_position,
-        total_spend: Math.round(spend * 100) / 100,
-        total_impressions: Number(row.total_impressions ?? 0),
-        total_clicks: Number(row.total_clicks ?? 0),
-        total_leads: leads,
-        avg_ctr: Math.round(Number(row.avg_ctr ?? 0) * 100) / 100,
-        cpl: leads > 0 ? Math.round((spend / leads) * 100) / 100 : null,
-      };
-    });
-  }
+  const byCreative = byCreativeRows
+    ? byCreativeRows.map((row) => {
+        const spend = Number(row.total_spend ?? 0);
+        const leads = Number(row.total_leads ?? 0);
+        return {
+          creative_name: row.creative_name,
+          publisher_platform: row.publisher_platform,
+          platform_position: row.platform_position,
+          total_spend: Math.round(spend * 100) / 100,
+          total_impressions: Number(row.total_impressions ?? 0),
+          total_clicks: Number(row.total_clicks ?? 0),
+          total_leads: leads,
+          avg_ctr: Math.round(Number(row.avg_ctr ?? 0) * 100) / 100,
+          cpl: leads > 0 ? Math.round((spend / leads) * 100) / 100 : null,
+        };
+      })
+    : undefined;
 
   return NextResponse.json({
     period: { from: dateFrom, to: dateTo },

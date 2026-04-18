@@ -2,7 +2,7 @@ import { getWorkspaceSetting, setWorkspaceSetting } from "./workspace";
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
-const REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || "https://pegasus-ads.vercel.app/api/auth/google/callback";
+const REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || "https://pegasus.alpesd.com.br/api/auth/google/callback";
 
 interface GoogleTokens {
   access_token: string;

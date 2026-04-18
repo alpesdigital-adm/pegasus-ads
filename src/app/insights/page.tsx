@@ -254,35 +254,36 @@ export default function InsightsPage() {
   };
 
   // Fetch data
-  const fetchData = useCallback(() => {
+  const fetchData = useCallback(async () => {
     setLoading(true);
     setError(null);
+    try {
+      const params = new URLSearchParams({ days: String(days) });
+      if (fOffer) params.set("offer", fOffer);
+      if (fConcept) params.set("concept", fConcept);
+      if (fLaunch) params.set("launch", fLaunch);
+      if (fFormat) params.set("format", fFormat);
+      if (fCampaign) params.set("campaign", fCampaign);
+      if (fAdset) params.set("adset", fAdset);
 
-    const params = new URLSearchParams({ days: String(days) });
-    if (fOffer) params.set("offer", fOffer);
-    if (fConcept) params.set("concept", fConcept);
-    if (fLaunch) params.set("launch", fLaunch);
-    if (fFormat) params.set("format", fFormat);
-    if (fCampaign) params.set("campaign", fCampaign);
-    if (fAdset) params.set("adset", fAdset);
-
-    fetch(`/api/reports/creative-performance?${params}`)
-      .then(r => r.json())
-      .then(data => {
-        if (data.error) {
-          setError(data.error);
-        } else {
-          setConcepts(data.concepts || []);
-          setTotals(data.totals || null);
-          setFilters(data.filters || null);
-        }
-      })
-      .catch(err => setError(err.message))
-      .finally(() => setLoading(false));
+      const r = await fetch(`/api/reports/creative-performance?${params}`);
+      const data = await r.json();
+      if (data.error) {
+        setError(data.error);
+      } else {
+        setConcepts(data.concepts || []);
+        setTotals(data.totals || null);
+        setFilters(data.filters || null);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
   }, [days, fOffer, fConcept, fLaunch, fFormat, fCampaign, fAdset]);
 
   useEffect(() => {
-    fetchData();
+    void fetchData();
   }, [fetchData]);
 
   // Expand / Collapse all
@@ -501,7 +502,7 @@ function ConceptRowGroup({
   toggleAngle: (key: string) => void;
   toggleAd: (key: string) => void;
 }) {
-  const pctSpend = concept.spend; // will be used for bar widths if needed
+  // (pctSpend removido — placeholder que nunca foi usado)
 
   return (
     <>
@@ -542,7 +543,6 @@ function ConceptRowGroup({
           <AngleRowGroup
             key={aKey}
             angle={angle}
-            aKey={aKey}
             isOpen={aOpen}
             onToggle={() => toggleAngle(aKey)}
             expandedAds={expandedAds}
@@ -557,11 +557,10 @@ function ConceptRowGroup({
 // ── Angle Row Group ──
 
 function AngleRowGroup({
-  angle, aKey, isOpen, onToggle,
+  angle, isOpen, onToggle,
   expandedAds, toggleAd,
 }: {
   angle: AngleNode;
-  aKey: string;
   isOpen: boolean;
   onToggle: () => void;
   expandedAds: Set<string>;

@@ -2,12 +2,19 @@
  * POST /api/ads/toggle-status
  * Body: { ad_id: string, status: "ACTIVE" | "PAUSED" }
  *
- * Toggle ad status via Meta API.
+ * Toggle ad status via Meta API. Atualiza classified_insights local para
+ * refletir imediatamente no dashboard.
+ *
+ * MIGRADO NA FASE 1C (Wave 2 ads):
+ *  - getDb().execute() → dbAdmin (cross-workspace sync — classified_insights
+ *    não tem workspace_id próprio, atribuído via ad_creatives.ad_name na RLS).
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
 import { getTokenForWorkspace } from "@/lib/meta";
-import { getDb } from "@/lib/db";
+import { dbAdmin } from "@/lib/db";
+import { classifiedInsights } from "@/lib/db/schema";
+import { eq } from "drizzle-orm";
 
 export const runtime = "nodejs";
 
@@ -21,7 +28,10 @@ export async function POST(req: NextRequest) {
     const { ad_id, status } = await req.json();
 
     if (!ad_id || !["ACTIVE", "PAUSED"].includes(status)) {
-      return NextResponse.json({ error: "ad_id and status (ACTIVE|PAUSED) required" }, { status: 400 });
+      return NextResponse.json(
+        { error: "ad_id and status (ACTIVE|PAUSED) required" },
+        { status: 400 },
+      );
     }
 
     const token = await getTokenForWorkspace(auth.workspace_id);
@@ -35,11 +45,10 @@ export async function POST(req: NextRequest) {
     if (res.ok) {
       // Update local classified_insights to reflect immediately
       try {
-        const db = getDb();
-        await db.execute({
-          sql: "UPDATE classified_insights SET effective_status = ? WHERE ad_id = ?",
-          args: [status, ad_id],
-        });
+        await dbAdmin
+          .update(classifiedInsights)
+          .set({ effectiveStatus: status })
+          .where(eq(classifiedInsights.adId, ad_id));
       } catch { /* non-critical */ }
 
       console.log(`[ToggleStatus] ad=${ad_id} → ${status}`);

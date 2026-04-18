@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import AppShell from "@/components/AppShell";
 
 interface Project {
@@ -20,15 +20,20 @@ export default function ProjectsPage() {
   const [form, setForm] = useState({ name: "", campaign_filter: "", description: "" });
   const [saving, setSaving] = useState(false);
 
-  const fetchProjects = () => {
+  const fetchProjects = useCallback(async () => {
     setLoading(true);
-    fetch("/api/projects")
-      .then((r) => r.json())
-      .then((d) => setProjects(d.projects || []))
-      .finally(() => setLoading(false));
-  };
+    try {
+      const r = await fetch("/api/projects");
+      const d = await r.json();
+      setProjects(d.projects || []);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-  useEffect(() => { fetchProjects(); }, []);
+  useEffect(() => {
+    void fetchProjects();
+  }, [fetchProjects]);
 
   const handleSave = async () => {
     if (!form.name.trim() || !form.campaign_filter.trim()) return;

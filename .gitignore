@@ -30,6 +30,9 @@ yarn-error.log*
 
 # env files
 .env*.local
+.env.backup*
+.env.blue.backup
+.env.pre-*
 
 # vercel
 .vercel
@@ -42,3 +45,7 @@ next-env.d.ts
 *.db
 *.db-journal
 .env
+
+# Fase 4 observability — gerados em runtime
+infra/prometheus/prometheus.yml
+infra/prometheus/scrape-token

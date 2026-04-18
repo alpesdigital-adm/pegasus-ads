@@ -1,10 +1,3 @@
-import { NextRequest, NextResponse } from "next/server";
-import { getDb } from "@/lib/db";
-import { requireAuth } from "@/lib/auth";
-import type { GraphData, GraphNode, GraphEdge } from "@/lib/types";
-import { evaluateKillRules } from "@/config/kill-rules";
-import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
-
 /**
  * GET /api/graph
  *
@@ -18,12 +11,24 @@ import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
  * Agrupamento: nome base sem sufixo F/S e sem extensão.
  *   "T7EBMX-AD014F.png" → base "T7EBMX-AD014"
  *   "T7EBMX-AD014S.png" → base "T7EBMX-AD014"
+ *
+ * MIGRADO NA FASE 1C (Wave 5):
+ *  - getDb() → withWorkspace (RLS escopa creatives + metrics + creative_edges)
+ *  - 2 queries em sql`` (creatives com agregados + edges com JOIN)
+ *  - Filtros workspace_id manuais removidos (RLS cobre — edges via creative FK)
  */
+import { NextRequest, NextResponse } from "next/server";
+import { withWorkspace } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
+import type { GraphData, GraphNode, GraphEdge } from "@/lib/types";
+import { evaluateKillRules } from "@/config/kill-rules";
+import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
+import { sql } from "drizzle-orm";
+
+export const runtime = "nodejs";
 
 function getAdBaseName(creativeName: string): string {
-  // Remove extensão (.png, .jpg, etc)
   let name = creativeName.replace(/\.\w+$/, "");
-  // Remove sufixo F ou S no final (placement indicator)
   name = name.replace(/[FS]$/, "");
   return name;
 }
@@ -35,52 +40,52 @@ export async function GET(req: NextRequest) {
   if (auth instanceof NextResponse) return auth;
 
   try {
-    const db = getDb();
     const { searchParams } = req.nextUrl;
     const cplTarget = parseFloat(searchParams.get("cpl_target") || String(DEFAULT_CPL_TARGET));
 
-    // Buscar todos os criativos com métricas agregadas + dias rodando
-    const creativesResult = await db.execute({
-      sql: `
-      SELECT c.*,
-        (SELECT SUM(m.spend) FROM metrics m WHERE m.creative_id = c.id) as total_spend,
-        (SELECT SUM(m.impressions) FROM metrics m WHERE m.creative_id = c.id) as total_impressions,
-        (SELECT SUM(m.clicks) FROM metrics m WHERE m.creative_id = c.id) as total_clicks,
-        (SELECT SUM(m.leads) FROM metrics m WHERE m.creative_id = c.id) as total_leads,
-        (SELECT COALESCE(SUM(m.landing_page_views),0) FROM metrics m WHERE m.creative_id = c.id) as total_lpv,
-        (SELECT AVG(m.cpm) FROM metrics m WHERE m.creative_id = c.id) as avg_cpm,
-        (SELECT AVG(m.ctr) FROM metrics m WHERE m.creative_id = c.id) as avg_ctr,
-        (SELECT AVG(m.cpc) FROM metrics m WHERE m.creative_id = c.id AND m.cpc > 0) as avg_cpc,
-        (SELECT COUNT(DISTINCT m.date) FROM metrics m WHERE m.creative_id = c.id) as days_count
-      FROM creatives c
-      WHERE c.workspace_id = ?
-      ORDER BY c.generation ASC, c.created_at ASC
-    `,
-      args: [auth.workspace_id],
-    });
+    const { creativeRows, edgeRows } = await withWorkspace(
+      auth.workspace_id,
+      async (tx) => {
+        const cr = await tx.execute(sql`
+          SELECT c.*,
+            (SELECT SUM(m.spend) FROM metrics m WHERE m.creative_id = c.id) AS total_spend,
+            (SELECT SUM(m.impressions) FROM metrics m WHERE m.creative_id = c.id) AS total_impressions,
+            (SELECT SUM(m.clicks) FROM metrics m WHERE m.creative_id = c.id) AS total_clicks,
+            (SELECT SUM(m.leads) FROM metrics m WHERE m.creative_id = c.id) AS total_leads,
+            (SELECT COALESCE(SUM(m.landing_page_views), 0) FROM metrics m WHERE m.creative_id = c.id) AS total_lpv,
+            (SELECT AVG(m.cpm) FROM metrics m WHERE m.creative_id = c.id) AS avg_cpm,
+            (SELECT AVG(m.ctr) FROM metrics m WHERE m.creative_id = c.id) AS avg_ctr,
+            (SELECT AVG(m.cpc) FROM metrics m WHERE m.creative_id = c.id AND m.cpc > 0) AS avg_cpc,
+            (SELECT COUNT(DISTINCT m.date) FROM metrics m WHERE m.creative_id = c.id) AS days_count
+          FROM creatives c
+          ORDER BY c.generation ASC, c.created_at ASC
+        `);
 
-    // Buscar todas as edges (filtrar via criativos do workspace)
-    const edgesResult = await db.execute({
-      sql: "SELECT e.* FROM creative_edges e JOIN creatives c ON c.id = e.source_id WHERE c.workspace_id = ? ORDER BY e.created_at ASC",
-      args: [auth.workspace_id],
-    });
+        // creative_edges RLS via workspace_id próprio (Fase 1B preencheu coluna)
+        const ed = await tx.execute(sql`
+          SELECT id, source_id, target_id, relationship, variable_isolated, created_at
+          FROM creative_edges
+          ORDER BY created_at ASC
+        `);
+
+        return {
+          creativeRows: cr as unknown as Array<Record<string, unknown>>,
+          edgeRows: ed as unknown as Array<Record<string, unknown>>,
+        };
+      },
+    );
 
     // ── Agrupar criativos por AD (base name) ──
-    // Mapa: baseName → { feed?: row, stories?: row }
     const adGroups: Record<string, {
-      feed?: (typeof creativesResult.rows)[0];
-      stories?: (typeof creativesResult.rows)[0];
+      feed?: Record<string, unknown>;
+      stories?: Record<string, unknown>;
     }> = {};
 
-    for (const row of creativesResult.rows) {
+    for (const row of creativeRows) {
       const name = row.name as string;
       const baseName = getAdBaseName(name);
+      if (!adGroups[baseName]) adGroups[baseName] = {};
 
-      if (!adGroups[baseName]) {
-        adGroups[baseName] = {};
-      }
-
-      // Determinar se é Feed ou Stories pelo sufixo ou dimensões
       const isFeed = name.replace(/\.\w+$/, "").endsWith("F") ||
         (row.width === 1080 && row.height === 1080);
       const isStories = name.replace(/\.\w+$/, "").endsWith("S") ||
@@ -91,22 +96,16 @@ export async function GET(req: NextRequest) {
       } else if (isFeed) {
         adGroups[baseName].feed = row;
       } else {
-        // Criativo sem sufixo — trata como Feed (fallback)
-        if (!adGroups[baseName].feed) {
-          adGroups[baseName].feed = row;
-        }
+        if (!adGroups[baseName].feed) adGroups[baseName].feed = row;
       }
     }
 
-    // ── Mapear creative IDs individuais → baseName (para redirecionar edges) ──
     const creativeIdToBaseName: Record<string, string> = {};
-
-    for (const row of creativesResult.rows) {
-      const baseName = getAdBaseName(row.name as string);
-      creativeIdToBaseName[row.id as string] = baseName;
+    for (const row of creativeRows) {
+      creativeIdToBaseName[row.id as string] = getAdBaseName(row.name as string);
     }
 
-    // ── Primeiro passo: construir métricas por nó para poder calcular controlCpl ──
+    // ── Métricas agregadas por nó ──
     type NodeMetrics = {
       totalSpend: number;
       totalImpressions: number;
@@ -157,7 +156,6 @@ export async function GET(req: NextRequest) {
 
       const avgCpc = totalClicks > 0 ? totalSpend / totalClicks : 0;
 
-      // daysRunning: máximo entre feed e stories (ambos contam tempo de veiculação)
       const feedDays = Number(group.feed?.days_count ?? 0);
       const storiesDays = Number(group.stories?.days_count ?? 0);
       const daysRunning = Math.max(feedDays, storiesDays);
@@ -176,27 +174,25 @@ export async function GET(req: NextRequest) {
       };
     }
 
-    // ── Identificar controlCpl: is_control=true tem prioridade; fallback para generation=0 ──
+    // ── Identificar controlCpl ──
     let controlCpl: number | null = null;
     for (const [baseName, group] of Object.entries(adGroups)) {
       const primary = group.feed || group.stories;
       if (!primary) continue;
-      const isControl = !!(primary.is_control);
-      const isGen0    = (primary.generation as number) === 0;
+      const isControl = !!primary.is_control;
+      const isGen0 = (primary.generation as number) === 0;
       if (isControl || isGen0) {
         const m = nodeMetricsMap[baseName];
         if (m && m.cpl !== null) {
           controlCpl = m.cpl;
-          if (isControl) break; // is_control explícito tem prioridade — parar aqui
+          if (isControl) break;
         }
       }
     }
 
-    // ── Construir nós agrupados com kill rule ──
+    // ── Construir nós ──
     const nodes: GraphNode[] = [];
-
     for (const [baseName, group] of Object.entries(adGroups)) {
-      // Prioriza Feed como representante; fallback para Stories
       const primary = group.feed || group.stories;
       if (!primary) continue;
 
@@ -205,7 +201,6 @@ export async function GET(req: NextRequest) {
       if (group.feed) placements.push("feed");
       if (group.stories) placements.push("stories");
 
-      // Avaliar kill rules se há métricas
       let killRuleResult: GraphNode["kill_rule"] = undefined;
       if (m && m.totalSpend > 0) {
         const evaluated = evaluateKillRules({
@@ -218,7 +213,6 @@ export async function GET(req: NextRequest) {
           controlCpl,
           daysRunning: m.daysRunning,
         });
-
         if (evaluated) {
           killRuleResult = {
             level: evaluated.level,
@@ -256,28 +250,24 @@ export async function GET(req: NextRequest) {
               cpl: m.cpl,
             }
           : undefined,
-        is_control: !!(primary.is_control) || (primary.generation as number) === 0,
+        is_control: !!primary.is_control || (primary.generation as number) === 0,
       };
-
       nodes.push(node);
     }
 
-    // ── Redirecionar edges para os nós agrupados ──
-    const edgeSet = new Set<string>(); // Para deduplicar
+    // ── Edges para os nós agrupados ──
+    const edgeSet = new Set<string>();
     const edges: GraphEdge[] = [];
-
-    for (const row of edgesResult.rows) {
+    for (const row of edgeRows) {
       const sourceId = row.source_id as string;
       const targetId = row.target_id as string;
-
       const sourceBase = creativeIdToBaseName[sourceId];
       const targetBase = creativeIdToBaseName[targetId];
-
       if (!sourceBase || !targetBase) continue;
-      if (sourceBase === targetBase) continue; // Skip self-edges (F→S do mesmo AD)
+      if (sourceBase === targetBase) continue;
 
       const edgeKey = `${sourceBase}→${targetBase}→${row.relationship}`;
-      if (edgeSet.has(edgeKey)) continue; // Deduplicar (F→F' e S→S' viram uma edge só)
+      if (edgeSet.has(edgeKey)) continue;
       edgeSet.add(edgeKey);
 
       edges.push({
@@ -295,7 +285,7 @@ export async function GET(req: NextRequest) {
     console.error("Graph error:", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Internal server error" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

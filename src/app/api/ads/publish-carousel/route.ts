@@ -29,7 +29,7 @@
  * 2. Lista TODOS os ad sets da campanha
  * 3. Para cada carrossel: upload imagens → cria creative com child_attachments → cria ad em CADA ad set
  *
- * Protegido por x-api-key (TEST_LOG_API_KEY).
+ * Protegido por x-api-key (api_keys table) ou cookie Supabase session.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";

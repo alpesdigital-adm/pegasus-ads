@@ -11,6 +11,9 @@ FROM base AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+# Placeholders pra build passar (Next 16 turbopack page data collection)
+ENV DATABASE_URL=postgres://x:x@localhost:5432/x
+ENV DATABASE_URL_ADMIN=postgres://x:x@localhost:5432/x
 RUN npm run build
 
 # ── Runner ──

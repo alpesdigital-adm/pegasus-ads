@@ -17,7 +17,7 @@
  *   "expires_in_seconds": 3600
  * }
  *
- * Protegido por x-api-key.
+ * Protegido por x-api-key (api_keys table) ou cookie Supabase session.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";

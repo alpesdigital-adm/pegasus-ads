@@ -12,10 +12,25 @@
  *   source_file  — nome do arquivo (opcional, usa file.name)
  *
  * Protegido por x-api-key.
+ *
+ * MIGRADO NA FASE 1C (Wave 5 — CRM):
+ *  - getDb() → dbAdmin (BYPASSRLS, workspace_id no WHERE manual)
+ *  - 3 lookups iniciais via Drizzle typed builder
+ *  - Bulk INSERT com ON CONFLICT DO UPDATE agora usa
+ *    .insert().values([...objects]).onConflictDoUpdate(...) — sem
+ *    montar placeholders manualmente; jsonb passa como objeto (não JSON.stringify)
+ *  - COALESCE(EXCLUDED.field, crm_leads.field) preservado para ad_id/adset_id/campaign_id
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
-import { getDb } from "@/lib/db";
+import { dbAdmin } from "@/lib/db";
+import {
+  leadQualificationRules,
+  campaigns,
+  publishedAds,
+  crmLeads,
+} from "@/lib/db/schema";
+import { and, eq, sql } from "drizzle-orm";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -80,7 +95,9 @@ function extractCampaignCode(utm: string): string {
   return parts.length >= 2 ? `${parts[0]}__${parts[1]}` : utm;
 }
 
-const COL_COUNT = 21;
+type CrmLeadInsert = typeof crmLeads.$inferInsert;
+
+const BATCH_SIZE = 100;
 
 export async function POST(req: NextRequest) {
   const auth = await requireAuth(req);
@@ -98,80 +115,83 @@ export async function POST(req: NextRequest) {
     const rows = parseCsv(text);
     if (!rows.length) return NextResponse.json({ error: "CSV empty or invalid" }, { status: 400 });
 
-    const db = getDb();
-
     // Load qualification rules
-    const rulesRes = await db.execute({
-      sql: "SELECT rules FROM lead_qualification_rules WHERE workspace_id = ? AND project_key = ?",
-      args: [auth.workspace_id, projectKey],
-    });
-    const qualRules: QualRule[] = rulesRes.rows.length > 0
-      ? (rulesRes.rows[0].rules as QualRule[]) : [];
+    const rulesRows = await dbAdmin
+      .select({ rules: leadQualificationRules.rules })
+      .from(leadQualificationRules)
+      .where(
+        and(
+          eq(leadQualificationRules.workspaceId, auth.workspace_id),
+          eq(leadQualificationRules.projectKey, projectKey),
+        ),
+      )
+      .limit(1);
+    const qualRules: QualRule[] = rulesRows.length > 0
+      ? (rulesRows[0].rules as QualRule[]) : [];
 
     // Load campaign lookup (name -> meta_campaign_id)
-    const campRes = await db.execute({
-      sql: "SELECT meta_campaign_id, name FROM campaigns WHERE workspace_id = ?",
-      args: [auth.workspace_id],
-    });
+    const campRows = await dbAdmin
+      .select({
+        metaCampaignId: campaigns.metaCampaignId,
+        name: campaigns.name,
+      })
+      .from(campaigns)
+      .where(eq(campaigns.workspaceId, auth.workspace_id));
     const campByName = new Map<string, string>();
-    for (const c of campRes.rows) {
-      campByName.set((c.name as string).toUpperCase(), c.meta_campaign_id as string);
+    for (const c of campRows) {
+      campByName.set(c.name.toUpperCase(), c.metaCampaignId);
     }
 
     // Load ad lookup (ad_name -> {meta_ad_id, meta_adset_id})
-    const adRes = await db.execute({
-      sql: "SELECT meta_ad_id, ad_name, meta_adset_id FROM published_ads WHERE workspace_id = ? AND meta_ad_id IS NOT NULL",
-      args: [auth.workspace_id],
-    });
+    const adRows = await dbAdmin
+      .select({
+        metaAdId: publishedAds.metaAdId,
+        adName: publishedAds.adName,
+        metaAdsetId: publishedAds.metaAdsetId,
+      })
+      .from(publishedAds)
+      .where(eq(publishedAds.workspaceId, auth.workspace_id));
     const adByName = new Map<string, { adId: string; adsetId: string }>();
-    for (const a of adRes.rows) {
-      adByName.set((a.ad_name as string).toUpperCase(), {
-        adId: a.meta_ad_id as string,
-        adsetId: (a.meta_adset_id as string) || "",
+    for (const a of adRows) {
+      adByName.set(a.adName.toUpperCase(), {
+        adId: a.metaAdId,
+        adsetId: a.metaAdsetId || "",
       });
     }
 
     let imported = 0, skipped = 0, qualified = 0, adResolved = 0, campResolved = 0;
     const errors: string[] = [];
-    const batch: unknown[] = [];
+    const batch: CrmLeadInsert[] = [];
 
     const flush = async () => {
       if (!batch.length) return;
-      const rowCount = batch.length / COL_COUNT;
-      const placeholders = Array.from({ length: rowCount }, (_, i) =>
-        `(${Array.from({ length: COL_COUNT }, (__, j) => `$${i * COL_COUNT + j + 1}`).join(",")})`
-      ).join(",");
-
-      await db.execute({
-        sql: `INSERT INTO crm_leads (
-          crm_id, workspace_id, email, phone, full_name,
-          utm_source, utm_medium, utm_campaign, utm_term, utm_content, fbclid,
-          ad_id, adset_id, campaign_id,
-          is_qualified, qualification_data,
-          subscribed_at, first_subscribed_at,
-          source_file, raw_data, imported_at
-        ) VALUES ${placeholders}
-        ON CONFLICT (workspace_id, crm_id) DO UPDATE SET
-          email = EXCLUDED.email,
-          phone = EXCLUDED.phone,
-          full_name = EXCLUDED.full_name,
-          utm_source = EXCLUDED.utm_source,
-          utm_medium = EXCLUDED.utm_medium,
-          utm_campaign = EXCLUDED.utm_campaign,
-          utm_term = EXCLUDED.utm_term,
-          utm_content = EXCLUDED.utm_content,
-          fbclid = EXCLUDED.fbclid,
-          ad_id = COALESCE(EXCLUDED.ad_id, crm_leads.ad_id),
-          adset_id = COALESCE(EXCLUDED.adset_id, crm_leads.adset_id),
-          campaign_id = COALESCE(EXCLUDED.campaign_id, crm_leads.campaign_id),
-          is_qualified = EXCLUDED.is_qualified,
-          qualification_data = EXCLUDED.qualification_data,
-          subscribed_at = EXCLUDED.subscribed_at,
-          source_file = EXCLUDED.source_file,
-          raw_data = EXCLUDED.raw_data,
-          imported_at = NOW()`,
-        args: batch.slice(),
-      });
+      await dbAdmin
+        .insert(crmLeads)
+        .values(batch)
+        .onConflictDoUpdate({
+          target: [crmLeads.workspaceId, crmLeads.crmId],
+          set: {
+            email: sql`EXCLUDED.email`,
+            phone: sql`EXCLUDED.phone`,
+            fullName: sql`EXCLUDED.full_name`,
+            utmSource: sql`EXCLUDED.utm_source`,
+            utmMedium: sql`EXCLUDED.utm_medium`,
+            utmCampaign: sql`EXCLUDED.utm_campaign`,
+            utmTerm: sql`EXCLUDED.utm_term`,
+            utmContent: sql`EXCLUDED.utm_content`,
+            fbclid: sql`EXCLUDED.fbclid`,
+            // COALESCE preserva o valor existente quando o CSV novo não resolveu a UTM.
+            adId: sql`COALESCE(EXCLUDED.ad_id, ${crmLeads.adId})`,
+            adsetId: sql`COALESCE(EXCLUDED.adset_id, ${crmLeads.adsetId})`,
+            campaignId: sql`COALESCE(EXCLUDED.campaign_id, ${crmLeads.campaignId})`,
+            isQualified: sql`EXCLUDED.is_qualified`,
+            qualificationData: sql`EXCLUDED.qualification_data`,
+            subscribedAt: sql`EXCLUDED.subscribed_at`,
+            sourceFile: sql`EXCLUDED.source_file`,
+            rawData: sql`EXCLUDED.raw_data`,
+            importedAt: sql`NOW()`,
+          },
+        });
       batch.length = 0;
     };
 
@@ -230,19 +250,31 @@ export async function POST(req: NextRequest) {
           Object.entries(row).filter(([k]) => !["Nome Completo"].includes(k))
         );
 
-        batch.push(
-          crmId, auth.workspace_id,
-          row["Email"]?.trim() || null, row["Telefone"]?.trim() || null, row["Nome Completo"]?.trim() || null,
-          raw(row["UTM Source"]) || null, raw(row["UTM Medium"]) || null,
-          cleanCampaign || null, raw(row["UTM Term"]) || null, cleanContent || null, raw(row["FBCLID"]) || null,
-          adId, adsetId, campaignId,
-          isQual, JSON.stringify(qualData),
-          subscribedAt?.toISOString() || null, firstSubscribedAt?.toISOString() || null,
-          sourceName, JSON.stringify(rawData), new Date().toISOString()
-        );
+        batch.push({
+          workspaceId: auth.workspace_id,
+          crmId,
+          email: row["Email"]?.trim() || null,
+          phone: row["Telefone"]?.trim() || null,
+          fullName: row["Nome Completo"]?.trim() || null,
+          utmSource: raw(row["UTM Source"]) || null,
+          utmMedium: raw(row["UTM Medium"]) || null,
+          utmCampaign: cleanCampaign || null,
+          utmTerm: raw(row["UTM Term"]) || null,
+          utmContent: cleanContent || null,
+          fbclid: raw(row["FBCLID"]) || null,
+          adId,
+          adsetId,
+          campaignId,
+          isQualified: isQual,
+          qualificationData: qualData,
+          subscribedAt,
+          firstSubscribedAt,
+          sourceFile: sourceName,
+          rawData,
+        });
         imported++;
 
-        if (batch.length >= 100 * COL_COUNT) await flush();
+        if (batch.length >= BATCH_SIZE) await flush();
       } catch (e) {
         errors.push(`Row ${row["ID"]}: ${e}`); skipped++;
       }

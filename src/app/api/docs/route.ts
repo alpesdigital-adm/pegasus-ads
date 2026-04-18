@@ -24,11 +24,11 @@ const OPENAPI_SPEC = {
       "Dados são isolados por workspace.",
     contact: {
       name: "Alpes Digital",
-      url: "https://pegasus-ads.vercel.app",
+      url: "https://pegasus.alpesd.com.br",
     },
   },
   servers: [
-    { url: "https://pegasus-ads.vercel.app", description: "Produção (Vercel)" },
+    { url: "https://pegasus.alpesd.com.br", description: "Produção" },
     { url: "http://localhost:3000", description: "Desenvolvimento local" },
   ],
   components: {
@@ -36,20 +36,14 @@ const OPENAPI_SPEC = {
       SessionAuth: {
         type: "apiKey",
         in: "cookie",
-        name: "pegasus_session",
-        description: "Cookie de sessão — obtido via POST /api/auth/login ou /api/auth/register",
+        name: "sb-access-token",
+        description: "Cookie de sessão Supabase Auth (gotrue JWT) — obtido via POST /api/auth/login ou /api/auth/register",
       },
       WorkspaceApiKey: {
         type: "apiKey",
         in: "header",
         name: "x-api-key",
         description: "API key do workspace — criada via POST /api/workspaces/api-keys. Formato: pgs_xxxx",
-      },
-      ApiKeyAuth: {
-        type: "apiKey",
-        in: "header",
-        name: "x-api-key",
-        description: "(Legacy) TEST_LOG_API_KEY — mantida para compatibilidade",
       },
       CronAuth: {
         type: "http",
@@ -378,27 +372,6 @@ const OPENAPI_SPEC = {
       },
     },
 
-    // ── Atribuição ─────────────────────────────────────────────────────────
-    "/api/attribution": {
-      get: {
-        tags: ["Analytics"],
-        summary: "Modelo de atribuição first-touch + any-touch",
-        description:
-          "Retorna análise de atribuição com constantes validadas do T4 (16.136 leads, CPL R$32,77).",
-        parameters: [
-          { name: "campaign_key", in: "query", schema: { type: "string" } },
-          {
-            name: "period",
-            in: "query",
-            schema: { type: "string", enum: ["7d", "30d", "all"] },
-          },
-        ],
-        responses: {
-          "200": { description: "Dados de atribuição" },
-        },
-      },
-    },
-
     // ── Budget ─────────────────────────────────────────────────────────────
     "/api/budget/suggest": {
       get: {
@@ -503,33 +476,6 @@ const OPENAPI_SPEC = {
         },
         responses: {
           "201": { description: "Template criado" },
-        },
-      },
-    },
-
-    // ── Pipeline ───────────────────────────────────────────────────────────
-    "/api/pipeline/run-cycle": {
-      post: {
-        tags: ["Pipeline"],
-        summary: "Executar ciclo end-to-end",
-        description: "Encadeia: coleta métricas → avalia kill rules → gera hipóteses A/B.",
-        requestBody: {
-          content: {
-            "application/json": {
-              schema: {
-                type: "object",
-                properties: {
-                  campaign_key: { type: "string" },
-                  top_n: { type: "integer" },
-                  skip_collect: { type: "boolean" },
-                  skip_hypotheses: { type: "boolean" },
-                },
-              },
-            },
-          },
-        },
-        responses: {
-          "200": { description: "Resultado do ciclo" },
         },
       },
     },

@@ -10,9 +10,22 @@
  *   format?        — 'html' | 'json' (default: 'html')
  *
  * Proteção: requireAuth (session ou API key multi-tenant)
+ *
+ * MIGRADO NA FASE 1C (Wave 2) — 3 BUGS PRE-EXISTENTES CORRIGIDOS:
+ *   1. `m.date_start` → `m.date` (schema usa TEXT 'date', 'date_start' não existe)
+ *   2. `c.campaign_key` → `c.funnel_key` (creatives.campaign_key não existe;
+ *      funnel_key é o identificador do funnel T4/T7/etc)
+ *   3. `a.type = 'kill'` → `a.level IN ('L0','L1','L2')` (alerts.type não
+ *      existe; coluna é `level`, e kill-level alerts têm L0/L1/L2 conforme
+ *      kill-rules/evaluate)
+ *
+ * OBSERVAÇÃO: antes da migração o SQL provavelmente dava erro silencioso
+ * (colunas inexistentes) — a rota retornava dados incompletos/fallbacks.
+ * Com os fixes, kills-da-semana e alerts-da-semana agora populam com
+ * dados reais. Se há dashboards consumindo, revisar antes de sign-off.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { getDb } from "@/lib/db";
+import { withWorkspace, sql } from "@/lib/db";
 import { requireAuth } from "@/lib/auth";
 
 export const runtime = "nodejs";
@@ -59,7 +72,7 @@ function generateHtml(data: WeeklyReportData): string {
       <td style="padding: 8px 12px; text-align:center;">${c.cpl ? formatCurrency(c.cpl) : "—"}</td>
       <td style="padding: 8px 12px; text-align:center;">${formatCurrency(c.total_spend)}</td>
       <td style="padding: 8px 12px; text-align:center; color:${c.status === "winner" ? "#276221" : c.status === "killed" ? "#cc0000" : "#555"};">${c.status}</td>
-    </tr>`
+    </tr>`,
     )
     .join("");
 
@@ -154,7 +167,7 @@ ${
 }
 
 <div style="margin-top: 24px; font-size: 12px; color: #999; text-align: center; border-top: 1px solid #eee; padding-top: 16px;">
-  Gerado automaticamente pelo Pegasus Ads em ${formatDate(new Date())} • <a href="https://pegasus-ads.vercel.app" style="color: #1a1a2e;">pegasus-ads.vercel.app</a>
+  Gerado automaticamente pelo Pegasus Ads em ${formatDate(new Date())} • <a href="https://pegasus.alpesd.com.br" style="color: #1a1a2e;">pegasus.alpesd.com.br</a>
 </div>
 
 </body>
@@ -197,8 +210,6 @@ export async function GET(req: NextRequest) {
   const auth = await requireAuth(req);
   if (auth instanceof NextResponse) return auth;
 
-  const db = getDb();
-
   const { searchParams } = new URL(req.url);
   const campaignKey = searchParams.get("campaign_key") ?? "T7_0003_RAT";
   const weeksBack = Number(searchParams.get("weeks_back") ?? "1");
@@ -217,80 +228,90 @@ export async function GET(req: NextRequest) {
   const fromStr = fromDate.toISOString().split("T")[0];
   const prevFromStr = prevFromDate.toISOString().split("T")[0];
 
-  // ── Criativos com métricas da semana ──────────────────────────────────────
-  const creativeResult = await db.execute({
-    sql: `SELECT
-       c.id, c.name, c.status, c.is_control,
-       COALESCE(SUM(m.leads), 0)::INT AS total_leads,
-       COALESCE(SUM(m.spend), 0)::DOUBLE PRECISION AS total_spend,
-       CASE WHEN SUM(m.leads) > 0 THEN (SUM(m.spend)/SUM(m.leads))::DOUBLE PRECISION ELSE NULL END AS cpl
-     FROM creatives c
-     LEFT JOIN metrics m ON m.creative_id = c.id AND m.date_start >= $2 AND m.date_start <= $3
-     WHERE c.campaign_key = $1
-     GROUP BY c.id, c.name, c.status, c.is_control
-     ORDER BY cpl ASC NULLS LAST, total_leads DESC`,
-    args: [campaignKey, fromStr, toStr],
-  });
-  const creativeRows = creativeResult.rows as unknown as CreativeSummary[];
+  // 4 queries em withWorkspace — RLS escopa workspace_id em c (creatives),
+  // a (alerts), e nas tabelas joinadas.
+  const { creativeRows, prevRows, killRows, winnerRows, alertRows } =
+    await withWorkspace(auth.workspace_id, async (tx) => {
+      const creativeResult = await tx.execute(sql`
+        SELECT
+          c.id, c.name, c.status, c.is_control,
+          COALESCE(SUM(m.leads), 0)::INT AS total_leads,
+          COALESCE(SUM(m.spend), 0)::DOUBLE PRECISION AS total_spend,
+          CASE WHEN SUM(m.leads) > 0
+               THEN (SUM(m.spend)/SUM(m.leads))::DOUBLE PRECISION
+               ELSE NULL END AS cpl
+        FROM creatives c
+        LEFT JOIN metrics m ON m.creative_id = c.id AND m.date >= ${fromStr} AND m.date <= ${toStr}
+        WHERE c.funnel_key = ${campaignKey}
+        GROUP BY c.id, c.name, c.status, c.is_control
+        ORDER BY cpl ASC NULLS LAST, total_leads DESC
+      `);
 
-  // ── Semana anterior (para comparação) ────────────────────────────────────
-  const prevResult = await db.execute({
-    sql: `SELECT
-       COALESCE(SUM(m.leads), 0)::TEXT AS total_leads,
-       CASE WHEN SUM(m.leads) > 0 THEN (SUM(m.spend)/SUM(m.leads))::TEXT ELSE NULL END AS avg_cpl
-     FROM creatives c
-     JOIN metrics m ON m.creative_id = c.id AND m.date_start >= $2 AND m.date_start < $3
-     WHERE c.campaign_key = $1`,
-    args: [campaignKey, prevFromStr, fromStr],
-  });
-  const prevRows = prevResult.rows as unknown as { total_leads: string; avg_cpl: string }[];
+      const prevResult = await tx.execute(sql`
+        SELECT
+          COALESCE(SUM(m.leads), 0)::TEXT AS total_leads,
+          CASE WHEN SUM(m.leads) > 0
+               THEN (SUM(m.spend)/SUM(m.leads))::TEXT
+               ELSE NULL END AS avg_cpl
+        FROM creatives c
+        JOIN metrics m ON m.creative_id = c.id AND m.date >= ${prevFromStr} AND m.date < ${fromStr}
+        WHERE c.funnel_key = ${campaignKey}
+      `);
 
-  // ── Kills da semana ───────────────────────────────────────────────────────
-  const killResult = await db.execute({
-    sql: `SELECT c.name,
-       COALESCE(a.message, 'Kill rule disparada') AS kill_reason
-     FROM creatives c
-     LEFT JOIN alerts a ON a.creative_id = c.id AND a.created_at >= $2 AND a.type = 'kill'
-     WHERE c.campaign_key = $1
-       AND c.status = 'killed'
-       AND c.updated_at >= $2`,
-    args: [campaignKey, fromStr],
-  });
-  const killRows = killResult.rows as unknown as { name: string; kill_reason: string }[];
+      // FIX: a.type -> a.level IN ('L0','L1','L2') (kill-level alerts)
+      const killResult = await tx.execute(sql`
+        SELECT c.name,
+          COALESCE(a.message, 'Kill rule disparada') AS kill_reason
+        FROM creatives c
+        LEFT JOIN alerts a ON a.creative_id = c.id
+          AND a.created_at >= ${fromStr}
+          AND a.level IN ('L0','L1','L2')
+        WHERE c.funnel_key = ${campaignKey}
+          AND c.status = 'killed'
+      `);
 
-  // ── Winners da semana ─────────────────────────────────────────────────────
-  const winnerResult = await db.execute({
-    sql: `SELECT c.name,
-       (SELECT (SUM(m2.spend)/NULLIF(SUM(m2.leads),0))
-        FROM metrics m2 WHERE m2.creative_id = c.id AND m2.date_start >= $2) AS cpl
-     FROM creatives c
-     WHERE c.campaign_key = $1
-       AND c.status = 'winner'
-       AND c.updated_at >= $2`,
-    args: [campaignKey, fromStr],
-  });
-  const winnerRows = winnerResult.rows as unknown as { name: string; cpl: number | null }[];
+      const winnerResult = await tx.execute(sql`
+        SELECT c.name,
+          (SELECT (SUM(m2.spend)/NULLIF(SUM(m2.leads),0))
+           FROM metrics m2 WHERE m2.creative_id = c.id AND m2.date >= ${fromStr}) AS cpl
+        FROM creatives c
+        WHERE c.funnel_key = ${campaignKey}
+          AND c.status = 'winner'
+      `);
 
-  // ── Alertas da semana ─────────────────────────────────────────────────────
-  const alertResult = await db.execute({
-    sql: `SELECT message FROM alerts
-     WHERE campaign_key = $1 AND created_at >= $2 AND type != 'kill'
-     ORDER BY created_at DESC LIMIT 10`,
-    args: [campaignKey, fromStr],
-  });
-  const alertRows = alertResult.rows as unknown as { message: string }[];
+      // FIX: a.type != 'kill' -> a.level NOT IN ('L0','L1','L2')
+      const alertResult = await tx.execute(sql`
+        SELECT message FROM alerts
+        WHERE campaign_key = ${campaignKey}
+          AND created_at >= ${fromStr}
+          AND level NOT IN ('L0','L1','L2')
+        ORDER BY created_at DESC LIMIT 10
+      `);
+
+      return {
+        creativeRows: creativeResult as unknown as CreativeSummary[],
+        prevRows: prevResult as unknown as Array<{ total_leads: string; avg_cpl: string | null }>,
+        killRows: killResult as unknown as Array<{ name: string; kill_reason: string }>,
+        winnerRows: winnerResult as unknown as Array<{ name: string; cpl: number | null }>,
+        alertRows: alertResult as unknown as Array<{ message: string }>,
+      };
+    });
 
   // ── Montar data do relatório ──────────────────────────────────────────────
-  const activeCreatives = creativeRows.filter((c: CreativeSummary) =>
-    ["testing", "winner"].includes(c.status)
+  const activeCreatives = creativeRows.filter((c) =>
+    ["testing", "winner"].includes(c.status),
   ).length;
-  const totalLeads = creativeRows.reduce((s: number, c: CreativeSummary) => s + c.total_leads, 0);
-  const totalSpend = creativeRows.reduce((s: number, c: CreativeSummary) => s + c.total_spend, 0);
-  const withCpl = creativeRows.filter((c: CreativeSummary) => c.cpl !== null);
+  const totalLeads = creativeRows.reduce((s, c) => s + c.total_leads, 0);
+  const totalSpend = creativeRows.reduce((s, c) => s + c.total_spend, 0);
+  const withCpl = creativeRows.filter((c) => c.cpl !== null);
   const avgCpl =
-    withCpl.length > 0 ? withCpl.reduce((s: number, c: CreativeSummary) => s + c.cpl!, 0) / withCpl.length : null;
+    withCpl.length > 0
+      ? withCpl.reduce((s, c) => s + c.cpl!, 0) / withCpl.length
+      : null;
   const bestCreative =
-    withCpl.length > 0 ? withCpl.reduce((a: CreativeSummary, b: CreativeSummary) => (a.cpl! < b.cpl! ? a : b)) : null;
+    withCpl.length > 0
+      ? withCpl.reduce((a, b) => (a.cpl! < b.cpl! ? a : b))
+      : null;
 
   const reportData: WeeklyReportData = {
     campaign_key: campaignKey,

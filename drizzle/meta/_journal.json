@@ -1,0 +1,41 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1776455431821,
+      "tag": "0000_0000_phase_1a_foundation",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1776456802670,
+      "tag": "0001_0001_creative_intelligence",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1776457943759,
+      "tag": "0002_0002_legacy_and_insights",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1776471024574,
+      "tag": "0003_0003_relax_classified_fks",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1776472532181,
+      "tag": "0004_0004_align_users_legacy_cols",
+      "breakpoints": true
+    }
+  ]
+}

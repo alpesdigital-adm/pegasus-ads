@@ -19,7 +19,7 @@
  *   }]
  * }
  *
- * Protegido por x-api-key (TEST_LOG_API_KEY).
+ * Protegido por x-api-key (api_keys table) ou cookie Supabase session.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";

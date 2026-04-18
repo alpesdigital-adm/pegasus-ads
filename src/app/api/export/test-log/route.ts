@@ -4,66 +4,27 @@
  * Tarefa 2.7 — Log de testes (planilha controle)
  *
  * Retorna JSON com todos os dados para o Apps Script sincronizar o Google Sheets
- * "T7 - Registro de Testes de Criativos" diretamente, sem download/upload de arquivo.
- *
- * Consumido por:
- * - scripts/sync_test_log.gs  (Apps Script container-bound na planilha)
+ * "T7 - Registro de Testes de Criativos" diretamente, sem download/upload de
+ * arquivo.
  *
  * Query params:
- *   format?        - "json" (padrão) | "summary"
- *   cpl_target?    - CPL target em R$ (padrão: 25)
- *   date_from?     - YYYY-MM-DD (padrão: 90 dias atrás)
- *   date_to?       - YYYY-MM-DD (padrão: hoje)
+ *   format?, cpl_target?, date_from?, date_to?
  *
- * Resposta JSON:
- * {
- *   generated_at:   string
- *   cpl_target:     number
- *   period:         { from, to }
- *   control_cpl:    number | null
- *   summary: {
- *     total_creatives: number
- *     with_metrics:    number
- *     winners:         number
- *     kills:           number
- *   }
- *   criativos: [
- *     {
- *       nome:       string       // base name (sem F/S e extensão)
- *       status:     string
- *       generation: number
- *       spend:      number
- *       impressoes: number
- *       cpm:        number
- *       ctr:        number
- *       cliques:    number
- *       leads:      number
- *       cpl:        number | null
- *       kill_rule:  { level, name, action } | null
- *     }
- *   ]
- *   dados_brutos: [
- *     {
- *       nome:       string
- *       date:       string
- *       spend:      number
- *       impressoes: number
- *       cpm:        number
- *       ctr:        number
- *       cliques:    number
- *       leads:      number
- *       cpl:        number | null
- *       meta_ad_id: string | null
- *     }
- *   ]
- * }
+ * MIGRADO NA FASE 1C (Wave 6 misc):
+ *  - getDb() → withWorkspace (RLS escopa creatives + metrics)
+ *  - String interpolation de datas substituída por parâmetros sql`` (fix
+ *    SQL injection latente)
+ *  - Queries tipadas via sql`` tagged template
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getDb } from "@/lib/db";
+import { withWorkspace } from "@/lib/db";
 import { requireAuth } from "@/lib/auth";
 import { evaluateKillRules } from "@/config/kill-rules";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
+import { sql } from "drizzle-orm";
+
+export const runtime = "nodejs";
 
 const DEFAULT_CPL_TARGET = KNOWN_CAMPAIGNS["T7_0003_RAT"]?.cplTarget ?? 25;
 
@@ -85,37 +46,59 @@ export async function GET(req: NextRequest) {
   const auth = await requireAuth(req);
   if (auth instanceof NextResponse) return auth;
 
-  const db = getDb();
   const { searchParams } = req.nextUrl;
-
   const cplTarget = parseFloat(searchParams.get("cpl_target") || String(DEFAULT_CPL_TARGET));
   const defaultRange = getDateRange(90);
   const dateFrom = searchParams.get("date_from") || defaultRange.from;
   const dateTo = searchParams.get("date_to") || defaultRange.to;
 
-  // ── 1. Buscar criativos com métricas agregadas ──
-  const creativesResult = await db.execute(`
-    SELECT
-      c.name,
-      c.status,
-      c.generation,
-      SUM(m.spend)              AS total_spend,
-      SUM(m.impressions)        AS total_impressions,
-      SUM(m.clicks)             AS total_clicks,
-      SUM(m.leads)              AS total_leads,
-      AVG(m.cpm)                AS avg_cpm,
-      AVG(m.ctr)                AS avg_ctr,
-      COUNT(DISTINCT m.date)    AS days_count
-    FROM creatives c
-    LEFT JOIN metrics m ON m.creative_id = c.id
-      AND m.date BETWEEN '${dateFrom}' AND '${dateTo}'
-    GROUP BY c.id, c.name, c.status, c.generation
-    ORDER BY c.generation ASC, c.created_at ASC
-  `);
+  const { aggRows, rawRows } = await withWorkspace(auth.workspace_id, async (tx) => {
+    const agg = await tx.execute(sql`
+      SELECT
+        c.name,
+        c.status,
+        c.generation,
+        SUM(m.spend)              AS total_spend,
+        SUM(m.impressions)        AS total_impressions,
+        SUM(m.clicks)             AS total_clicks,
+        SUM(m.leads)              AS total_leads,
+        AVG(m.cpm)                AS avg_cpm,
+        AVG(m.ctr)                AS avg_ctr,
+        COUNT(DISTINCT m.date)    AS days_count
+      FROM creatives c
+      LEFT JOIN metrics m ON m.creative_id = c.id
+        AND m.date BETWEEN ${dateFrom} AND ${dateTo}
+      GROUP BY c.id, c.name, c.status, c.generation
+      ORDER BY c.generation ASC, c.created_at ASC
+    `);
 
-  // ── 2. Calcular controlCpl (generation=0) ──
+    const raw = await tx.execute(sql`
+      SELECT
+        c.name,
+        m.date,
+        m.spend,
+        m.impressions,
+        m.cpm,
+        m.ctr,
+        m.clicks,
+        m.leads,
+        m.cpl,
+        m.meta_ad_id
+      FROM creatives c
+      JOIN metrics m ON m.creative_id = c.id
+      WHERE m.date BETWEEN ${dateFrom} AND ${dateTo}
+      ORDER BY c.name ASC, m.date ASC
+    `);
+
+    return {
+      aggRows: agg as unknown as Array<Record<string, unknown>>,
+      rawRows: raw as unknown as Array<Record<string, unknown>>,
+    };
+  });
+
+  // ── Control CPL (generation=0) ──
   let controlCpl: number | null = null;
-  for (const row of creativesResult.rows) {
+  for (const row of aggRows) {
     if ((row.generation as number) === 0) {
       const spend = Number(row.total_spend ?? 0);
       const leads = Number(row.total_leads ?? 0);
@@ -126,8 +109,7 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // ── 3. Montar criativos com kill rule ──
-  const criativos = creativesResult.rows.map((row) => {
+  const criativos = aggRows.map((row) => {
     const baseName = getAdBaseName(row.name as string);
     const spend = Number(row.total_spend ?? 0);
     const leads = Number(row.total_leads ?? 0);
@@ -168,26 +150,7 @@ export async function GET(req: NextRequest) {
     };
   });
 
-  // ── 4. Buscar dados brutos (por dia) ──
-  const rawResult = await db.execute(`
-    SELECT
-      c.name,
-      m.date,
-      m.spend,
-      m.impressions,
-      m.cpm,
-      m.ctr,
-      m.clicks,
-      m.leads,
-      m.cpl,
-      m.meta_ad_id
-    FROM creatives c
-    JOIN metrics m ON m.creative_id = c.id
-    WHERE m.date BETWEEN '${dateFrom}' AND '${dateTo}'
-    ORDER BY c.name ASC, m.date ASC
-  `);
-
-  const dadosBrutos = rawResult.rows.map((row) => ({
+  const dadosBrutos = rawRows.map((row) => ({
     nome: getAdBaseName(row.name as string),
     date: row.date,
     spend: Math.round(Number(row.spend ?? 0) * 100) / 100,
@@ -200,11 +163,10 @@ export async function GET(req: NextRequest) {
     meta_ad_id: row.meta_ad_id || null,
   }));
 
-  // ── 5. Summary ──
   const withMetrics = criativos.filter((c) => c.spend > 0);
   const kills = criativos.filter((c) => c.kill_rule?.action === "kill");
-  const winners = criativos.filter((c) =>
-    c.status === "winner" || (c.kill_rule?.action as string) === "promote"
+  const winners = criativos.filter(
+    (c) => c.status === "winner" || (c.kill_rule?.action as string) === "promote",
   );
 
   const payload = {
@@ -222,7 +184,6 @@ export async function GET(req: NextRequest) {
     dados_brutos: dadosBrutos,
   };
 
-  // CORS: permite chamadas do Apps Script (*.google.com)
   return NextResponse.json(payload, {
     headers: {
       "Access-Control-Allow-Origin": "https://script.google.com",
@@ -231,7 +192,6 @@ export async function GET(req: NextRequest) {
   });
 }
 
-// OPTIONS: preflight CORS
 export async function OPTIONS() {
   return new Response(null, {
     status: 204,

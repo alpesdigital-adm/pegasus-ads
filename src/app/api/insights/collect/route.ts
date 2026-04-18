@@ -8,42 +8,41 @@
  *
  * Fluxo:
  * 1. Coleta padrão → upsert em `metrics` (uma linha por creative × date)
- * 2. Se breakdown solicitado (ou auto_breakdown=true) → upsert em `metrics_breakdowns`
- *    (uma linha por creative × date × publisher_platform × platform_position)
+ * 2. Se breakdown solicitado (ou auto_breakdown=true) → upsert em
+ *    `metrics_breakdowns` (uma linha por creative × date × publisher_platform
+ *    × platform_position)
  *
  * Body JSON:
  * {
- *   campaign_id?:     string   // Meta campaign ID (padrão: T7_0003_RAT)
- *   account_id?:      string   // Meta account ID (alternativa ao campaign_id)
- *   date_from?:       string   // YYYY-MM-DD (padrão: 7 dias atrás)
- *   date_to?:         string   // YYYY-MM-DD (padrão: hoje)
- *   breakdown?:       string   // ex: "publisher_platform,platform_position"
- *   auto_breakdown?:  boolean  // Se true, também coleta breakdown de posicionamento
- *                              // automaticamente após a coleta padrão (padrão: true)
+ *   campaign_id?:     string
+ *   account_id?:      string
+ *   date_from?:       string   (default: 7 dias atrás)
+ *   date_to?:         string   (default: hoje)
+ *   breakdown?:       string
+ *   auto_breakdown?:  boolean  (default: true)
  * }
  *
- * Resposta:
- * {
- *   collected:            number       // registros buscados (coleta padrão)
- *   upserted:             number       // registros salvos em metrics
- *   skipped:              number       // ads sem creative_id vinculado
- *   breakdown_collected:  number       // registros buscados (com breakdown)
- *   breakdown_upserted:   number       // registros salvos em metrics_breakdowns
- *   errors:               string[]
- * }
+ * MIGRADO NA FASE 1C (Wave 4):
+ *  - getDb()/initDb() → withWorkspace/dbAdmin (RLS escopa metrics + breakdowns
+ *    + published_ads via workspace_id)
+ *  - Queries tipadas via Drizzle + onConflictDoUpdate
+ *  - uuid() manual removido (defaultRandom no schema)
+ *  - GET usa dbAdmin (sumário cross-workspace legado — mantido p/ compat)
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { getCampaignAdsInsights, getAccountAdsInsights } from "@/lib/meta";
-import { getDb, initDb } from "@/lib/db";
+import { withWorkspace, dbAdmin } from "@/lib/db";
+import { metrics, metricsBreakdowns, publishedAds, creatives } from "@/lib/db/schema";
 import { requireAuth } from "@/lib/auth";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
-import { v4 as uuid } from "uuid";
+import { and, eq, inArray, sql } from "drizzle-orm";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ route: "/api/insights/collect" });
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
 
 function getDateRange(daysBack = 7): { from: string; to: string } {
   const to = new Date();
@@ -53,14 +52,9 @@ function getDateRange(daysBack = 7): { from: string; to: string } {
   return { from: fmt(from), to: fmt(to) };
 }
 
-// ── Handler ───────────────────────────────────────────────────────────────────
-
 export async function POST(req: NextRequest) {
   const auth = await requireAuth(req);
   if (auth instanceof NextResponse) return auth;
-
-  // initDb garante que metrics_breakdowns existe
-  const db = await initDb();
 
   interface CollectBody {
     campaign_id?: string;
@@ -76,9 +70,7 @@ export async function POST(req: NextRequest) {
     if (req.headers.get("content-type")?.includes("application/json")) {
       body = await req.json();
     }
-  } catch {
-    // body vazio é ok
-  }
+  } catch { /* ok */ }
 
   const defaultRange = getDateRange(7);
   const dateFrom = body.date_from || defaultRange.from;
@@ -93,11 +85,8 @@ export async function POST(req: NextRequest) {
     accountId = defaults.metaAccountId;
   }
 
-  // auto_breakdown padrão: true (coleta breakdown junto com padrão)
   const autoBreakdown = body.auto_breakdown !== false;
-  // breakdown explícito: se informado, só coleta breakdown (não padrão)
   const explicitBreakdown = body.breakdown;
-  // Se o usuário passou breakdown explícito, só coleta com breakdown
   const collectStandard = !explicitBreakdown;
   const collectBreakdown = explicitBreakdown
     ? explicitBreakdown
@@ -112,134 +101,189 @@ export async function POST(req: NextRequest) {
   let breakdownCollected = 0;
   let breakdownUpserted = 0;
 
-  // ── Mapa reutilizável: meta_ad_id → creative_id ──
-  async function buildAdMap(adIds: string[]): Promise<Map<string, string>> {
-    if (adIds.length === 0) return new Map();
-    const rows = await db.execute({
-      sql: `SELECT meta_ad_id, creative_id FROM published_ads WHERE meta_ad_id = ANY(ARRAY[${adIds.map(() => "?").join(",")}]::text[])`,
-      args: adIds,
-    });
-    const map = new Map<string, string>();
-    for (const row of rows.rows) {
-      map.set(row.meta_ad_id as string, row.creative_id as string);
-    }
-    return map;
-  }
-
   try {
-    // ════════════════════════════════════════════════════════════════
-    // 1. COLETA PADRÃO (sem breakdown) → tabela metrics
-    // ════════════════════════════════════════════════════════════════
+    // ── 1. Coleta PADRÃO → metrics ────────────────────────────────────────
     if (collectStandard) {
       const insights = campaignId
         ? await getCampaignAdsInsights(campaignId, dateFrom, dateTo, auth.workspace_id)
         : await getAccountAdsInsights(accountId!, dateFrom, dateTo, auth.workspace_id);
 
       collected = insights.length;
-      console.log(`[InsightsCollect] ${collected} registros da Meta API (padrão)`);
+      log.info({ collected }, "meta api standard records");
 
       if (collected > 0) {
-        const adIds = [...new Set(insights.map((r) => r.meta_ad_id).filter(Boolean))];
-        const adMap = await buildAdMap(adIds);
-        console.log(`[InsightsCollect] ${adMap.size} ads vinculados a criativos`);
+        const result = await withWorkspace(auth.workspace_id, async (tx) => {
+          const adIds = [...new Set(insights.map((r) => r.meta_ad_id).filter(Boolean) as string[])];
+          const adRows = await tx
+            .select({ metaAdId: publishedAds.metaAdId, creativeId: publishedAds.creativeId })
+            .from(publishedAds)
+            .where(inArray(publishedAds.metaAdId, adIds));
 
-        for (const insight of insights) {
-          const creativeId = adMap.get(insight.meta_ad_id);
-          if (!creativeId) { skipped++; continue; }
-
-          try {
-            await db.execute({
-              sql: `INSERT INTO metrics (id, creative_id, date, spend, impressions, cpm, ctr, clicks, cpc, leads, cpl, landing_page_views, meta_ad_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (creative_id, date) DO UPDATE SET
-                      spend               = EXCLUDED.spend,
-                      impressions         = EXCLUDED.impressions,
-                      cpm                 = EXCLUDED.cpm,
-                      ctr                 = EXCLUDED.ctr,
-                      clicks              = EXCLUDED.clicks,
-                      cpc                 = EXCLUDED.cpc,
-                      leads               = EXCLUDED.leads,
-                      cpl                 = EXCLUDED.cpl,
-                      landing_page_views  = EXCLUDED.landing_page_views,
-                      meta_ad_id          = COALESCE(EXCLUDED.meta_ad_id, metrics.meta_ad_id)`,
-              args: [
-                uuid(), creativeId, insight.date_start,
-                insight.spend, insight.impressions, insight.cpm,
-                insight.ctr, insight.clicks, insight.cpc,
-                insight.leads, insight.cpl,
-                insight.landing_page_views ?? 0,
-                insight.meta_ad_id,
-              ],
-            });
-
-            await db.execute({
-              sql: `UPDATE creatives SET status = 'testing' WHERE id = ? AND status = 'generated'`,
-              args: [creativeId],
-            });
-
-            upserted++;
-          } catch (err) {
-            errors.push(`[padrão] ad ${insight.meta_ad_id} (${insight.date_start}): ${err instanceof Error ? err.message : String(err)}`);
+          const adMap = new Map<string, string>();
+          for (const row of adRows) {
+            if (row.metaAdId && row.creativeId) adMap.set(row.metaAdId, row.creativeId);
           }
-        }
+          log.info({ linked: adMap.size }, "ads linked to creatives");
+
+          let up = 0;
+          let sk = 0;
+          const errs: string[] = [];
+
+          for (const insight of insights) {
+            const creativeId = adMap.get(insight.meta_ad_id);
+            if (!creativeId) { sk++; continue; }
+
+            try {
+              await tx
+                .insert(metrics)
+                .values({
+                  workspaceId: auth.workspace_id,
+                  creativeId,
+                  date: insight.date_start,
+                  spend: insight.spend,
+                  impressions: insight.impressions,
+                  cpm: insight.cpm,
+                  ctr: insight.ctr,
+                  clicks: insight.clicks,
+                  cpc: insight.cpc,
+                  leads: insight.leads,
+                  cpl: insight.cpl,
+                  landingPageViews: insight.landing_page_views ?? 0,
+                  metaAdId: insight.meta_ad_id,
+                })
+                .onConflictDoUpdate({
+                  target: [metrics.creativeId, metrics.date],
+                  set: {
+                    spend: sql`EXCLUDED.spend`,
+                    impressions: sql`EXCLUDED.impressions`,
+                    cpm: sql`EXCLUDED.cpm`,
+                    ctr: sql`EXCLUDED.ctr`,
+                    clicks: sql`EXCLUDED.clicks`,
+                    cpc: sql`EXCLUDED.cpc`,
+                    leads: sql`EXCLUDED.leads`,
+                    cpl: sql`EXCLUDED.cpl`,
+                    landingPageViews: sql`EXCLUDED.landing_page_views`,
+                    metaAdId: sql`COALESCE(EXCLUDED.meta_ad_id, metrics.meta_ad_id)`,
+                  },
+                });
+
+              // Promove creative generated → testing
+              await tx
+                .update(creatives)
+                .set({ status: "testing" })
+                .where(and(eq(creatives.id, creativeId), eq(creatives.status, "generated")));
+
+              up++;
+            } catch (err) {
+              errs.push(`[padrão] ad ${insight.meta_ad_id} (${insight.date_start}): ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+
+          return { up, sk, errs };
+        });
+
+        upserted = result.up;
+        skipped = result.sk;
+        errors.push(...result.errs);
       }
     }
 
-    // ════════════════════════════════════════════════════════════════
-    // 2. COLETA COM BREAKDOWN → tabela metrics_breakdowns
-    // ════════════════════════════════════════════════════════════════
+    // ── 2. Coleta COM BREAKDOWN → metrics_breakdowns ──────────────────────
     if (collectBreakdown) {
       const breakdownInsights = campaignId
         ? await getCampaignAdsInsights(campaignId, dateFrom, dateTo, auth.workspace_id, collectBreakdown)
         : await getAccountAdsInsights(accountId!, dateFrom, dateTo, auth.workspace_id);
 
       breakdownCollected = breakdownInsights.length;
-      console.log(`[InsightsCollect] ${breakdownCollected} registros da Meta API (breakdown: ${collectBreakdown})`);
+      log.info(
+        { breakdown: collectBreakdown, records: breakdownCollected },
+        "meta api breakdown records",
+      );
 
       if (breakdownCollected > 0) {
-        const adIds = [...new Set(breakdownInsights.map((r) => r.meta_ad_id).filter(Boolean))];
-        const adMap = await buildAdMap(adIds);
+        const result = await withWorkspace(auth.workspace_id, async (tx) => {
+          const adIds = [...new Set(breakdownInsights.map((r) => r.meta_ad_id).filter(Boolean) as string[])];
+          const adRows = await tx
+            .select({ metaAdId: publishedAds.metaAdId, creativeId: publishedAds.creativeId })
+            .from(publishedAds)
+            .where(inArray(publishedAds.metaAdId, adIds));
 
-        for (const insight of breakdownInsights) {
-          const creativeId = adMap.get(insight.meta_ad_id);
-          if (!creativeId) continue; // já contado como skipped no padrão
-
-          const pubPlatform = insight.publisher_platform ?? "";
-          const platPosition = insight.platform_position ?? "";
-
-          try {
-            await db.execute({
-              sql: `INSERT INTO metrics_breakdowns
-                      (id, creative_id, date, publisher_platform, platform_position,
-                       spend, impressions, cpm, ctr, clicks, cpc, leads, cpl, meta_ad_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (creative_id, date, publisher_platform, platform_position) DO UPDATE SET
-                      spend       = EXCLUDED.spend,
-                      impressions = EXCLUDED.impressions,
-                      cpm         = EXCLUDED.cpm,
-                      ctr         = EXCLUDED.ctr,
-                      clicks      = EXCLUDED.clicks,
-                      cpc         = EXCLUDED.cpc,
-                      leads       = EXCLUDED.leads,
-                      cpl         = EXCLUDED.cpl,
-                      meta_ad_id  = COALESCE(EXCLUDED.meta_ad_id, metrics_breakdowns.meta_ad_id)`,
-              args: [
-                uuid(), creativeId, insight.date_start,
-                pubPlatform, platPosition,
-                insight.spend, insight.impressions, insight.cpm,
-                insight.ctr, insight.clicks, insight.cpc,
-                insight.leads, insight.cpl, insight.meta_ad_id,
-              ],
-            });
-            breakdownUpserted++;
-          } catch (err) {
-            errors.push(`[breakdown] ad ${insight.meta_ad_id} (${insight.date_start}, ${pubPlatform}/${platPosition}): ${err instanceof Error ? err.message : String(err)}`);
+          const adMap = new Map<string, string>();
+          for (const row of adRows) {
+            if (row.metaAdId && row.creativeId) adMap.set(row.metaAdId, row.creativeId);
           }
-        }
+
+          let bup = 0;
+          const errs: string[] = [];
+
+          for (const insight of breakdownInsights) {
+            const creativeId = adMap.get(insight.meta_ad_id);
+            if (!creativeId) continue; // contado como skipped na coleta padrão
+
+            const pubPlatform = insight.publisher_platform ?? "";
+            const platPosition = insight.platform_position ?? "";
+
+            try {
+              await tx
+                .insert(metricsBreakdowns)
+                .values({
+                  workspaceId: auth.workspace_id,
+                  creativeId,
+                  date: insight.date_start,
+                  publisherPlatform: pubPlatform,
+                  platformPosition: platPosition,
+                  spend: insight.spend,
+                  impressions: insight.impressions,
+                  cpm: insight.cpm,
+                  ctr: insight.ctr,
+                  clicks: insight.clicks,
+                  cpc: insight.cpc,
+                  leads: insight.leads,
+                  cpl: insight.cpl,
+                  metaAdId: insight.meta_ad_id,
+                })
+                .onConflictDoUpdate({
+                  target: [
+                    metricsBreakdowns.creativeId,
+                    metricsBreakdowns.date,
+                    metricsBreakdowns.publisherPlatform,
+                    metricsBreakdowns.platformPosition,
+                  ],
+                  set: {
+                    spend: sql`EXCLUDED.spend`,
+                    impressions: sql`EXCLUDED.impressions`,
+                    cpm: sql`EXCLUDED.cpm`,
+                    ctr: sql`EXCLUDED.ctr`,
+                    clicks: sql`EXCLUDED.clicks`,
+                    cpc: sql`EXCLUDED.cpc`,
+                    leads: sql`EXCLUDED.leads`,
+                    cpl: sql`EXCLUDED.cpl`,
+                    metaAdId: sql`COALESCE(EXCLUDED.meta_ad_id, metrics_breakdowns.meta_ad_id)`,
+                  },
+                });
+              bup++;
+            } catch (err) {
+              errs.push(`[breakdown] ad ${insight.meta_ad_id} (${insight.date_start}, ${pubPlatform}/${platPosition}): ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+
+          return { bup, errs };
+        });
+
+        breakdownUpserted = result.bup;
+        errors.push(...result.errs);
       }
     }
 
-    console.log(`[InsightsCollect] Concluído: upserted=${upserted} breakdown_upserted=${breakdownUpserted} skipped=${skipped} errors=${errors.length}`);
+    log.info(
+      {
+        upserted,
+        breakdown_upserted: breakdownUpserted,
+        skipped,
+        errors: errors.length,
+      },
+      "collect done",
+    );
 
     return NextResponse.json({
       collected,
@@ -254,17 +298,16 @@ export async function POST(req: NextRequest) {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Erro desconhecido";
-    console.error("[InsightsCollect] Erro fatal:", message);
+    log.error({ err: message }, "fatal");
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
-// GET: status rápido — sumário das tabelas de métricas
+// ── GET: sumário rápido das tabelas de métricas ─────────────────────────────
+// Cross-workspace (legado de ops) — usa dbAdmin.
 export async function GET() {
-  const db = getDb();
-
   const [standard, breakdowns] = await Promise.all([
-    db.execute(`
+    dbAdmin.execute(sql`
       SELECT
         COUNT(*)                                                    AS total_records,
         COUNT(DISTINCT creative_id)                                 AS creatives_with_metrics,
@@ -275,7 +318,7 @@ export async function GET() {
         ROUND(SUM(spend)::numeric / NULLIF(SUM(leads),0), 2)       AS overall_cpl
       FROM metrics
     `),
-    db.execute(`
+    dbAdmin.execute(sql`
       SELECT
         COUNT(*)                        AS total_records,
         COUNT(DISTINCT creative_id)     AS creatives_with_breakdowns,
@@ -287,8 +330,11 @@ export async function GET() {
     `),
   ]);
 
+  const s = standard as unknown as Array<Record<string, unknown>>;
+  const b = breakdowns as unknown as Array<Record<string, unknown>>;
+
   return NextResponse.json({
-    metrics: standard.rows[0],
-    breakdowns: breakdowns.rows[0],
+    metrics: s[0],
+    breakdowns: b[0],
   });
 }

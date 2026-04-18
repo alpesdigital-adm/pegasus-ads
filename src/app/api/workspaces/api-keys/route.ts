@@ -12,13 +12,15 @@
  * - 403 FORBIDDEN: apenas owner/admin
  * - 400 VALIDATION_ERROR
  */
+/**
+ * MIGRADO NA FASE 1C (Wave 4 — workspaces):
+ *  - initDb() removido (workspace.ts já em Drizzle; initDb é no-op shim)
+ */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth, AuthContext } from "@/lib/auth";
-import { initDb } from "@/lib/db";
 import { createApiKey, listApiKeys, revokeApiKey } from "@/lib/workspace";
 
 export async function GET(req: NextRequest) {
-  await initDb();
   const authResult = await requireAuth(req);
   if (authResult instanceof NextResponse) return authResult;
   const ctx = authResult as AuthContext;
@@ -28,7 +30,6 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  await initDb();
   const authResult = await requireAuth(req);
   if (authResult instanceof NextResponse) return authResult;
   const ctx = authResult as AuthContext;
@@ -64,7 +65,6 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
-  await initDb();
   const authResult = await requireAuth(req);
   if (authResult instanceof NextResponse) return authResult;
   const ctx = authResult as AuthContext;

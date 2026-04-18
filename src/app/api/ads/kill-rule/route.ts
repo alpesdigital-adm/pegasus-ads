@@ -11,11 +11,21 @@
  * Lookup CRM usa chave COMPOSTA: (utm_content, utm_term) = (ad name, adset name)
  * garantindo que o mesmo criativo em adsets diferentes tenha leads separados.
  * Fallback: (ad_id, adset_id) quando UTMs resolvidos na importação.
+ *
+ * MIGRADO NA FASE 1C (Wave 2, L — PR dedicado):
+ *  - getDb() → withWorkspace (RLS escopa crm_leads e campaigns)
+ *  - campaigns SELECT em Drizzle typed
+ *  - 7 CRM aggregate queries em sql`` (1 lifetime + 6 windowed paralelo)
+ *  - WHERE dinâmico construído via OR chain — 3 variantes (basic, com meta
+ *    campaign name, com campaigns.name fallback)
+ *  - Filtro manual workspace_id removido (RLS cobre)
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
 import { getTokenForWorkspace } from "@/lib/meta";
-import { getDb } from "@/lib/db";
+import { withWorkspace, sql } from "@/lib/db";
+import { campaigns } from "@/lib/db/schema";
+import { eq } from "drizzle-orm";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -107,15 +117,12 @@ function buildCrmMap(rows: Record<string, unknown>[]): Map<string, { total: numb
   const map = new Map<string, { total: number; qualified: number }>();
   for (const r of rows) {
     const entry = { total: Number(r.total_leads), qualified: Number(r.qualified_leads) };
-    // Chave por IDs resolvidos (mais precisa)
     if (r.ad_id && r.adset_id) {
       map.set(crmIdKey(r.ad_id as string, r.adset_id as string), entry);
     }
-    // Chave por nomes UTM (principal)
     if (r.utm_content && r.utm_term) {
       map.set(crmKey(r.utm_content as string, r.utm_term as string), entry);
     }
-    // Fallbacks parciais (só utm_content sem adset — menor precisão)
     if (r.utm_content && !r.utm_term) {
       map.set(`${(r.utm_content as string).toUpperCase()}||__ANY__`, entry);
     }
@@ -134,29 +141,23 @@ function resolveLeads(
   adsetName: string,
   crmMap: Map<string, { total: number; qualified: number }>,
   metaRow: Record<string, unknown> | undefined,
-  useCrm: boolean
+  useCrm: boolean,
 ): { leads: number; qualified: number; source: "crm" | "meta" } {
   if (useCrm) {
-    // Tentativa 1: (adName, adsetName) — principal
     const byName = crmMap.get(crmKey(adName, adsetName));
     if (byName) return { leads: byName.total, qualified: byName.qualified, source: "crm" };
-    // Tentativa 2: (adId, adsetId) — IDs resolvidos
     if (adId && adsetId) {
       const byId = crmMap.get(crmIdKey(adId, adsetId));
       if (byId) return { leads: byId.total, qualified: byId.qualified, source: "crm" };
     }
-    // Tentativa 3: fallback parcial (utm_content sem adset)
     const byNameOnly = crmMap.get(`${adName.toUpperCase()}||__ANY__`);
     if (byNameOnly) return { leads: byNameOnly.total, qualified: byNameOnly.qualified, source: "crm" };
     if (adId) {
       const byIdOnly = crmMap.get(`${adId}||__ANY__`);
       if (byIdOnly) return { leads: byIdOnly.total, qualified: byIdOnly.qualified, source: "crm" };
     }
-    // Nenhum match CRM — retorna 0 (não cai no Meta, porque hasCrmData=true significa
-    // que a campanha tem dados CRM; ausência de match = ad sem leads mesmo)
     return { leads: 0, qualified: 0, source: "crm" };
   }
-  // Fallback Meta
   const leads = getLeads(metaRow?.actions as Array<Record<string, string>> | undefined);
   return { leads, qualified: 0, source: "meta" };
 }
@@ -176,7 +177,6 @@ export async function GET(req: NextRequest) {
 
   try {
     const token = await getTokenForWorkspace(auth.workspace_id);
-    const db = getDb();
     const today = new Date().toISOString().split("T")[0];
     const since7d = sinceDate(7);
     const since5d = sinceDate(5);
@@ -212,88 +212,111 @@ export async function GET(req: NextRequest) {
     const r5dLeads = getLeads(r5dRow?.actions);
     const rolling5dCpl = r5dLeads > 0 ? r5dSpend / r5dLeads : Infinity;
 
-    // ── 5. CRM leads para esta campanha ──
-    // Query agrupa por (utm_content, utm_term, ad_id, adset_id) para permitir
-    // lookup por (criativo × adset) — essencial para kill rules por adset
-    const crmGroupBy = `utm_content, utm_term, ad_id, adset_id`;
-    const crmSelect = `SELECT utm_content, utm_term, ad_id, adset_id,
-        COUNT(*) AS total_leads,
-        SUM(CASE WHEN is_qualified THEN 1 ELSE 0 END) AS qualified_leads
-      FROM crm_leads`;
-
-    // ── Resolve campaign code for CRM lookup ──
-    // 1. Tenta pelo meta_campaign_id exato (campaign_id resolvido no import)
-    // 2. Tenta LIKE no ID numérico (primeiros 12 chars)
-    // 3. Busca nome da campanha na Meta API e extrai código T-XX__XXXX
-    // 4. Fallback: tabela campaigns local
-    let crmCampaignWhere = `workspace_id = ? AND (campaign_id = ? OR utm_campaign LIKE ?)`;
-    let crmCampaignArgs: unknown[] = [auth.workspace_id, campaignId, `%${campaignId.slice(0,12)}%`];
-
-    // Tenta obter nome real da campanha na Meta API
+    // ── Resolve campaign name na Meta API (usado no WHERE do CRM) ──
     let metaCampaignCode: string | null = null;
     try {
       const metaCampResp = await fetch(`${META_API}/${campaignId}?fields=name&access_token=${token}`);
       const metaCampJson = await metaCampResp.json();
       const metaCampName: string = metaCampJson.name || "";
-      // Usa o nome completo da campanha para match exato no utm_campaign
-      // Ex: "T7__0006__CAP__LP__EB" → match exato evita colisões com nomes similares
-      if (metaCampName) {
-        metaCampaignCode = metaCampName; // nome completo
-      }
-    } catch (_) { /* ignora erro — usa fallback */ }
+      if (metaCampName) metaCampaignCode = metaCampName;
+    } catch { /* ignora — usa fallback */ }
 
-    // Se encontrou código, amplia o WHERE para incluir LIKE no utm_campaign
-    if (metaCampaignCode) {
-      crmCampaignWhere = `workspace_id = ? AND (campaign_id = ? OR utm_campaign LIKE ? OR utm_campaign LIKE ?)`;
-      crmCampaignArgs = [
-        auth.workspace_id,
-        campaignId,
-        `%${campaignId.slice(0,12)}%`,
-        `%${metaCampaignCode}%`,
-      ];
-    } else {
-      // Fallback: tabela campaigns local
-      const campNameRes = await db.execute({
-        sql: "SELECT name FROM campaigns WHERE workspace_id = ? AND meta_campaign_id = ?",
-        args: [auth.workspace_id, campaignId],
-      });
-      const campName = campNameRes.rows[0]?.name as string | undefined;
-      if (campName) {
-        crmCampaignWhere = `workspace_id = ? AND (campaign_id = ? OR utm_campaign LIKE ? OR utm_campaign LIKE ?)`;
-        crmCampaignArgs = [auth.workspace_id, campaignId, `%${campaignId.slice(0,12)}%`, `%${campName}%`];
-      }
-    }
+    // ── 5. CRM leads — queries dentro de withWorkspace (RLS scoped) ─────
+    const campIdPrefix = campaignId.slice(0, 12);
+    const { crmLifetimeRows, crmWindowData } = await withWorkspace(
+      auth.workspace_id,
+      async (tx) => {
+        // Fallback se metaCampaignCode não resolveu: tenta campaigns.name
+        let campNameFallback: string | null = null;
+        if (!metaCampaignCode) {
+          const campRow = await tx
+            .select({ name: campaigns.name })
+            .from(campaigns)
+            .where(eq(campaigns.metaCampaignId, campaignId))
+            .limit(1);
+          campNameFallback = campRow[0]?.name ?? null;
+        }
 
-    // Lifetime CRM
-    const crmLifetimeRes = await db.execute({
-      sql: `${crmSelect} WHERE ${crmCampaignWhere} GROUP BY ${crmGroupBy}`,
-      args: crmCampaignArgs,
-    });
-    let crmAllRows = crmLifetimeRes.rows;
+        // Builds OR chain for CRM campaign match.
+        // - campaign_id exato
+        // - utm_campaign LIKE prefixo do ID (primeiros 12 chars)
+        // - utm_campaign LIKE meta campaign name (se resolveu)
+        // - utm_campaign LIKE campaigns.name (fallback)
+        const crmCondition = (() => {
+          const clauses = [
+            sql`campaign_id = ${campaignId}`,
+            sql`utm_campaign LIKE ${`%${campIdPrefix}%`}`,
+          ];
+          if (metaCampaignCode) {
+            clauses.push(sql`utm_campaign LIKE ${`%${metaCampaignCode}%`}`);
+          } else if (campNameFallback) {
+            clauses.push(sql`utm_campaign LIKE ${`%${campNameFallback}%`}`);
+          }
+          return sql.join(clauses, sql` OR `);
+        })();
 
-    const hasCrmData = crmAllRows.length > 0;
-    const crmLifetimeMap = buildCrmMap(crmAllRows as Record<string, unknown>[]);
+        // Lifetime CRM
+        const lifetimeResult = await tx.execute(sql`
+          SELECT utm_content, utm_term, ad_id, adset_id,
+            COUNT(*) AS total_leads,
+            SUM(CASE WHEN is_qualified THEN 1 ELSE 0 END) AS qualified_leads
+          FROM crm_leads
+          WHERE (${crmCondition})
+          GROUP BY utm_content, utm_term, ad_id, adset_id
+        `);
+        const lifetimeRows = lifetimeResult as unknown as Array<Record<string, unknown>>;
 
-    // CRM windowed queries — só executa se há dados CRM
+        // Windowed CRM — só se tiver dados lifetime (economizar queries)
+        const windowData: Record<string, Array<Record<string, unknown>>> = {};
+        if (lifetimeRows.length > 0) {
+          const windowDays: Record<string, string> = {
+            "today": today, "2d": since2d, "3d": since3d,
+            "4d": since4d, "5d": since5d, "7d": since7d,
+          };
+
+          await Promise.all(
+            Object.entries(windowDays).map(async ([key, since]) => {
+              const isToday = key === "today";
+              const sinceDateStr = `${since}T00:00:00Z`;
+              const untilDateStr = `${since}T23:59:59Z`;
+              const result = await tx.execute(
+                isToday
+                  ? sql`
+                      SELECT utm_content, utm_term, ad_id, adset_id,
+                        COUNT(*) AS total_leads,
+                        SUM(CASE WHEN is_qualified THEN 1 ELSE 0 END) AS qualified_leads
+                      FROM crm_leads
+                      WHERE (${crmCondition})
+                        AND subscribed_at >= ${sinceDateStr}
+                        AND subscribed_at < ${untilDateStr}
+                      GROUP BY utm_content, utm_term, ad_id, adset_id
+                    `
+                  : sql`
+                      SELECT utm_content, utm_term, ad_id, adset_id,
+                        COUNT(*) AS total_leads,
+                        SUM(CASE WHEN is_qualified THEN 1 ELSE 0 END) AS qualified_leads
+                      FROM crm_leads
+                      WHERE (${crmCondition})
+                        AND subscribed_at >= ${sinceDateStr}
+                      GROUP BY utm_content, utm_term, ad_id, adset_id
+                    `,
+              );
+              windowData[key] = result as unknown as Array<Record<string, unknown>>;
+            }),
+          );
+        }
+
+        return { crmLifetimeRows: lifetimeRows, crmWindowData: windowData };
+      },
+    );
+
+    const hasCrmData = crmLifetimeRows.length > 0;
+    const crmLifetimeMap = buildCrmMap(crmLifetimeRows);
+
+    // Build maps por janela
     const crmWindowMaps: Record<string, Map<string, { total: number; qualified: number }>> = {};
-    if (hasCrmData) {
-      const windowDays: Record<string, string> = {
-        "today": today, "2d": since2d, "3d": since3d, "4d": since4d, "5d": since5d, "7d": since7d,
-      };
-      await Promise.all(Object.entries(windowDays).map(async ([key, since]) => {
-        const isToday = key === "today";
-        const res = await db.execute({
-          sql: `${crmSelect}
-            WHERE ${crmCampaignWhere}
-              AND subscribed_at >= ?
-              ${isToday ? "AND subscribed_at < ?" : ""}
-            GROUP BY ${crmGroupBy}`,
-          args: isToday
-            ? [...crmCampaignArgs, since + "T00:00:00Z", since + "T23:59:59Z"]
-            : [...crmCampaignArgs, since + "T00:00:00Z"],
-        });
-        crmWindowMaps[key] = buildCrmMap(res.rows as Record<string, unknown>[]);
-      }));
+    for (const [key, rows] of Object.entries(crmWindowData)) {
+      crmWindowMaps[key] = buildCrmMap(rows);
     }
 
     // ── Build lookup maps (Meta) ──
@@ -353,13 +376,11 @@ export async function GET(req: NextRequest) {
       const ltCtr = parseFloat((lt?.ctr as string) || "0");
       const ltCpm = parseFloat((lt?.cpm as string) || "0");
 
-      // Lifetime leads com chave composta (adName × adsetName)
       const ltResolved = resolveLeads(adId, adName, adsetId, adsetName, crmLifetimeMap, lt, hasCrmData);
       const ltLeads = ltResolved.leads;
       const ltQual = ltResolved.qualified;
       const ltCpl = ltLeads > 0 ? ltSpend / ltLeads : ltSpend > 0 ? Infinity : -1;
 
-      // Window metrics
       const calcWindow = (key: string): WindowMetrics => {
         const metaRow = windowMaps[key]?.get(adId);
         const metaSpend = parseFloat((metaRow?.spend as string) || "0");
@@ -398,11 +419,9 @@ export async function GET(req: NextRequest) {
 
       if (adEffectiveStatus === "ACTIVE" && ltSpend > 0) {
         const evalSpend = evalM.spend;
-        const evalLeads = evalM.leads;
         const evalCpl = evalM.cpl;
         const src = hasCrmData ? "CRM" : "Meta";
 
-        // L0: sem leads após gasto mínimo
         if (ltLeads === 0) {
           if (ltSpend >= CPL_META && ltCpm >= 60) {
             killLayer = "L0a";
@@ -411,28 +430,24 @@ export async function GET(req: NextRequest) {
             killLayer = "L0b";
             killReason = `spend R$${ltSpend.toFixed(2)} ≥ 1.5×CPL + 0 leads [${src}]`;
           }
-        // L1/L2: CPL alto na janela de avaliação
         } else if (evalSpend > 4 * CPL_META && evalCpl !== -1 && evalCpl > 1.5 * CPL_META) {
           killLayer = "L1";
           killReason = `[${windowParam}/${src}] spend R$${evalSpend.toFixed(2)} > 4×CPL + CPL R$${evalCpl.toFixed(2)} > 1.5×meta`;
         } else if (evalSpend > 6 * CPL_META && evalCpl !== -1 && evalCpl > 1.3 * CPL_META) {
           killLayer = "L2";
           killReason = `[${windowParam}/${src}] spend R$${evalSpend.toFixed(2)} > 6×CPL + CPL R$${evalCpl.toFixed(2)} > 1.3×meta`;
-        // L3: performance 3d ruim com benchmark existente
         } else if (
           hasBenchmark && w3d.spend > 5 * CPL_META && w3d.cpl !== -1 && w3d.cpl > 1.7 * CPL_META
           && ltCpl !== -1 && ltCpl > CPL_META && rolling5dCpl > 1.15 * CPL_META
         ) {
           killLayer = "L3";
           killReason = `3d/${src}: spend R$${w3d.spend.toFixed(2)} > 5×CPL + CPL3d R$${w3d.cpl.toFixed(2)} > 1.7×meta`;
-        // L4: performance 7d ruim com benchmark existente
         } else if (
           hasBenchmark && w7d.spend > 5 * CPL_META && w7d.cpl !== -1 && w7d.cpl > 1.7 * CPL_META
           && ltCpl !== -1 && ltCpl > CPL_META && rolling5dCpl > 1.15 * CPL_META
         ) {
           killLayer = "L4";
           killReason = `7d/${src}: spend R$${w7d.spend.toFixed(2)} > 5×CPL + CPL7d R$${w7d.cpl.toFixed(2)} > 1.7×meta`;
-        // L5: lifetime ruim com benchmark existente
         } else if (
           hasBenchmark && ltSpend > 10 * CPL_META && ltCpl !== -1 && ltCpl > 1.15 * CPL_META
           && rolling5dCpl > 1.15 * CPL_META
@@ -486,7 +501,7 @@ export async function GET(req: NextRequest) {
     console.error("[KillRule]", err);
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

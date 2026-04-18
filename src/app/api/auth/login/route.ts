@@ -1,116 +1,178 @@
 /**
  * POST /api/auth/login
  *
- * Autentica usuario com email/senha.
- * Retorna session token no cookie.
+ * Autentica via Supabase Auth (gotrue). Fase 2 PR 2c: removido fallback
+ * legado scrypt/bcrypt — auth.users é a ÚNICA fonte.
  *
  * Body: { email, password, workspace_id? }
  *
- * Se workspace_id omitido, usa o primeiro workspace do usuario.
- *
- * Suporta bcrypt ($2b$...) e scrypt (hash:salt) password hashes.
+ * Errors:
+ *  - 400 VALIDATION_ERROR — campos obrigatórios
+ *  - 401 INVALID_CREDENTIALS — email/senha incorretos
+ *  - 403 NO_WORKSPACE_ACCESS — sem workspace disponível
+ *  - 403 NO_LOCAL_PROFILE — auth ok mas sem public.users linkado
  */
 import { NextRequest, NextResponse } from "next/server";
-import { initDb } from "@/lib/db";
-import { createSession, setSessionCookie } from "@/lib/auth";
-import crypto from "crypto";
-import bcryptjs from "bcryptjs";
+import { dbAdmin } from "@/lib/db";
+import { users, workspaceMembers } from "@/lib/db/schema";
+import { setWorkspaceCookie } from "@/lib/auth";
+import {
+  GotrueHttpError,
+  setSupabaseCookies,
+  signInWithPassword,
+} from "@/lib/supabase-auth";
+import { and, asc, eq } from "drizzle-orm";
 
-// ---------- password verification ----------
+async function resolveWorkspaceForUser(
+  userId: string,
+  requestedWsId: string | undefined,
+): Promise<string | { error: NextResponse }> {
+  if (requestedWsId) {
+    const accessCheck = await dbAdmin
+      .select({ workspaceId: workspaceMembers.workspaceId })
+      .from(workspaceMembers)
+      .where(
+        and(
+          eq(workspaceMembers.userId, userId),
+          eq(workspaceMembers.workspaceId, requestedWsId),
+        ),
+      )
+      .limit(1);
 
-async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
-  // Bcrypt format: $2b$10$... or $2a$10$...
-  if (storedHash.startsWith("$2b$") || storedHash.startsWith("$2a$")) {
-    return bcryptjs.compare(password, storedHash);
+    if (accessCheck.length === 0) {
+      return {
+        error: NextResponse.json(
+          { error: "NO_WORKSPACE_ACCESS", message: "User does not have access to this workspace" },
+          { status: 403 },
+        ),
+      };
+    }
+    return requestedWsId;
   }
-  // Scrypt format: hash:salt
-  const [hash, salt] = storedHash.split(":");
-  if (!hash || !salt) return false;
-  const attemptHash = crypto.scryptSync(password, salt, 64).toString("hex");
-  return attemptHash === hash;
-}
 
-// ---------- route handler ----------
+  const wsRows = await dbAdmin
+    .select({ workspaceId: workspaceMembers.workspaceId })
+    .from(workspaceMembers)
+    .where(eq(workspaceMembers.userId, userId))
+    .orderBy(asc(workspaceMembers.createdAt))
+    .limit(1);
+
+  if (wsRows.length === 0) {
+    return {
+      error: NextResponse.json(
+        { error: "NO_WORKSPACE_ACCESS", message: "User has no workspaces" },
+        { status: 403 },
+      ),
+    };
+  }
+  return wsRows[0].workspaceId;
+}
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { email, password, workspace_id } = body;
+    const { email, password, workspace_id: requestedWsId } = body;
 
     if (!email || !password) {
       return NextResponse.json(
         { error: "VALIDATION_ERROR", message: "Fields required: email, password" },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
-    const db = await initDb();
+    const emailLower = String(email).toLowerCase();
 
-    // Find user
-    const userResult = await db.execute({
-      sql: `SELECT id, email, name, password_hash, avatar_url FROM users WHERE email = ?`,
-      args: [email.toLowerCase()],
-    });
-
-    if (userResult.rows.length === 0) {
-      return NextResponse.json(
-        { error: "INVALID_CREDENTIALS", message: "Invalid email or password" },
-        { status: 401 }
-      );
-    }
-
-    const user = userResult.rows[0];
-    const passwordValid = await verifyPassword(password, user.password_hash as string);
-
-    if (!passwordValid) {
-      return NextResponse.json(
-        { error: "INVALID_CREDENTIALS", message: "Invalid email or password" },
-        { status: 401 }
-      );
-    }
-
-    // Resolve workspace
-    let wsId = workspace_id;
-    if (!wsId) {
-      const wsResult = await db.execute({
-        sql: `SELECT workspace_id FROM workspace_members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1`,
-        args: [user.id as string],
-      });
-      if (wsResult.rows.length === 0) {
-        return NextResponse.json(
-          { error: "NO_WORKSPACE_ACCESS", message: "User has no workspaces" },
-          { status: 403 }
-        );
+    let session;
+    try {
+      session = await signInWithPassword(emailLower, password);
+    } catch (err) {
+      if (err instanceof GotrueHttpError) {
+        if (err.status === 400 || err.status === 401 || err.status === 422) {
+          return NextResponse.json(
+            { error: "INVALID_CREDENTIALS", message: "Invalid email or password" },
+            { status: 401 },
+          );
+        }
+        if (err.status === 429) {
+          return NextResponse.json(
+            { error: "RATE_LIMIT", message: "Muitas tentativas. Aguarde alguns minutos." },
+            { status: 429 },
+          );
+        }
       }
-      wsId = wsResult.rows[0].workspace_id;
-    } else {
-      // Verify access
-      const accessCheck = await db.execute({
-        sql: `SELECT 1 FROM workspace_members WHERE user_id = ? AND workspace_id = ?`,
-        args: [user.id as string, wsId],
-      });
-      if (accessCheck.rows.length === 0) {
-        return NextResponse.json(
-          { error: "NO_WORKSPACE_ACCESS", message: "User does not have access to this workspace" },
-          { status: 403 }
-        );
+      throw err;
+    }
+
+    // Localiza profile local. Tenta auth_user_id primeiro; fallback por email
+    // + auto-link (caso o profile exista mas ainda não esteja ligado).
+    let localUser = (await dbAdmin
+      .select({
+        id: users.id,
+        email: users.email,
+        name: users.name,
+        avatarUrl: users.avatarUrl,
+        authUserId: users.authUserId,
+      })
+      .from(users)
+      .where(eq(users.authUserId, session.user.id))
+      .limit(1))[0];
+
+    if (!localUser) {
+      const byEmail = (await dbAdmin
+        .select({
+          id: users.id,
+          email: users.email,
+          name: users.name,
+          avatarUrl: users.avatarUrl,
+          authUserId: users.authUserId,
+        })
+        .from(users)
+        .where(eq(users.email, emailLower))
+        .limit(1))[0];
+
+      if (byEmail) {
+        if (!byEmail.authUserId) {
+          await dbAdmin
+            .update(users)
+            .set({ authUserId: session.user.id })
+            .where(eq(users.id, byEmail.id));
+        }
+        localUser = byEmail;
       }
     }
 
-    // Create session
-    const token = await createSession(user.id as string, wsId as string);
+    if (!localUser) {
+      return NextResponse.json(
+        {
+          error: "NO_LOCAL_PROFILE",
+          message: "Autenticação OK no Supabase, mas sem profile local. Contacte admin.",
+        },
+        { status: 403 },
+      );
+    }
+
+    const wsResolved = await resolveWorkspaceForUser(localUser.id, requestedWsId);
+    if (typeof wsResolved !== "string") return wsResolved.error;
 
     const response = NextResponse.json({
-      user: { id: user.id, email: user.email, name: user.name, avatar_url: user.avatar_url },
-      workspace_id: wsId,
+      user: {
+        id: localUser.id,
+        email: localUser.email,
+        name: localUser.name,
+        avatar_url: localUser.avatarUrl,
+      },
+      workspace_id: wsResolved,
+      auth_method: "supabase" as const,
     });
 
-    return setSessionCookie(response, token);
+    setSupabaseCookies(response, session);
+    setWorkspaceCookie(response, wsResolved);
+    return response;
   } catch (error) {
     console.error("[auth/login]", error);
     return NextResponse.json(
       { error: "INTERNAL_ERROR", message: error instanceof Error ? error.message : "Login failed" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

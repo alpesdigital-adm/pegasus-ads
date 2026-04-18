@@ -5,33 +5,44 @@
  *
  * Errors:
  * - 401 UNAUTHORIZED: não autenticado
+ *
+ * MIGRADO NA FASE 1C (Wave 1 auth):
+ *  - initDb()/getDb() → dbAdmin
+ *  - 1 query em Drizzle typed builder
+ *  - getUserWorkspaces continua legado (será migrado junto com workspace.ts)
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth, AuthContext } from "@/lib/auth";
-import { getDb, initDb } from "@/lib/db";
+import { dbAdmin } from "@/lib/db";
+import { users } from "@/lib/db/schema";
 import { getUserWorkspaces } from "@/lib/workspace";
+import { eq } from "drizzle-orm";
 
 export async function GET(req: NextRequest) {
-  await initDb();
   const authResult = await requireAuth(req);
   if (authResult instanceof NextResponse) return authResult;
   const ctx = authResult as AuthContext;
 
-  const db = getDb();
+  const userRows = await dbAdmin
+    .select({
+      id: users.id,
+      email: users.email,
+      name: users.name,
+      avatar_url: users.avatarUrl,
+      created_at: users.createdAt,
+    })
+    .from(users)
+    .where(eq(users.id, ctx.user_id))
+    .limit(1);
 
-  const userResult = await db.execute({
-    sql: `SELECT id, email, name, avatar_url, created_at FROM users WHERE id = ?`,
-    args: [ctx.user_id],
-  });
-
-  if (userResult.rows.length === 0) {
+  if (userRows.length === 0) {
     return NextResponse.json({ error: "USER_NOT_FOUND" }, { status: 404 });
   }
 
   const workspaces = await getUserWorkspaces(ctx.user_id);
 
   return NextResponse.json({
-    user: userResult.rows[0],
+    user: userRows[0],
     current_workspace_id: ctx.workspace_id,
     role: ctx.role,
     workspaces: workspaces.map((w) => ({

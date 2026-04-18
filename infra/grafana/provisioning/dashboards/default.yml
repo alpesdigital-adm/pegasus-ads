@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: pegasus
+    orgId: 1
+    folder: Pegasus Ads
+    type: file
+    disableDeletion: true
+    editable: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

@@ -3,11 +3,18 @@
  * POST /api/visual-elements   — Cadastra novo elemento
  *
  * Galeria de variáveis visuais testáveis (tarefa 1.7).
+ *
+ * MIGRADO NA FASE 1C (Wave 4):
+ *  - getDb() → withWorkspace (RLS escopa visual_elements)
+ *  - Queries tipadas via Drizzle + schema
+ *  - randomUUID() manual removido (defaultRandom no schema)
+ *  - Filtros workspace_id manuais removidos (RLS cobre)
  */
 import { NextRequest, NextResponse } from "next/server";
-import { getDb } from "@/lib/db";
+import { withWorkspace } from "@/lib/db";
+import { visualElements } from "@/lib/db/schema";
 import { requireAuth } from "@/lib/auth";
-import { randomUUID } from "crypto";
+import { and, asc, eq, isNull, or, sql } from "drizzle-orm";
 
 export const runtime = "nodejs";
 
@@ -43,57 +50,71 @@ export async function GET(req: NextRequest) {
   const auth = await requireAuth(req);
   if (auth instanceof NextResponse) return auth;
 
+  const { searchParams } = new URL(req.url);
+  const dimension = searchParams.get("dimension");
+  const funnelKey = searchParams.get("funnel_key");
+  const activeOnly = searchParams.get("active_only") === "true";
+
   try {
-    const db = getDb();
-    const { searchParams } = new URL(req.url);
-    const dimension = searchParams.get("dimension");
-    const funnelKey = searchParams.get("funnel_key");
-    const activeOnly = searchParams.get("active_only") === "true";
+    const rows = await withWorkspace(auth.workspace_id, async (tx) => {
+      // Seed automático se tabela vazia para este workspace
+      const existing = await tx
+        .select({ id: visualElements.id })
+        .from(visualElements)
+        .limit(1);
 
-    // ── Seed automático se tabela vazia para este workspace ──
-    const countRes = await db.execute({
-      sql: "SELECT COUNT(*) as n FROM visual_elements WHERE workspace_id = ?",
-      args: [auth.workspace_id],
-    });
-    const count = Number((countRes.rows[0] as { n: string }).n);
-
-    if (count === 0) {
-      for (const el of SEED_ELEMENTS) {
-        await db.execute({
-          sql: `INSERT INTO visual_elements (id, code, dimension, name, description, active_in_meta, priority, funnel_key, workspace_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)
-                ON CONFLICT (code, funnel_key) DO NOTHING`,
-          args: [randomUUID(), el.code, el.dimension, el.name, el.description, el.active_in_meta, el.priority, auth.workspace_id],
-        });
+      if (existing.length === 0) {
+        await tx
+          .insert(visualElements)
+          .values(
+            SEED_ELEMENTS.map((el) => ({
+              workspaceId: auth.workspace_id,
+              code: el.code,
+              dimension: el.dimension,
+              name: el.name,
+              description: el.description,
+              activeInMeta: el.active_in_meta,
+              priority: el.priority,
+              funnelKey: null,
+            })),
+          )
+          .onConflictDoNothing({
+            target: [visualElements.code, visualElements.funnelKey],
+          });
       }
-    }
 
-    // ── Query ──
-    const conditions: string[] = ["workspace_id = ?"];
-    const args: unknown[] = [auth.workspace_id];
+      const whereParts = [];
+      if (dimension) whereParts.push(eq(visualElements.dimension, dimension));
+      if (funnelKey) {
+        whereParts.push(
+          or(eq(visualElements.funnelKey, funnelKey), isNull(visualElements.funnelKey)),
+        );
+      } else {
+        whereParts.push(isNull(visualElements.funnelKey));
+      }
+      if (activeOnly) whereParts.push(eq(visualElements.activeInMeta, true));
 
-    if (dimension) { conditions.push("dimension = ?"); args.push(dimension); }
-    if (funnelKey) { conditions.push("(funnel_key = ? OR funnel_key IS NULL)"); args.push(funnelKey); }
-    else { conditions.push("funnel_key IS NULL"); }
-    if (activeOnly) { conditions.push("active_in_meta = TRUE"); }
+      return tx
+        .select()
+        .from(visualElements)
+        .where(whereParts.length > 0 ? and(...whereParts) : undefined)
+        .orderBy(asc(visualElements.dimension), asc(visualElements.priority));
+    });
 
-    const where = `WHERE ${conditions.join(" AND ")}`;
-    const rows = await db.execute({ sql: `SELECT * FROM visual_elements ${where} ORDER BY dimension, priority`, args });
-
-    // ── Agrupar por dimensão ──
     const grouped: Record<string, unknown[]> = {};
-    for (const row of rows.rows) {
-      const dim = row.dimension as string;
+    for (const row of rows) {
+      const dim = row.dimension;
       if (!grouped[dim]) grouped[dim] = [];
       grouped[dim].push(row);
     }
 
     return NextResponse.json({
-      total: rows.rows.length,
+      total: rows.length,
       dimensions: Object.keys(grouped).sort(),
       elements: grouped,
     });
   } catch (err) {
+    console.error("GET /api/visual-elements error:", err);
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
 }
@@ -103,30 +124,68 @@ export async function POST(req: NextRequest) {
   if (auth instanceof NextResponse) return auth;
 
   try {
-    const db = getDb();
     const body = await req.json();
-    const { code, dimension, name, description, active_in_meta = false, priority = 5, funnel_key = null, notes = null } = body;
+    const {
+      code,
+      dimension,
+      name,
+      description,
+      active_in_meta = false,
+      priority = 5,
+      funnel_key = null,
+      notes = null,
+    } = body;
 
     if (!code || !dimension || !name) {
-      return NextResponse.json({ error: "code, dimension, name são obrigatórios" }, { status: 400 });
+      return NextResponse.json(
+        { error: "code, dimension, name são obrigatórios" },
+        { status: 400 },
+      );
     }
 
-    const id = randomUUID();
-    await db.execute({
-      sql: `INSERT INTO visual_elements (id, code, dimension, name, description, active_in_meta, priority, funnel_key, notes, workspace_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (code, funnel_key) DO UPDATE SET
-              name = EXCLUDED.name,
-              description = EXCLUDED.description,
-              active_in_meta = EXCLUDED.active_in_meta,
-              priority = EXCLUDED.priority,
-              notes = EXCLUDED.notes`,
-      args: [id, code, dimension, name, description ?? null, active_in_meta, priority, funnel_key, notes, auth.workspace_id],
+    const element = await withWorkspace(auth.workspace_id, async (tx) => {
+      await tx
+        .insert(visualElements)
+        .values({
+          workspaceId: auth.workspace_id,
+          code,
+          dimension,
+          name,
+          description: description ?? null,
+          activeInMeta: active_in_meta,
+          priority,
+          funnelKey: funnel_key,
+          notes,
+        })
+        .onConflictDoUpdate({
+          target: [visualElements.code, visualElements.funnelKey],
+          set: {
+            name: sql`EXCLUDED.name`,
+            description: sql`EXCLUDED.description`,
+            activeInMeta: sql`EXCLUDED.active_in_meta`,
+            priority: sql`EXCLUDED.priority`,
+            notes: sql`EXCLUDED.notes`,
+          },
+        });
+
+      const result = await tx
+        .select()
+        .from(visualElements)
+        .where(
+          and(
+            eq(visualElements.code, code),
+            funnel_key
+              ? eq(visualElements.funnelKey, funnel_key)
+              : isNull(visualElements.funnelKey),
+          ),
+        )
+        .limit(1);
+      return result[0];
     });
 
-    const result = await db.execute({ sql: "SELECT * FROM visual_elements WHERE code = ? AND (funnel_key = ? OR (funnel_key IS NULL AND ? IS NULL)) AND workspace_id = ?", args: [code, funnel_key, funnel_key, auth.workspace_id] });
-    return NextResponse.json({ ok: true, element: result.rows[0] }, { status: 201 });
+    return NextResponse.json({ ok: true, element }, { status: 201 });
   } catch (err) {
+    console.error("POST /api/visual-elements error:", err);
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
 }

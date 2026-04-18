@@ -1,8 +1,11 @@
 "use client";
 
-import { useState, useCallback, useMemo, useRef, useEffect } from "react";
+import { useState, useCallback, useMemo, useRef } from "react";
 import AppShell from "@/components/AppShell";
-import { useAuthStore } from "@/store/auth";
+
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 // ── Types ──
 interface MappingConfig {
@@ -223,7 +226,7 @@ export default function CRMImportPage() {
         setCurrentMapping(autoDetectMapping(headers));
         loadMappings();
         setStep("mapping");
-      } catch (err: any) { setError(`Erro: ${err.message}`); }
+      } catch (err) { setError(`Erro: ${errMsg(err)}`); }
     };
     reader.readAsText(file, "UTF-8");
   }, [loadMappings]);
@@ -258,7 +261,7 @@ export default function CRMImportPage() {
       setSelectedMappingId(data.mapping.id);
       await loadMappings();
       setError(null);
-    } catch (err: any) { setError(`Erro ao salvar: ${err.message}`); }
+    } catch (err) { setError(`Erro ao salvar: ${errMsg(err)}`); }
     finally { setSavingMapping(false); }
   }, [mappingName, mappingDesc, currentMapping, loadMappings]);
 
@@ -269,7 +272,7 @@ export default function CRMImportPage() {
       await api(`/api/crm/import-mappings?id=${id}`, { method: "DELETE" });
       await loadMappings();
       if (selectedMappingId === id) { setSelectedMappingId(null); setMappingName(""); setMappingDesc(""); }
-    } catch (err: any) { setError(`Erro: ${err.message}`); }
+    } catch (err) { setError(`Erro: ${errMsg(err)}`); }
   }, [selectedMappingId, loadMappings]);
 
   // Validation
@@ -280,7 +283,7 @@ export default function CRMImportPage() {
     Object.values(currentMapping).forEach((v) => { if (v && v !== "__skip__") counts[v] = (counts[v] || 0) + 1; });
     const dupes = Object.entries(counts).filter(([, c]) => c > 1).map(([k]) => k);
     return { isValid: !missing.length && !dupes.length, missing, dupes, mappedCount: mapped.size };
-  }, [currentMapping, csvHeaders]);
+  }, [currentMapping]);
 
   // Preview
   const previewCols = useMemo(() => Object.values(currentMapping).filter((v) => v && v !== "__skip__"), [currentMapping]);
@@ -323,7 +326,7 @@ export default function CRMImportPage() {
       setImportProgress(100);
       setImportResult(result);
       setStep("result");
-    } catch (err: any) { setError(`Erro: ${err.message}`); setStep("preview"); }
+    } catch (err) { setError(`Erro: ${errMsg(err)}`); setStep("preview"); }
   }, [csvRows, currentMapping, fileName, projectKey, selectedMappingId]);
 
   // Reset

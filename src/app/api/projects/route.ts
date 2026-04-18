@@ -4,11 +4,18 @@
  * POST /api/projects — create { name, campaign_filter, description? }
  * PATCH /api/projects — update { id, name?, campaign_filter?, description?, status? }
  * DELETE /api/projects — delete { id }
+ *
+ * MIGRADO NA FASE 1C (Wave 4):
+ *  - getDb() → withWorkspace (RLS escopa projects)
+ *  - Queries tipadas via Drizzle
+ *  - uuid() manual removido (defaultRandom no schema)
+ *  - Filtros workspace_id manuais removidos (RLS cobre)
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
-import { getDb } from "@/lib/db";
-import { v4 as uuid } from "uuid";
+import { withWorkspace } from "@/lib/db";
+import { projects } from "@/lib/db/schema";
+import { asc, eq, sql } from "drizzle-orm";
 
 export const runtime = "nodejs";
 
@@ -16,12 +23,11 @@ export async function GET(req: NextRequest) {
   const auth = await requireAuth(req);
   if (auth instanceof NextResponse) return auth;
 
-  const db = getDb();
-  const result = await db.execute({
-    sql: "SELECT * FROM projects WHERE workspace_id = ? ORDER BY name ASC",
-    args: [auth.workspace_id],
-  });
-  return NextResponse.json({ projects: result.rows });
+  const rows = await withWorkspace(auth.workspace_id, async (tx) =>
+    tx.select().from(projects).orderBy(asc(projects.name)),
+  );
+
+  return NextResponse.json({ projects: rows });
 }
 
 export async function POST(req: NextRequest) {
@@ -33,15 +39,24 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "name and campaign_filter required" }, { status: 400 });
   }
 
-  const db = getDb();
-  const id = uuid();
-  await db.execute({
-    sql: `INSERT INTO projects (id, workspace_id, name, campaign_filter, description, status)
-          VALUES (?, ?, ?, ?, ?, ?)`,
-    args: [id, auth.workspace_id, body.name, body.campaign_filter, body.description || "", body.status || "active"],
+  const inserted = await withWorkspace(auth.workspace_id, async (tx) => {
+    const [row] = await tx
+      .insert(projects)
+      .values({
+        workspaceId: auth.workspace_id,
+        name: body.name,
+        campaignFilter: body.campaign_filter,
+        description: body.description ?? "",
+        status: body.status ?? "active",
+      })
+      .returning();
+    return row;
   });
 
-  return NextResponse.json({ id, name: body.name, campaign_filter: body.campaign_filter }, { status: 201 });
+  return NextResponse.json(
+    { id: inserted.id, name: inserted.name, campaign_filter: inserted.campaignFilter },
+    { status: 201 },
+  );
 }
 
 export async function PATCH(req: NextRequest) {
@@ -51,24 +66,19 @@ export async function PATCH(req: NextRequest) {
   const body = await req.json();
   if (!body.id) return NextResponse.json({ error: "id required" }, { status: 400 });
 
-  const updates: string[] = [];
-  const args: unknown[] = [];
+  const set: Record<string, unknown> = {};
+  if (body.name !== undefined) set.name = body.name;
+  if (body.campaign_filter !== undefined) set.campaignFilter = body.campaign_filter;
+  if (body.description !== undefined) set.description = body.description;
+  if (body.status !== undefined) set.status = body.status;
 
-  for (const field of ["name", "campaign_filter", "description", "status"]) {
-    if (body[field] !== undefined) {
-      updates.push(`${field} = ?`);
-      args.push(body[field]);
-    }
+  if (Object.keys(set).length === 0) {
+    return NextResponse.json({ error: "nothing to update" }, { status: 400 });
   }
-  if (updates.length === 0) return NextResponse.json({ error: "nothing to update" }, { status: 400 });
+  set.updatedAt = sql`NOW()`;
 
-  updates.push("updated_at = NOW()");
-  args.push(body.id, auth.workspace_id);
-
-  const db = getDb();
-  await db.execute({
-    sql: `UPDATE projects SET ${updates.join(", ")} WHERE id = ? AND workspace_id = ?`,
-    args,
+  await withWorkspace(auth.workspace_id, async (tx) => {
+    await tx.update(projects).set(set).where(eq(projects.id, body.id));
   });
 
   return NextResponse.json({ ok: true });
@@ -81,10 +91,8 @@ export async function DELETE(req: NextRequest) {
   const { id } = await req.json();
   if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
 
-  const db = getDb();
-  await db.execute({
-    sql: "DELETE FROM projects WHERE id = ? AND workspace_id = ?",
-    args: [id, auth.workspace_id],
+  await withWorkspace(auth.workspace_id, async (tx) => {
+    await tx.delete(projects).where(eq(projects.id, id));
   });
 
   return NextResponse.json({ ok: true });

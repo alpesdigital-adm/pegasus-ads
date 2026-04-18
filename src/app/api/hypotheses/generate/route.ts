@@ -2,12 +2,20 @@
  * POST /api/hypotheses/generate
  *
  * Gera hipóteses de teste por IA (tarefa 3.3).
+ *
+ * MIGRADO NA FASE 1C (Wave 5):
+ *  - getDb() → withWorkspace (RLS escopa creatives/metrics/alerts/
+ *    visual_elements/hypotheses)
+ *  - 4 queries em sql`` / Drizzle
+ *  - randomUUID() manual removido (defaultRandom no schema)
+ *  - Filtros workspace_id manuais removidos (RLS cobre)
  */
 import { NextRequest, NextResponse } from "next/server";
-import { getDb } from "@/lib/db";
+import { withWorkspace } from "@/lib/db";
+import { hypotheses as hypothesesTable, visualElements } from "@/lib/db/schema";
 import { requireAuth } from "@/lib/auth";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
-import { randomUUID } from "crypto";
+import { asc, desc, eq, sql } from "drizzle-orm";
 
 export const runtime = "nodejs";
 export const maxDuration = 90;
@@ -22,10 +30,7 @@ interface HypothesisResult {
   suggested_prompt_delta?: string;
 }
 
-async function callGeminiForHypotheses(
-  context: string,
-  campaignKey: string
-): Promise<HypothesisResult[]> {
+async function callGeminiForHypotheses(context: string): Promise<HypothesisResult[]> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return [];
 
@@ -50,14 +55,11 @@ Máximo 3 hipóteses. Ordene por priority decrescente (10 = mais urgente).`;
   try {
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
     );
-
     if (!res.ok) return [];
-
     const data = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
     const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "[]";
-
     try {
       const parsed = JSON.parse(text);
       return Array.isArray(parsed) ? parsed : (parsed.hypotheses ?? []);
@@ -74,65 +76,81 @@ export async function POST(req: NextRequest) {
   if (auth instanceof NextResponse) return auth;
 
   try {
-    const db = getDb();
     const body = await req.json().catch(() => ({}));
     const campaignKey = (body.campaign_key as string) ?? "T7_0003_RAT";
     const topN = (body.top_n as number) ?? 10;
-
     const campaign = KNOWN_CAMPAIGNS[campaignKey];
-
-    // ── 1. Carregar performance dos criativos do workspace ──
-    const perfRes = await db.execute({
-      sql: `
-        SELECT
-          c.id, c.name, c.status, c.generation, c.is_control,
-          COALESCE(SUM(m.spend), 0)       AS total_spend,
-          COALESCE(SUM(m.leads), 0)       AS total_leads,
-          COALESCE(SUM(m.impressions), 0) AS total_impressions,
-          CASE WHEN SUM(m.leads) > 0 THEN ROUND((SUM(m.spend) / SUM(m.leads))::numeric, 2) ELSE NULL END AS cpl,
-          MAX(kr.level)                   AS latest_kill_level
-        FROM creatives c
-        LEFT JOIN metrics m ON m.creative_id = c.id
-        LEFT JOIN alerts kr ON kr.creative_id = c.id AND kr.resolved = FALSE
-        WHERE c.status NOT IN ('killed') AND c.workspace_id = ?
-        GROUP BY c.id, c.name, c.status, c.generation, c.is_control
-        HAVING SUM(m.spend) > 0
-        ORDER BY cpl ASC NULLS LAST
-        LIMIT ?
-      `,
-      args: [auth.workspace_id, topN],
-    });
-
-    // ── 2. Carregar biblioteca de variáveis visuais ──
-    const elemRes = await db.execute({
-      sql: "SELECT code, dimension, name, description, active_in_meta, priority FROM visual_elements WHERE workspace_id = ? ORDER BY dimension, priority",
-      args: [auth.workspace_id],
-    });
-
-    // ── 3. Carregar hipóteses anteriores ──
-    const prevRes = await db.execute({
-      sql: "SELECT variable_dimension, variable_code, status FROM hypotheses WHERE campaign_key = ? AND workspace_id = ? ORDER BY created_at DESC LIMIT 20",
-      args: [campaignKey, auth.workspace_id],
-    });
-
-    // ── 4. Montar contexto para o modelo ──
     const cplTarget = campaign?.cplTarget ?? 25;
 
-    const perfSummary = perfRes.rows
-      .map(r => `- ${r.name} (gen ${r.generation}${r.is_control ? " [CONTROLE]" : ""}): CPL=${r.cpl ?? "sem leads"}, spend=R$${r.total_spend}, leads=${r.total_leads}, status=${r.status}${r.latest_kill_level ? `, kill=${r.latest_kill_level}` : ""}`)
+    // ── Carrega contexto: performance + biblioteca de elementos + hist. ──
+    const { perfRows, elemRows, prevRows } = await withWorkspace(
+      auth.workspace_id,
+      async (tx) => {
+        const perf = await tx.execute(sql`
+          SELECT
+            c.id, c.name, c.status, c.generation, c.is_control,
+            COALESCE(SUM(m.spend), 0)       AS total_spend,
+            COALESCE(SUM(m.leads), 0)       AS total_leads,
+            COALESCE(SUM(m.impressions), 0) AS total_impressions,
+            CASE WHEN SUM(m.leads) > 0 THEN ROUND((SUM(m.spend) / SUM(m.leads))::numeric, 2) ELSE NULL END AS cpl,
+            MAX(kr.level)                   AS latest_kill_level
+          FROM creatives c
+          LEFT JOIN metrics m ON m.creative_id = c.id
+          LEFT JOIN alerts kr ON kr.creative_id = c.id AND kr.resolved = FALSE
+          WHERE c.status NOT IN ('killed')
+          GROUP BY c.id, c.name, c.status, c.generation, c.is_control
+          HAVING SUM(m.spend) > 0
+          ORDER BY cpl ASC NULLS LAST
+          LIMIT ${topN}
+        `);
+
+        const elem = await tx
+          .select({
+            code: visualElements.code,
+            dimension: visualElements.dimension,
+            name: visualElements.name,
+            description: visualElements.description,
+            activeInMeta: visualElements.activeInMeta,
+            priority: visualElements.priority,
+          })
+          .from(visualElements)
+          .orderBy(asc(visualElements.dimension), asc(visualElements.priority));
+
+        const prev = await tx
+          .select({
+            variableDimension: hypothesesTable.variableDimension,
+            variableCode: hypothesesTable.variableCode,
+            status: hypothesesTable.status,
+          })
+          .from(hypothesesTable)
+          .where(eq(hypothesesTable.campaignKey, campaignKey))
+          .orderBy(desc(hypothesesTable.createdAt))
+          .limit(20);
+
+        return {
+          perfRows: perf as unknown as Array<Record<string, unknown>>,
+          elemRows: elem,
+          prevRows: prev,
+        };
+      },
+    );
+
+    // ── Monta prompt ──
+    const perfSummary = perfRows
+      .map((r) => `- ${r.name} (gen ${r.generation}${r.is_control ? " [CONTROLE]" : ""}): CPL=${r.cpl ?? "sem leads"}, spend=R$${r.total_spend}, leads=${r.total_leads}, status=${r.status}${r.latest_kill_level ? `, kill=${r.latest_kill_level}` : ""}`)
       .join("\n");
 
     const libSummary = Object.entries(
-      elemRes.rows.reduce((acc: Record<string, string[]>, r) => {
-        const dim = r.dimension as string;
+      elemRows.reduce((acc: Record<string, string[]>, r) => {
+        const dim = r.dimension;
         if (!acc[dim]) acc[dim] = [];
-        acc[dim].push(`${r.code}=${r.name}(meta_ativo=${r.active_in_meta})`);
+        acc[dim].push(`${r.code}=${r.name}(meta_ativo=${r.activeInMeta})`);
         return acc;
-      }, {})
+      }, {}),
     ).map(([dim, els]) => `${dim}: ${els.join(", ")}`).join("\n");
 
-    const prevSummary = prevRes.rows.length > 0
-      ? prevRes.rows.map(r => `- dim=${r.variable_dimension} code=${r.variable_code} status=${r.status}`).join("\n")
+    const prevSummary = prevRows.length > 0
+      ? prevRows.map((r) => `- dim=${r.variableDimension} code=${r.variableCode} status=${r.status}`).join("\n")
       : "Nenhuma hipótese anterior";
 
     const context = `
@@ -155,11 +173,9 @@ Priorize variáveis não testadas, com maior potencial de impacto no CPL.
 Para cada hipótese inclua um suggested_prompt_delta: instrução específica para o Gemini gerar o criativo variante.
 `.trim();
 
-    // ── 5. Chamar IA ──
-    const aiHypotheses = await callGeminiForHypotheses(context, campaignKey);
+    const aiHypotheses = await callGeminiForHypotheses(context);
 
-    // ── 6. Fallback: hipóteses baseadas em regras se IA falhar ──
-    const hypotheses: HypothesisResult[] = aiHypotheses.length > 0
+    const hypothesesList: HypothesisResult[] = aiHypotheses.length > 0
       ? aiHypotheses
       : [
           {
@@ -191,30 +207,35 @@ Para cada hipótese inclua um suggested_prompt_delta: instrução específica pa
           },
         ];
 
-    // ── 7. Salvar hipóteses no banco ──
-    const savedIds: string[] = [];
-    for (const h of hypotheses) {
-      const id = randomUUID();
-      await db.execute({
-        sql: `INSERT INTO hypotheses (id, campaign_key, variable_dimension, variable_code, hypothesis, rationale, priority, ai_model, workspace_id)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        args: [
-          id, campaignKey,
-          h.dimension, h.variable_code ?? null,
-          h.hypothesis, h.rationale,
-          h.priority ?? 5,
-          aiHypotheses.length > 0 ? "gemini-2.0-flash" : "rules-based",
-          auth.workspace_id,
-        ],
-      });
-      savedIds.push(id);
-    }
+    // ── Persiste hipóteses ──
+    const saved = await withWorkspace(auth.workspace_id, async (tx) => {
+      const rows: Array<{ id: string }> = [];
+      for (const h of hypothesesList) {
+        const [r] = await tx
+          .insert(hypothesesTable)
+          .values({
+            workspaceId: auth.workspace_id,
+            campaignKey,
+            variableDimension: h.dimension,
+            variableCode: h.variable_code ?? null,
+            hypothesis: h.hypothesis,
+            rationale: h.rationale,
+            priority: h.priority ?? 5,
+            aiModel: aiHypotheses.length > 0 ? "gemini-2.0-flash" : "rules-based",
+          })
+          .returning({ id: hypothesesTable.id });
+        rows.push(r);
+      }
+      return rows;
+    });
+
+    const savedIds = saved.map((r) => r.id);
 
     return NextResponse.json({
       campaign_key: campaignKey,
       source: aiHypotheses.length > 0 ? "gemini-2.0-flash" : "rules-based-fallback",
-      creatives_analyzed: perfRes.rows.length,
-      hypotheses: hypotheses.map((h, i) => ({ ...h, id: savedIds[i] })),
+      creatives_analyzed: perfRows.length,
+      hypotheses: hypothesesList.map((h, i) => ({ ...h, id: savedIds[i] })),
       saved_ids: savedIds,
     });
   } catch (err) {

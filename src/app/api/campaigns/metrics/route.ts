@@ -3,10 +3,17 @@
  *
  * Lista todas as campanhas T7 ativas com métricas agregadas do classified_insights.
  * Não depende da tabela campaigns — puxa direto dos dados reais da Meta.
+ *
+ * MIGRADO NA FASE 1C (Wave 2):
+ *  - getDb() → withWorkspace (RLS)
+ *  - 2 aggregate queries em sql``
+ *  - Manual filtro workspace_id de crm_leads removido (RLS cobre)
+ *  - classified_insights ganha filtro implícito via ad_creatives.ad_name
+ *    na policy RLS (JOIN — configurado no step 06 phase-1b)
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
-import { getDb } from "@/lib/db";
+import { withWorkspace, sql } from "@/lib/db";
 
 export const runtime = "nodejs";
 
@@ -17,11 +24,8 @@ export async function GET(req: NextRequest) {
   const days = parseInt(req.nextUrl.searchParams.get("days") || "7", 10);
 
   try {
-    const db = getDb();
-
-    // Campaigns with aggregated metrics
-    const result = await db.execute({
-      sql: `
+    const { campaignRows, crmRows } = await withWorkspace(auth.workspace_id, async (tx) => {
+      const campaignResult = await tx.execute(sql`
         SELECT
           campaign_id,
           campaign_name,
@@ -41,31 +45,30 @@ export async function GET(req: NextRequest) {
           COUNT(DISTINCT date) AS days_active
         FROM classified_insights
         WHERE campaign_name LIKE 'T7%'
-          AND date >= CURRENT_DATE - CAST(? AS INTEGER) * INTERVAL '1 day'
+          AND date >= CURRENT_DATE - (${days}::INTEGER * INTERVAL '1 day')
         GROUP BY campaign_id, campaign_name
         ORDER BY SUM(CAST(spend AS FLOAT)) DESC
-      `,
-      args: [days],
-    });
+      `);
 
-    // CRM leads per campaign
-    const crmResult = await db.execute({
-      sql: `
+      const crmResult = await tx.execute(sql`
         SELECT
           utm_campaign,
           COUNT(*) AS crm_leads,
           SUM(CASE WHEN is_qualified THEN 1 ELSE 0 END) AS crm_qualified
         FROM crm_leads
-        WHERE workspace_id = ?
-          AND subscribed_at >= CURRENT_DATE - CAST(? AS INTEGER) * INTERVAL '1 day'
+        WHERE subscribed_at >= CURRENT_DATE - (${days}::INTEGER * INTERVAL '1 day')
         GROUP BY utm_campaign
-      `,
-      args: [auth.workspace_id, days],
+      `);
+
+      return {
+        campaignRows: campaignResult as unknown as Array<Record<string, unknown>>,
+        crmRows: crmResult as unknown as Array<Record<string, unknown>>,
+      };
     });
 
     // Build CRM map
     const crmMap = new Map<string, { leads: number; qualified: number }>();
-    for (const r of crmResult.rows) {
+    for (const r of crmRows) {
       const key = (r.utm_campaign as string) || "";
       crmMap.set(key, {
         leads: Number(r.crm_leads || 0),
@@ -73,8 +76,7 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    // Merge
-    const campaigns = result.rows.map((row) => {
+    const campaigns = campaignRows.map((row) => {
       const campName = (row.campaign_name as string) || "";
       const crm = crmMap.get(campName) || { leads: 0, qualified: 0 };
       const spend = Number(row.total_spend || 0);
@@ -103,7 +105,6 @@ export async function GET(req: NextRequest) {
       };
     });
 
-    // Totals
     const totals = {
       spend: campaigns.reduce((s, c) => s + c.spend, 0),
       impressions: campaigns.reduce((s, c) => s + c.impressions, 0),
@@ -126,7 +127,7 @@ export async function GET(req: NextRequest) {
     console.error("[campaigns/metrics]", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

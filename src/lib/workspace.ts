@@ -2,10 +2,26 @@
  * Workspace — Operações de workspace e contas Meta vinculadas.
  *
  * Centraliza CRUD de workspaces, membros, contas Meta e API keys.
+ *
+ * MIGRADO NA FASE 1C (Wave 2, high-leverage library):
+ *  - getDb() → dbAdmin (BYPASSRLS — library chamada de várias rotas,
+ *    cada caller passa workspace_id explícito; RLS fica redundante e
+ *    as queries sempre têm filtro manual)
+ *  - 14 funções × ~31 queries migradas para Drizzle typed builder
+ *  - Funções crypto (encryptToken/decryptToken) + generateApiKey +
+ *    hashApiKey permanecem — são pure functions sobre buffers
  */
 
-import { getDb } from "./db";
+import { dbAdmin, sql } from "./db";
+import {
+  workspaces,
+  workspaceMembers,
+  workspaceMetaAccounts,
+  workspaceSettings,
+  apiKeys,
+} from "./db/schema";
 import { generateApiKey, hashApiKey } from "./auth";
+import { and, asc, desc, eq, isNull } from "drizzle-orm";
 import crypto from "crypto";
 
 // ── Types ──
@@ -76,76 +92,90 @@ export function decryptToken(ciphertext: string): string {
 // ── Workspace CRUD ──
 
 export async function createWorkspace(input: CreateWorkspaceInput): Promise<string> {
-  const db = getDb();
-  const id = crypto.randomUUID();
+  const inserted = await dbAdmin
+    .insert(workspaces)
+    .values({
+      name: input.name,
+      slug: input.slug,
+      plan: "free",
+    })
+    .returning({ id: workspaces.id });
 
-  await db.execute({
-    sql: `INSERT INTO workspaces (id, name, slug, plan) VALUES (?, ?, ?, 'free')`,
-    args: [id, input.name, input.slug],
-  });
+  const id = inserted[0].id as string;
 
   // Add owner as member
-  await db.execute({
-    sql: `INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'owner')`,
-    args: [id, input.owner_user_id],
+  await dbAdmin.insert(workspaceMembers).values({
+    workspaceId: id,
+    userId: input.owner_user_id,
+    role: "owner",
   });
 
   return id;
 }
 
 export async function getWorkspace(id: string): Promise<Record<string, unknown> | null> {
-  const db = getDb();
-  const result = await db.execute({
-    sql: `SELECT * FROM workspaces WHERE id = ?`,
-    args: [id],
-  });
-  return result.rows[0] || null;
+  const rows = await dbAdmin
+    .select()
+    .from(workspaces)
+    .where(eq(workspaces.id, id))
+    .limit(1);
+  return rows[0] ?? null;
 }
 
 export async function getUserWorkspaces(userId: string): Promise<Record<string, unknown>[]> {
-  const db = getDb();
-  const result = await db.execute({
-    sql: `SELECT w.*, wm.role
-          FROM workspaces w
-          JOIN workspace_members wm ON wm.workspace_id = w.id
-          WHERE wm.user_id = ?
-          ORDER BY w.created_at ASC`,
-    args: [userId],
-  });
-  return result.rows;
+  const rows = await dbAdmin
+    .select({
+      id: workspaces.id,
+      name: workspaces.name,
+      slug: workspaces.slug,
+      plan: workspaces.plan,
+      created_at: workspaces.createdAt,
+      role: workspaceMembers.role,
+    })
+    .from(workspaces)
+    .innerJoin(
+      workspaceMembers,
+      eq(workspaceMembers.workspaceId, workspaces.id),
+    )
+    .where(eq(workspaceMembers.userId, userId))
+    .orderBy(asc(workspaces.createdAt));
+  return rows;
 }
 
 export async function addWorkspaceMember(
   workspaceId: string,
   userId: string,
-  role: "admin" | "member"
+  role: "admin" | "member",
 ): Promise<void> {
-  const db = getDb();
-  await db.execute({
-    sql: `INSERT INTO workspace_members (workspace_id, user_id, role)
-          VALUES (?, ?, ?)
-          ON CONFLICT (workspace_id, user_id) DO UPDATE SET role = EXCLUDED.role`,
-    args: [workspaceId, userId, role],
-  });
+  await dbAdmin
+    .insert(workspaceMembers)
+    .values({ workspaceId, userId, role })
+    .onConflictDoUpdate({
+      target: [workspaceMembers.workspaceId, workspaceMembers.userId],
+      set: { role: sql`EXCLUDED.role` },
+    });
 }
 
 export async function removeWorkspaceMember(
   workspaceId: string,
-  userId: string
+  userId: string,
 ): Promise<void> {
-  const db = getDb();
-  await db.execute({
-    sql: `DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ? AND role != 'owner'`,
-    args: [workspaceId, userId],
-  });
+  // Não remove owner (proteção contra remover acidentalmente o dono)
+  await dbAdmin
+    .delete(workspaceMembers)
+    .where(
+      and(
+        eq(workspaceMembers.workspaceId, workspaceId),
+        eq(workspaceMembers.userId, userId),
+        // role != 'owner' — Drizzle não tem helper, uso sql``
+        sql`${workspaceMembers.role} != 'owner'`,
+      ),
+    );
 }
 
 // ── Meta Accounts ──
 
 export async function addMetaAccount(input: AddMetaAccountInput): Promise<string> {
-  const db = getDb();
-  const id = crypto.randomUUID();
-
   let tokenEncrypted: string | null = null;
   let oauthTokens: string | null = null;
 
@@ -155,40 +185,50 @@ export async function addMetaAccount(input: AddMetaAccountInput): Promise<string
     oauthTokens = encryptToken(JSON.stringify(input.oauth_tokens));
   }
 
-  // Check if this is the first account (make default)
-  const existing = await db.execute({
-    sql: `SELECT COUNT(*) as count FROM workspace_meta_accounts WHERE workspace_id = ?`,
-    args: [input.workspace_id],
-  });
-  const isDefault = (existing.rows[0].count as number) === 0;
+  // Check if first account → make default
+  const existing = await dbAdmin
+    .select({ count: sql<number>`count(*)::int` })
+    .from(workspaceMetaAccounts)
+    .where(eq(workspaceMetaAccounts.workspaceId, input.workspace_id));
+  const isDefault = Number(existing[0]?.count ?? 0) === 0;
 
-  await db.execute({
-    sql: `INSERT INTO workspace_meta_accounts
-          (id, workspace_id, label, meta_account_id, auth_method, token_encrypted, oauth_tokens,
-           page_id, pixel_id, instagram_user_id, is_default)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    args: [
-      id, input.workspace_id, input.label, input.meta_account_id,
-      input.auth_method, tokenEncrypted, oauthTokens,
-      input.page_id || null, input.pixel_id || null,
-      input.instagram_user_id || null, isDefault,
-    ],
-  });
+  const inserted = await dbAdmin
+    .insert(workspaceMetaAccounts)
+    .values({
+      workspaceId: input.workspace_id,
+      label: input.label,
+      metaAccountId: input.meta_account_id,
+      authMethod: input.auth_method,
+      tokenEncrypted,
+      oauthTokens,
+      pageId: input.page_id ?? null,
+      pixelId: input.pixel_id ?? null,
+      instagramUserId: input.instagram_user_id ?? null,
+      isDefault,
+    })
+    .returning({ id: workspaceMetaAccounts.id });
 
-  return id;
+  return inserted[0].id as string;
 }
 
 export async function getMetaAccounts(workspaceId: string): Promise<Record<string, unknown>[]> {
-  const db = getDb();
-  const result = await db.execute({
-    sql: `SELECT id, workspace_id, label, meta_account_id, auth_method,
-                 page_id, pixel_id, instagram_user_id, is_default, created_at
-          FROM workspace_meta_accounts
-          WHERE workspace_id = ?
-          ORDER BY is_default DESC, created_at ASC`,
-    args: [workspaceId],
-  });
-  return result.rows;
+  const rows = await dbAdmin
+    .select({
+      id: workspaceMetaAccounts.id,
+      workspace_id: workspaceMetaAccounts.workspaceId,
+      label: workspaceMetaAccounts.label,
+      meta_account_id: workspaceMetaAccounts.metaAccountId,
+      auth_method: workspaceMetaAccounts.authMethod,
+      page_id: workspaceMetaAccounts.pageId,
+      pixel_id: workspaceMetaAccounts.pixelId,
+      instagram_user_id: workspaceMetaAccounts.instagramUserId,
+      is_default: workspaceMetaAccounts.isDefault,
+      created_at: workspaceMetaAccounts.createdAt,
+    })
+    .from(workspaceMetaAccounts)
+    .where(eq(workspaceMetaAccounts.workspaceId, workspaceId))
+    .orderBy(desc(workspaceMetaAccounts.isDefault), asc(workspaceMetaAccounts.createdAt));
+  return rows;
 }
 
 /**
@@ -197,25 +237,32 @@ export async function getMetaAccounts(workspaceId: string): Promise<Record<strin
  */
 export async function getMetaToken(
   workspaceId: string,
-  metaAccountId: string
+  metaAccountId: string,
 ): Promise<string | null> {
-  const db = getDb();
-  const result = await db.execute({
-    sql: `SELECT auth_method, token_encrypted, oauth_tokens
-          FROM workspace_meta_accounts
-          WHERE workspace_id = ? AND meta_account_id = ?`,
-    args: [workspaceId, metaAccountId],
-  });
+  const rows = await dbAdmin
+    .select({
+      authMethod: workspaceMetaAccounts.authMethod,
+      tokenEncrypted: workspaceMetaAccounts.tokenEncrypted,
+      oauthTokens: workspaceMetaAccounts.oauthTokens,
+    })
+    .from(workspaceMetaAccounts)
+    .where(
+      and(
+        eq(workspaceMetaAccounts.workspaceId, workspaceId),
+        eq(workspaceMetaAccounts.metaAccountId, metaAccountId),
+      ),
+    )
+    .limit(1);
 
-  if (result.rows.length === 0) return null;
-  const row = result.rows[0];
+  if (rows.length === 0) return null;
+  const row = rows[0];
 
-  if (row.auth_method === "token" && row.token_encrypted) {
-    return decryptToken(row.token_encrypted as string);
+  if (row.authMethod === "token" && row.tokenEncrypted) {
+    return decryptToken(row.tokenEncrypted as string);
   }
 
-  if (row.auth_method === "oauth" && row.oauth_tokens) {
-    const tokens = JSON.parse(decryptToken(row.oauth_tokens as string));
+  if (row.authMethod === "oauth" && row.oauthTokens) {
+    const tokens = JSON.parse(decryptToken(row.oauthTokens as string));
     return tokens.access_token || null;
   }
 
@@ -228,7 +275,7 @@ export async function getMetaToken(
  */
 export async function resolveMetaToken(
   workspaceId: string | null,
-  metaAccountId?: string
+  metaAccountId?: string,
 ): Promise<string> {
   if (!workspaceId) {
     throw new Error("workspace_id is required — Meta tokens are per-workspace");
@@ -242,24 +289,32 @@ export async function resolveMetaToken(
   }
 
   // No specific account — use the default account for this workspace
-  const db = getDb();
-  const result = await db.execute({
-    sql: `SELECT meta_account_id, auth_method, token_encrypted, oauth_tokens
-          FROM workspace_meta_accounts
-          WHERE workspace_id = ? AND is_default = true`,
-    args: [workspaceId],
-  });
+  const rows = await dbAdmin
+    .select({
+      metaAccountId: workspaceMetaAccounts.metaAccountId,
+      authMethod: workspaceMetaAccounts.authMethod,
+      tokenEncrypted: workspaceMetaAccounts.tokenEncrypted,
+      oauthTokens: workspaceMetaAccounts.oauthTokens,
+    })
+    .from(workspaceMetaAccounts)
+    .where(
+      and(
+        eq(workspaceMetaAccounts.workspaceId, workspaceId),
+        eq(workspaceMetaAccounts.isDefault, true),
+      ),
+    )
+    .limit(1);
 
-  if (result.rows.length === 0) {
+  if (rows.length === 0) {
     throw new Error("No Meta account configured for this workspace. Add one in workspace settings.");
   }
 
-  const row = result.rows[0];
-  if (row.auth_method === "token" && row.token_encrypted) {
-    return decryptToken(row.token_encrypted as string);
+  const row = rows[0];
+  if (row.authMethod === "token" && row.tokenEncrypted) {
+    return decryptToken(row.tokenEncrypted as string);
   }
-  if (row.auth_method === "oauth" && row.oauth_tokens) {
-    const tokens = JSON.parse(decryptToken(row.oauth_tokens as string));
+  if (row.authMethod === "oauth" && row.oauthTokens) {
+    const tokens = JSON.parse(decryptToken(row.oauthTokens as string));
     return tokens.access_token || null;
   }
 
@@ -271,67 +326,90 @@ export async function resolveMetaToken(
 export async function createApiKey(
   workspaceId: string,
   userId: string,
-  name: string
+  name: string,
 ): Promise<{ id: string; key: string }> {
-  const db = getDb();
-  const id = crypto.randomUUID();
   const key = generateApiKey();
   const keyHash = hashApiKey(key);
   const prefix = key.substring(0, 10);
 
-  await db.execute({
-    sql: `INSERT INTO api_keys (id, workspace_id, user_id, name, key_hash, key_prefix)
-          VALUES (?, ?, ?, ?, ?, ?)`,
-    args: [id, workspaceId, userId, name, keyHash, prefix],
-  });
+  const inserted = await dbAdmin
+    .insert(apiKeys)
+    .values({
+      workspaceId,
+      userId,
+      name,
+      keyHash,
+      keyPrefix: prefix,
+    })
+    .returning({ id: apiKeys.id });
 
-  return { id, key }; // key is only returned once
+  return { id: inserted[0].id as string, key }; // key só é retornado uma vez
 }
 
 export async function listApiKeys(workspaceId: string): Promise<Record<string, unknown>[]> {
-  const db = getDb();
-  const result = await db.execute({
-    sql: `SELECT id, name, key_prefix, last_used_at, created_at
-          FROM api_keys
-          WHERE workspace_id = ? AND revoked_at IS NULL
-          ORDER BY created_at DESC`,
-    args: [workspaceId],
-  });
-  return result.rows;
+  const rows = await dbAdmin
+    .select({
+      id: apiKeys.id,
+      name: apiKeys.name,
+      key_prefix: apiKeys.keyPrefix,
+      last_used_at: apiKeys.lastUsedAt,
+      created_at: apiKeys.createdAt,
+    })
+    .from(apiKeys)
+    .where(
+      and(
+        eq(apiKeys.workspaceId, workspaceId),
+        isNull(apiKeys.revokedAt),
+      ),
+    )
+    .orderBy(desc(apiKeys.createdAt));
+  return rows;
 }
 
 export async function revokeApiKey(workspaceId: string, keyId: string): Promise<void> {
-  const db = getDb();
-  await db.execute({
-    sql: `UPDATE api_keys SET revoked_at = NOW() WHERE id = ? AND workspace_id = ?`,
-    args: [keyId, workspaceId],
-  });
+  await dbAdmin
+    .update(apiKeys)
+    .set({ revokedAt: new Date() })
+    .where(
+      and(
+        eq(apiKeys.id, keyId),
+        eq(apiKeys.workspaceId, workspaceId),
+      ),
+    );
 }
 
 // ── Workspace Settings ──
 
 export async function getWorkspaceSetting(
   workspaceId: string,
-  key: string
+  key: string,
 ): Promise<string | null> {
-  const db = getDb();
-  const result = await db.execute({
-    sql: `SELECT value FROM workspace_settings WHERE workspace_id = ? AND key = ?`,
-    args: [workspaceId, key],
-  });
-  return result.rows.length > 0 ? (result.rows[0].value as string) : null;
+  const rows = await dbAdmin
+    .select({ value: workspaceSettings.value })
+    .from(workspaceSettings)
+    .where(
+      and(
+        eq(workspaceSettings.workspaceId, workspaceId),
+        eq(workspaceSettings.key, key),
+      ),
+    )
+    .limit(1);
+  return rows.length > 0 ? (rows[0].value as string) : null;
 }
 
 export async function setWorkspaceSetting(
   workspaceId: string,
   key: string,
-  value: string
+  value: string,
 ): Promise<void> {
-  const db = getDb();
-  await db.execute({
-    sql: `INSERT INTO workspace_settings (workspace_id, key, value, updated_at)
-          VALUES (?, ?, ?, NOW())
-          ON CONFLICT (workspace_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-    args: [workspaceId, key, value],
-  });
+  await dbAdmin
+    .insert(workspaceSettings)
+    .values({ workspaceId, key, value })
+    .onConflictDoUpdate({
+      target: [workspaceSettings.workspaceId, workspaceSettings.key],
+      set: {
+        value: sql`EXCLUDED.value`,
+        updatedAt: sql`NOW()`,
+      },
+    });
 }

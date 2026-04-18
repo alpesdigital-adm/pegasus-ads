@@ -21,6 +21,9 @@ interface AdMetrics {
   cpl: number;
   leads_source: string;
   kill_rule: { level: string; name: string; action: string } | null;
+  // Fields adicionais retornados pelo drill (não em todas as respostas)
+  leads_crm?: number;
+  cpl_meta?: number | null;
 }
 
 interface KillRuleResponse {
@@ -123,7 +126,8 @@ export default function CampaignDrillPage() {
   const toggleAdset = (id: string) => {
     setExpandedAdsets((prev) => {
       const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   };
@@ -360,12 +364,12 @@ export default function CampaignDrillPage() {
                                 <td className="text-right px-2 py-2 text-[var(--text-secondary)]">{fmtInt(ad.impressions || 0)}</td>
                                 <td className="text-right px-2 py-2 text-[var(--text-secondary)]">{(ad.ctr || 0).toFixed(2)}%</td>
                                 <td className="text-right px-2 py-2">{ad.leads || 0}</td>
-                                <td className="text-right px-2 py-2 text-emerald-400">{(ad as any).leads_crm || 0}</td>
+                                <td className="text-right px-2 py-2 text-emerald-400">{ad.leads_crm ?? 0}</td>
                                 <td className="text-right px-2 py-2 text-blue-400">{ad.qualified_leads || 0}</td>
                                 <td className="text-right px-2 py-2">
-                                  {(ad as any).cpl_meta != null && (ad as any).cpl_meta > 0 ? (
-                                    <span className={`font-medium ${(ad as any).cpl_meta <= 32.77 ? "text-emerald-400" : "text-red-400"}`}>
-                                      R$ {(ad as any).cpl_meta.toFixed(2)}
+                                  {ad.cpl_meta != null && ad.cpl_meta > 0 ? (
+                                    <span className={`font-medium ${ad.cpl_meta <= 32.77 ? "text-emerald-400" : "text-red-400"}`}>
+                                      R$ {ad.cpl_meta.toFixed(2)}
                                     </span>
                                   ) : "—"}
                                 </td>

@@ -2,10 +2,19 @@
  * GET /api/creative-intel/performance?days=7&offer=&concept=&angle=&format=&campaign=&adset=&launch=
  *
  * Aggregated performance by concept + angle, with filters.
+ *
+ * MIGRADO NA FASE 1C (Wave 3 creative-intel):
+ *  - getDb() → withWorkspace (RLS escopa ad_creatives + crm_leads + ci)
+ *  - 3 queries em sql`` (main aggregate + CRM + ad→angle map)
+ *  - Filtros dinâmicos via sql`` fragments compostos
+ *  - 5 filtros workspace_id manuais removidos
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
-import { getDb } from "@/lib/db";
+import { withWorkspace, sql } from "@/lib/db";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ route: "/api/creative-intel/performance" });
 
 export const runtime = "nodejs";
 
@@ -24,107 +33,99 @@ export async function GET(req: NextRequest) {
   const fLaunch = sp.get("launch") || "";
 
   try {
-    const db = getDb();
+    // Filtros dinâmicos como sql`` fragments — concatenados via sql`` template
+    const filters = [
+      days < 9999 ? sql`AND ci.date >= CURRENT_DATE - (${days}::INTEGER * INTERVAL '1 day')` : sql``,
+      fOffer ? sql`AND o.key = ${fOffer}` : sql``,
+      fConcept ? sql`AND COALESCE(con.code, 'PRE') = ${fConcept}` : sql``,
+      fAngle ? sql`AND COALESCE(ang.code, '-') = ${fAngle}` : sql``,
+      fFormat ? sql`AND ac.format = ${fFormat}` : sql``,
+      fCampaign ? sql`AND ci.campaign_name = ${fCampaign}` : sql``,
+      fAdset ? sql`AND ci.adset_name = ${fAdset}` : sql``,
+      fLaunch ? sql`AND l.key = ${fLaunch}` : sql``,
+    ];
+    const crmDateFilter = days < 9999
+      ? sql`AND cl.subscribed_at >= CURRENT_DATE - (${days}::INTEGER * INTERVAL '1 day')`
+      : sql``;
 
-    // Build WHERE
-    const wheres: string[] = ["ac.workspace_id = ?"];
-    const args: any[] = [auth.workspace_id];
+    const { mainRows, crmRows, adAngleRows } = await withWorkspace(
+      auth.workspace_id,
+      async (tx) => {
+        const main = await tx.execute(sql`
+          SELECT
+            o.key AS offer_key,
+            COALESCE(con.code, 'PRE') AS concept_code,
+            COALESCE(con.name, ac.concept_label, 'Pre-Conceito') AS concept_name,
+            COALESCE(ang.code, '-') AS angle_code,
+            COALESCE(ang.name, '-') AS angle_name,
+            COALESCE(ac.motor, ang.motor, '-') AS motor,
+            COUNT(DISTINCT ac.ad_name) AS ad_count,
+            CAST(COALESCE(SUM(CAST(ci.spend AS FLOAT)), 0) AS FLOAT) AS spend,
+            COALESCE(SUM(ci.impressions), 0) AS impressions,
+            COALESCE(SUM(ci.link_clicks), 0) AS clicks,
+            COALESCE(SUM(ci.leads), 0) AS leads_meta
+          FROM ad_creatives ac
+          JOIN offers o ON ac.offer_id = o.id
+          JOIN launches l ON ac.launch_id = l.id
+          LEFT JOIN angles ang ON ac.angle_id = ang.id
+          LEFT JOIN concepts con ON ang.concept_id = con.id
+          INNER JOIN classified_insights ci ON ci.ad_name = ac.ad_name
+          WHERE 1=1
+            ${filters[0]} ${filters[1]} ${filters[2]} ${filters[3]}
+            ${filters[4]} ${filters[5]} ${filters[6]} ${filters[7]}
+          GROUP BY o.key, con.code, con.name, ac.concept_label,
+                   ang.code, ang.name, ac.motor, ang.motor
+          ORDER BY SUM(CAST(ci.spend AS FLOAT)) DESC
+        `);
 
-    if (days < 9999) {
-      wheres.push("ci.date >= CURRENT_DATE - CAST(? AS INTEGER) * INTERVAL '1 day'");
-      args.push(days);
-    }
-    if (fOffer) { wheres.push("o.key = ?"); args.push(fOffer); }
-    if (fConcept) { wheres.push("COALESCE(con.code, 'PRE') = ?"); args.push(fConcept); }
-    if (fAngle) { wheres.push("COALESCE(ang.code, '-') = ?"); args.push(fAngle); }
-    if (fFormat) { wheres.push("ac.format = ?"); args.push(fFormat); }
-    if (fCampaign) { wheres.push("ci.campaign_name = ?"); args.push(fCampaign); }
-    if (fAdset) { wheres.push("ci.adset_name = ?"); args.push(fAdset); }
-    if (fLaunch) { wheres.push("l.key = ?"); args.push(fLaunch); }
+        const crm = await tx.execute(sql`
+          SELECT
+            cl.utm_content AS ad_name,
+            COUNT(*) AS leads_crm,
+            SUM(CASE WHEN cl.is_qualified THEN 1 ELSE 0 END) AS leads_qualified
+          FROM crm_leads cl
+          INNER JOIN ad_creatives ac ON cl.utm_content = ac.ad_name
+          WHERE 1=1 ${crmDateFilter}
+          GROUP BY cl.utm_content
+        `);
 
-    const result = await db.execute({
-      sql: `
-        SELECT
-          o.key AS offer_key,
-          COALESCE(con.code, 'PRE') AS concept_code,
-          COALESCE(con.name, ac.concept_label, 'Pre-Conceito') AS concept_name,
-          COALESCE(ang.code, '-') AS angle_code,
-          COALESCE(ang.name, '-') AS angle_name,
-          COALESCE(ac.motor, ang.motor, '-') AS motor,
-          COUNT(DISTINCT ac.ad_name) AS ad_count,
-          CAST(COALESCE(SUM(CAST(ci.spend AS FLOAT)), 0) AS FLOAT) AS spend,
-          COALESCE(SUM(ci.impressions), 0) AS impressions,
-          COALESCE(SUM(ci.link_clicks), 0) AS clicks,
-          COALESCE(SUM(ci.leads), 0) AS leads_meta
-        FROM ad_creatives ac
-        JOIN offers o ON ac.offer_id = o.id
-        JOIN launches l ON ac.launch_id = l.id
-        LEFT JOIN angles ang ON ac.angle_id = ang.id
-        LEFT JOIN concepts con ON ang.concept_id = con.id
-        INNER JOIN classified_insights ci ON ci.ad_name = ac.ad_name
-        WHERE ${wheres.join(" AND ")}
-        GROUP BY o.key, con.code, con.name, ac.concept_label, ang.code, ang.name, ac.motor, ang.motor
-        ORDER BY SUM(CAST(ci.spend AS FLOAT)) DESC
-      `,
-      args,
-    });
+        const adAngle = await tx.execute(sql`
+          SELECT ac.ad_name,
+                 o.key AS offer_key,
+                 COALESCE(con.code, 'PRE') AS concept_code,
+                 COALESCE(ang.code, '-') AS angle_code
+          FROM ad_creatives ac
+          JOIN offers o ON ac.offer_id = o.id
+          LEFT JOIN angles ang ON ac.angle_id = ang.id
+          LEFT JOIN concepts con ON ang.concept_id = con.id
+        `);
 
-    // CRM leads per concept+angle
-    const crmWheres: string[] = ["cl.workspace_id = ?"];
-    const crmArgs: any[] = [auth.workspace_id];
-    if (days < 9999) {
-      crmWheres.push("cl.subscribed_at >= CURRENT_DATE - CAST(? AS INTEGER) * INTERVAL '1 day'");
-      crmArgs.push(days);
-    }
+        return {
+          mainRows: main as unknown as Array<Record<string, unknown>>,
+          crmRows: crm as unknown as Array<Record<string, unknown>>,
+          adAngleRows: adAngle as unknown as Array<Record<string, unknown>>,
+        };
+      },
+    );
 
-    const crmResult = await db.execute({
-      sql: `
-        SELECT
-          cl.utm_content AS ad_name,
-          COUNT(*) AS leads_crm,
-          SUM(CASE WHEN cl.is_qualified THEN 1 ELSE 0 END) AS leads_qualified
-        FROM crm_leads cl
-        INNER JOIN ad_creatives ac ON cl.utm_content = ac.ad_name AND ac.workspace_id = cl.workspace_id
-        WHERE ${crmWheres.join(" AND ")}
-        GROUP BY cl.utm_content
-      `,
-      args: crmArgs,
-    });
-
-    // Map CRM by ad_name
     const crmMap: Record<string, { crm: number; qual: number }> = {};
-    for (const r of crmResult.rows as any[]) {
-      crmMap[r.ad_name] = { crm: Number(r.leads_crm), qual: Number(r.leads_qualified) };
+    for (const r of crmRows) {
+      crmMap[r.ad_name as string] = {
+        crm: Number(r.leads_crm),
+        qual: Number(r.leads_qualified),
+      };
     }
 
-    // We need ad→angle mapping to aggregate CRM to angle level
-    const adAngleResult = await db.execute({
-      sql: `
-        SELECT ac.ad_name,
-               o.key AS offer_key,
-               COALESCE(con.code, 'PRE') AS concept_code,
-               COALESCE(ang.code, '-') AS angle_code
-        FROM ad_creatives ac
-        JOIN offers o ON ac.offer_id = o.id
-        LEFT JOIN angles ang ON ac.angle_id = ang.id
-        LEFT JOIN concepts con ON ang.concept_id = con.id
-        WHERE ac.workspace_id = ?
-      `,
-      args: [auth.workspace_id],
-    });
-
-    // Aggregate CRM per angle
     const angleCrm: Record<string, { crm: number; qual: number }> = {};
-    for (const r of adAngleResult.rows as any[]) {
+    for (const r of adAngleRows) {
       const key = `${r.offer_key}|${r.concept_code}|${r.angle_code}`;
-      const adCrm = crmMap[r.ad_name] || { crm: 0, qual: 0 };
+      const adCrm = crmMap[r.ad_name as string] || { crm: 0, qual: 0 };
       if (!angleCrm[key]) angleCrm[key] = { crm: 0, qual: 0 };
       angleCrm[key].crm += adCrm.crm;
       angleCrm[key].qual += adCrm.qual;
     }
 
-    // Build response
-    const data = (result.rows as any[]).map(row => {
+    const data = mainRows.map((row) => {
       const key = `${row.offer_key}|${row.concept_code}|${row.angle_code}`;
       const crm = angleCrm[key] || { crm: 0, qual: 0 };
       const spend = Number(row.spend);
@@ -152,8 +153,9 @@ export async function GET(req: NextRequest) {
     });
 
     return NextResponse.json({ data });
-  } catch (err: any) {
-    console.error("GET /api/creative-intel/performance error:", err.message);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.error({ err: message }, "GET failed");
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

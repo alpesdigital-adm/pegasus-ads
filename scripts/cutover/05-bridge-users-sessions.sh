@@ -29,6 +29,19 @@ FINAL=/tmp/users-sessions-bridge-final.sql
 log() { printf '\033[1;34m[%s]\033[0m %s\n' "$(date +%H:%M:%S)" "$*"; }
 ok()  { printf '\033[1;32m[ok]\033[0m %s\n' "$*"; }
 
+# ── 0. Alinhar schema: Neon users tem 4 colunas que Drizzle omitiu ──────
+# (account_id, role, is_active, last_login_at). Fase 2 vai substituir por
+# auth.users, então ALTER direto é aceitável para a bridge.
+log "[0/4] Adicionando colunas legacy em users (idempotente via IF NOT EXISTS)"
+docker exec -i alpes-ads_supabase-db-1 psql -U supabase_admin -d pegasus_ads -v ON_ERROR_STOP=1 <<'SQL'
+ALTER TABLE public.users
+  ADD COLUMN IF NOT EXISTS account_id integer,
+  ADD COLUMN IF NOT EXISTS role varchar(20) NOT NULL DEFAULT 'viewer',
+  ADD COLUMN IF NOT EXISTS is_active boolean DEFAULT true,
+  ADD COLUMN IF NOT EXISTS last_login_at timestamptz;
+SQL
+ok "users alinhado com schema do Neon"
+
 # ── 1. Dump users + sessions do Neon ────────────────────────────────────
 log "[1/4] Dumping users + sessions do Neon (postgres:17-alpine)"
 docker run --rm --network host -v /tmp:/tmp postgres:17-alpine \
@@ -78,10 +91,14 @@ echo
 echo "====================================================================="
 echo " Bridge users+sessions concluído. Counts finais:"
 echo "====================================================================="
-docker exec -i alpes-ads_supabase-db-1 psql -U pegasus_ads_admin -d pegasus_ads -c \
+ADMIN_PASS=$(grep -E '^DATABASE_URL_ADMIN=' "$ENV_FILE" | cut -d= -f2- | sed -E 's|.*://[^:]+:([^@]+)@.*|\1|')
+docker exec -e PGPASSWORD="$ADMIN_PASS" alpes-ads_supabase-db-1 \
+  psql -U pegasus_ads_admin -d pegasus_ads -h 127.0.0.1 -c \
   "SELECT 'users' AS tbl, count(*) FROM users
    UNION ALL
    SELECT 'sessions', count(*) FROM sessions
+   UNION ALL
+   SELECT 'sessions_active', count(*) FROM sessions WHERE expires_at > NOW()
    ORDER BY tbl"
 
 echo

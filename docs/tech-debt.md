@@ -315,3 +315,40 @@ pra invalidar cache em rotações futuras.
   (mesmo cluster, compartilhado com CRM)
 - Bakear `NEXT_PUBLIC_SUPABASE_ANON_KEY` corretamente via build-arg
   (espelhar o fix do CRM no `deploy.sh` do pegasus-ads)
+
+---
+
+## TD-014 — DATABASE_URL demo no container Supavisor 🔴 open
+
+**Descoberto:** 2026-04-18 (scripts/phase-2-supavisor/01-inspect.sh output)
+**Dono:** Claude (janela de rotação geral do cluster)
+**Impacto:** o container `alpes-ads_supabase-supavisor-1` tem
+`DATABASE_URL` (que o Supavisor usa pra acessar seu próprio metadata DB,
+não o DB do tenant) configurado com valor demo (length=84, padrão
+`supabase/supavisor`). Só acessível dentro da docker network — não é
+exploitable externamente hoje, mas permite acesso administrativo total
+ao metadata (tenants, users, connection specs) por qualquer container da
+mesma network.
+
+**Contexto:** os segredos críticos (API_JWT_SECRET, SECRET_KEY_BASE,
+VAULT_ENC_KEY, METRICS_JWT_SECRET) JÁ foram rotacionados durante TD-006.
+DATABASE_URL não entrou naquela rotação porque é credencial de outro
+database (Postgres metadata interno do Supavisor).
+
+**Como resolver:**
+1. Gerar senha nova pro user que o Supavisor usa (provavelmente
+   `postgres` ou `supabase_admin` no database `postgres`)
+2. `ALTER USER <user> WITH PASSWORD '<nova>'` no Postgres
+3. Atualizar `DATABASE_URL` env var do container Supavisor + restart
+4. Conferir que Supavisor reconecta com a nova credencial
+
+**Riscos:**
+- Se fizer com tenants ativos no Supavisor, pooling pode ficar unavailable
+  durante o restart (~5-10s). Janela pequena mas visível.
+- Se o user for `postgres` (super), qualquer outra coisa no cluster que
+  use credencial `postgres` quebra também. CRM / Studio / Realtime
+  precisam ser verificados.
+
+**Quando:** janela de manutenção coordenada com time CRM. Não é P1 —
+rede privada limita a exposição. Pode entrar em backlog de hardening de
+cluster junto com TD-002 se rolar pooling bem.

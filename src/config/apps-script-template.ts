@@ -7,7 +7,7 @@
  * Placeholders substituídos em runtime:
  *   {{SPREADSHEET_ID}}  — ID da planilha Google Sheets
  *   {{API_KEY}}         — Valor de TEST_LOG_API_KEY (salvo em Script Properties)
- *   {{API_BASE}}        — Base URL do app (ex: https://pegasus-ads.vercel.app)
+ *   {{API_BASE}}        — Base URL do app (ex: https://pegasus.alpesd.com.br)
  */
 
 export const APPS_SCRIPT_TEMPLATE = `
@@ -360,7 +360,7 @@ export function buildAppsScript(opts: {
   apiKey: string;
   apiBase?: string;
 }): string {
-  const base = opts.apiBase ?? "https://pegasus-ads.vercel.app";
+  const base = opts.apiBase ?? "https://pegasus.alpesd.com.br";
   return APPS_SCRIPT_TEMPLATE
     .replace(/\{\{SPREADSHEET_ID\}\}/g, opts.spreadsheetId)
     .replace(/\{\{API_KEY\}\}/g, opts.apiKey)

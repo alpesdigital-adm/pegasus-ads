@@ -33,24 +33,32 @@ para remover blue container + atualizar `deploy.sh`. Brain memória #173/#174.
 
 ---
 
-## TD-001 — Remover integração Vercel do repo 🔴 open
+## TD-001 — Remover integração Vercel do repo 🟡 in-progress
 
 **Descoberto:** 2026-04-17 (PR #1 da migração)
+**Atualizado:** 2026-04-18 (`vercel.json` + URLs hardcoded limpadas; falta
+apenas desinstalar a GitHub App no UI)
 **Dono:** Leandro (requer acesso admin ao repo GitHub)
-**Impacto:** todo PR falha no check "Vercel" com `Account is blocked.`
+**Impacto:** todo PR ainda falha no check "Vercel" com `Account is blocked.`
 — ruído visual, não bloqueia merge mas mascara falhas reais de CI quando
 a Fase 4 adicionar GitHub Actions.
+
+**Progresso:**
+- ✅ `vercel.json` removido (dead weight — VPS ignora; crontab local cobre
+  o job `/api/cron/collect` que Vercel rodava em 13:00 UTC)
+- ✅ URLs hardcoded `pegasus-ads.vercel.app` → `pegasus.alpesd.com.br` em 5
+  arquivos (apps-script-template, google-drive fallback, reports/weekly
+  footer, /api/docs spec, setup/apps-script doc)
+- ⏳ Desinstalar Vercel GitHub App (só Leandro consegue — UI)
 
 **Contexto:** o Vercel foi descontinuado quando a stack migrou para VPS
 Hostinger (Brain memória #8, #29). A integração GitHub↔Vercel continuou
 configurada e segue tentando deployar em cada push, falhando com conta
 bloqueada.
 
-**Como resolver:**
+**Como resolver (passo restante):**
 1. `Settings → Integrations` no repo `alpesdigital-adm/pegasus-ads`
 2. Desinstalar a Vercel GitHub App (ou remover só este repo do escopo)
-3. Confirmar que `vercel.json` ainda é necessário (ver se Docker build usa algo)
-   — se não, remover também
 
 **Quando:** antes da Fase 4 do plano de migração (quando CI entrar), para
 não confundir falha real de CI com ruído residual.

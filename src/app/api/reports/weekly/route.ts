@@ -154,7 +154,7 @@ ${
 }
 
 <div style="margin-top: 24px; font-size: 12px; color: #999; text-align: center; border-top: 1px solid #eee; padding-top: 16px;">
-  Gerado automaticamente pelo Pegasus Ads em ${formatDate(new Date())} • <a href="https://pegasus-ads.vercel.app" style="color: #1a1a2e;">pegasus-ads.vercel.app</a>
+  Gerado automaticamente pelo Pegasus Ads em ${formatDate(new Date())} • <a href="https://pegasus.alpesd.com.br" style="color: #1a1a2e;">pegasus.alpesd.com.br</a>
 </div>
 
 </body>

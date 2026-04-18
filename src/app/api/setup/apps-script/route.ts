@@ -11,7 +11,7 @@
  * Body JSON:
  * {
  *   spreadsheet_id: string   // ID da planilha (ex: "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms")
- *   api_base?:      string   // Override da base URL (padrão: https://pegasus-ads.vercel.app)
+ *   api_base?:      string   // Override da base URL (padrão: https://pegasus.alpesd.com.br)
  * }
  *
  * Resposta JSON (sucesso):

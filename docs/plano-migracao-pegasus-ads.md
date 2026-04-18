@@ -1,8 +1,22 @@
 # Plano de Migração — Pegasus Ads
 
-**Versão:** 1.4 — 2026-04-17  
-**Status:** Fase 0 concluída — Fase 1A em execução  
+**Versão:** 1.5 — 2026-04-18  
+**Status:** Fases 0, 1A, 1B + cutover CONCLUÍDOS — Fase 1C em backlog  
 **Autor:** Claude (análise) + Leandro (decisões e validação)
+
+**Changelog v1.5 (2026-04-18):**
+- Cutover Neon → Supabase executado end-to-end em 2026-04-18 (TD-009)
+- Bridge `users` + `sessions` adicionada (decisão pragmática — Fase 2 vai
+  substituir por `auth.users` depois). Drop diferido 30 dias pós-Fase 2.
+- Schema drift de `users` (4 colunas legacy: account_id, role, is_active,
+  last_login_at) consolidado no Drizzle + migration 0004 idempotente
+- `classified_insights.insight_id` / `account_id`: FKs especulativas
+  removidas (nunca existiram no Neon original) — migration 0003 relaxa
+  para nullable sem FK
+- `vercel.json` removido (dead weight — VPS ignora; crontab local cobre os
+  jobs que Vercel rodava)
+- URLs hardcoded `pegasus-ads.vercel.app` → `pegasus.alpesd.com.br` em 5
+  arquivos (defaults, footers, docs — runtime usa env vars)
 
 **Changelog v1.4 (2026-04-17):**
 - Cluster real verificado: Postgres **15.8** (não 16), superuser `supabase_admin`

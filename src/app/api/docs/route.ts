@@ -24,11 +24,11 @@ const OPENAPI_SPEC = {
       "Dados são isolados por workspace.",
     contact: {
       name: "Alpes Digital",
-      url: "https://pegasus-ads.vercel.app",
+      url: "https://pegasus.alpesd.com.br",
     },
   },
   servers: [
-    { url: "https://pegasus-ads.vercel.app", description: "Produção (Vercel)" },
+    { url: "https://pegasus.alpesd.com.br", description: "Produção" },
     { url: "http://localhost:3000", description: "Desenvolvimento local" },
   ],
   components: {

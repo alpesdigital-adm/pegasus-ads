@@ -61,32 +61,24 @@ regressão. Rodar `scripts/cutover/04-remove-blue.sh` só após Fase 5.
 
 ---
 
-## TD-001 — Remover integração Vercel do repo 🟡 in-progress
+## TD-001 — Remover integração Vercel do repo 🟢 done
 
 **Descoberto:** 2026-04-17 (PR #1 da migração)
-**Atualizado:** 2026-04-18 (`vercel.json` + URLs hardcoded limpadas; falta
-apenas desinstalar a GitHub App no UI)
-**Dono:** Leandro (requer acesso admin ao repo GitHub)
-**Impacto:** todo PR ainda falha no check "Vercel" com `Account is blocked.`
-— ruído visual, não bloqueia merge mas mascara falhas reais de CI quando
-a Fase 4 adicionar GitHub Actions.
+**Atualizado:** 2026-04-18 (Leandro removeu projeto pegasus-ads do Vercel)
+**Dono:** Leandro (ação no UI)
+**Impacto:** PRs ainda podem ter o check "Vercel" aparecendo (Vercel App
+segue instalado na org por causa do projeto `grclub`), mas pegasus-ads
+não está mais linkado — não falha mais com `Account is blocked`. Fase 4
+pode adicionar GitHub Actions sem ruído.
 
-**Progresso:**
-- ✅ `vercel.json` removido (dead weight — VPS ignora; crontab local cobre
-  o job `/api/cron/collect` que Vercel rodava em 13:00 UTC)
-- ✅ URLs hardcoded `pegasus-ads.vercel.app` → `pegasus.alpesd.com.br` em 5
-  arquivos (apps-script-template, google-drive fallback, reports/weekly
-  footer, /api/docs spec, setup/apps-script doc)
-- ⏳ Desinstalar Vercel GitHub App (só Leandro consegue — UI)
-
-**Contexto:** o Vercel foi descontinuado quando a stack migrou para VPS
-Hostinger (Brain memória #8, #29). A integração GitHub↔Vercel continuou
-configurada e segue tentando deployar em cada push, falhando com conta
-bloqueada.
-
-**Como resolver (passo restante):**
-1. `Settings → Integrations` no repo `alpesdigital-adm/pegasus-ads`
-2. Desinstalar a Vercel GitHub App (ou remover só este repo do escopo)
+**Estado final:**
+- ✅ `vercel.json` removido
+- ✅ URLs hardcoded `pegasus-ads.vercel.app` → `pegasus.alpesd.com.br`
+  em 5 arquivos (apps-script-template, google-drive fallback,
+  reports/weekly footer, /api/docs spec, setup/apps-script doc)
+- ✅ Projeto pegasus-ads removido do Vercel (2026-04-18 — Leandro)
+- ⏸️ Vercel GitHub App permanece instalada na org por conta do projeto
+  `grclub`. Isso é OK — só afeta o repo `grclub`, não o `pegasus-ads`.
 
 **Quando:** antes da Fase 4 do plano de migração (quando CI entrar), para
 não confundir falha real de CI com ruído residual.

@@ -1,6 +1,6 @@
 "use client";
-/* eslint-disable @typescript-eslint/no-explicit-any, react-hooks/set-state-in-effect */
-// TODO(fase-4-cleanup): tipar `any` + refatorar useEffect fetches.
+/* eslint-disable @typescript-eslint/no-explicit-any */
+// TODO(fase-4-cleanup): tipar os `any` restantes (handlers de form).
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -87,48 +87,56 @@ export default function CampaignsPage() {
 
   // Fetch campaigns
   useEffect(() => {
-    setLoading(true);
-    setError(null);
-    fetch(`/api/campaigns/metrics?days=${days}`)
-      .then((r) => r.json())
-      .then((data) => {
+    const ac = new AbortController();
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const r = await fetch(`/api/campaigns/metrics?days=${days}`, { signal: ac.signal });
+        const data = await r.json();
         if (data.error) {
           setError(data.error);
-        } else {
-          let filtered = data.campaigns || [];
-          // Apply project filter
-          const proj = projects.find(p => p.id === selectedProjectId);
-          if (proj && proj.campaign_filter) {
-            filtered = filtered.filter((c: Campaign) =>
-              c.campaign_name.toLowerCase().includes(proj.campaign_filter.toLowerCase())
-            );
-          }
-          setCampaigns(filtered);
-          // Recalc totals
-          const t = {
-            spend: filtered.reduce((s: number, c: Campaign) => s + c.spend, 0),
-            impressions: filtered.reduce((s: number, c: Campaign) => s + c.impressions, 0),
-            clicks: filtered.reduce((s: number, c: Campaign) => s + c.clicks, 0),
-            leads_meta: filtered.reduce((s: number, c: Campaign) => s + c.leads_meta, 0),
-            leads_crm: filtered.reduce((s: number, c: Campaign) => s + c.leads_crm, 0),
-            leads_qualified: filtered.reduce((s: number, c: Campaign) => s + c.leads_qualified, 0),
-            total_ads: filtered.reduce((s: number, c: Campaign) => s + c.total_ads, 0),
-            active_ads: filtered.reduce((s: number, c: Campaign) => s + c.active_ads, 0),
-            cpl_meta: null as number | null,
-            cpl_crm: null as number | null,
-          };
-          t.cpl_meta = t.leads_meta > 0 ? Math.round(t.spend / t.leads_meta * 100) / 100 : null;
-          t.cpl_crm = t.leads_crm > 0 ? Math.round(t.spend / t.leads_crm * 100) / 100 : null;
-          (t as any).ctr = t.impressions > 0 ? Math.round(t.clicks / t.impressions * 10000) / 100 : 0;
-          (t as any).cpm = t.impressions > 0 ? Math.round(t.spend / t.impressions * 100000) / 100 : 0;
-          const totalLpv = filtered.reduce((s: number, c: Campaign) => s + c.lpv, 0);
-          (t as any).lpv = totalLpv;
-          (t as any).connect_rate = t.clicks > 0 ? Math.round(totalLpv / t.clicks * 10000) / 100 : 0;
-          setTotals(t);
+          return;
         }
-      })
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
+        let filtered = data.campaigns || [];
+        const proj = projects.find(p => p.id === selectedProjectId);
+        if (proj && proj.campaign_filter) {
+          filtered = filtered.filter((c: Campaign) =>
+            c.campaign_name.toLowerCase().includes(proj.campaign_filter.toLowerCase())
+          );
+        }
+        setCampaigns(filtered);
+        const t = {
+          spend: filtered.reduce((s: number, c: Campaign) => s + c.spend, 0),
+          impressions: filtered.reduce((s: number, c: Campaign) => s + c.impressions, 0),
+          clicks: filtered.reduce((s: number, c: Campaign) => s + c.clicks, 0),
+          leads_meta: filtered.reduce((s: number, c: Campaign) => s + c.leads_meta, 0),
+          leads_crm: filtered.reduce((s: number, c: Campaign) => s + c.leads_crm, 0),
+          leads_qualified: filtered.reduce((s: number, c: Campaign) => s + c.leads_qualified, 0),
+          total_ads: filtered.reduce((s: number, c: Campaign) => s + c.total_ads, 0),
+          active_ads: filtered.reduce((s: number, c: Campaign) => s + c.active_ads, 0),
+          cpl_meta: null as number | null,
+          cpl_crm: null as number | null,
+          ctr: 0,
+          cpm: 0,
+          lpv: 0,
+          connect_rate: 0,
+        };
+        t.cpl_meta = t.leads_meta > 0 ? Math.round(t.spend / t.leads_meta * 100) / 100 : null;
+        t.cpl_crm = t.leads_crm > 0 ? Math.round(t.spend / t.leads_crm * 100) / 100 : null;
+        t.ctr = t.impressions > 0 ? Math.round(t.clicks / t.impressions * 10000) / 100 : 0;
+        t.cpm = t.impressions > 0 ? Math.round(t.spend / t.impressions * 100000) / 100 : 0;
+        t.lpv = filtered.reduce((s: number, c: Campaign) => s + c.lpv, 0);
+        t.connect_rate = t.clicks > 0 ? Math.round(t.lpv / t.clicks * 10000) / 100 : 0;
+        setTotals(t);
+      } catch (e) {
+        if ((e as { name?: string }).name === "AbortError") return;
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setLoading(false);
+      }
+    })();
+    return () => ac.abort();
   }, [days, selectedProjectId, projects]);
 
   return (

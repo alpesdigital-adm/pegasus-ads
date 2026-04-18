@@ -1,6 +1,4 @@
 "use client";
-/* eslint-disable react-hooks/set-state-in-effect */
-// TODO(fase-4-cleanup): refatorar useEffect fora do set-state pattern.
 
 import { useEffect, useState, useCallback } from "react";
 import AppShell from "@/components/AppShell";
@@ -256,35 +254,36 @@ export default function InsightsPage() {
   };
 
   // Fetch data
-  const fetchData = useCallback(() => {
+  const fetchData = useCallback(async () => {
     setLoading(true);
     setError(null);
+    try {
+      const params = new URLSearchParams({ days: String(days) });
+      if (fOffer) params.set("offer", fOffer);
+      if (fConcept) params.set("concept", fConcept);
+      if (fLaunch) params.set("launch", fLaunch);
+      if (fFormat) params.set("format", fFormat);
+      if (fCampaign) params.set("campaign", fCampaign);
+      if (fAdset) params.set("adset", fAdset);
 
-    const params = new URLSearchParams({ days: String(days) });
-    if (fOffer) params.set("offer", fOffer);
-    if (fConcept) params.set("concept", fConcept);
-    if (fLaunch) params.set("launch", fLaunch);
-    if (fFormat) params.set("format", fFormat);
-    if (fCampaign) params.set("campaign", fCampaign);
-    if (fAdset) params.set("adset", fAdset);
-
-    fetch(`/api/reports/creative-performance?${params}`)
-      .then(r => r.json())
-      .then(data => {
-        if (data.error) {
-          setError(data.error);
-        } else {
-          setConcepts(data.concepts || []);
-          setTotals(data.totals || null);
-          setFilters(data.filters || null);
-        }
-      })
-      .catch(err => setError(err.message))
-      .finally(() => setLoading(false));
+      const r = await fetch(`/api/reports/creative-performance?${params}`);
+      const data = await r.json();
+      if (data.error) {
+        setError(data.error);
+      } else {
+        setConcepts(data.concepts || []);
+        setTotals(data.totals || null);
+        setFilters(data.filters || null);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
   }, [days, fOffer, fConcept, fLaunch, fFormat, fCampaign, fAdset]);
 
   useEffect(() => {
-    fetchData();
+    void fetchData();
   }, [fetchData]);
 
   // Expand / Collapse all

@@ -95,46 +95,72 @@ Janela: 15-30 minutos, fora de horário comercial, coordenada com
 time CRM (aviso no canal + banner "estamos rotacionando,
 relogue em 5 min").
 
+> **Automação disponível.** Os passos 1-6 estão implementados em
+> `scripts/td-006/rotate-jwt.sh` (orquestrador bash) +
+> `scripts/td-006/generate-supabase-jwts.js` (gera HS256 com o novo
+> secret, NÃO usa jwt.io). O passo 7 (CRM) está em
+> `scripts/td-006/update-crm-env.sh`. Detalhes manuais mantidos abaixo
+> para referência.
+
 1. **Gerar novos valores** (local, fora do repo):
    ```bash
    NEW_JWT_SECRET=$(openssl rand -hex 32)
-   # Usar supabase CLI ou jwt.io com HS256 + NEW_JWT_SECRET:
-   #   payload anon     = {"role":"anon","iss":"alpes-ads","iat":<now>,"exp":<10y>}
-   #   payload service  = {"role":"service_role","iss":"alpes-ads","iat":<now>,"exp":<10y>}
-   NEW_ANON_KEY="<jwt>"
-   NEW_SERVICE_ROLE_KEY="<jwt>"
+   # IMPORTANTE: assinar os JWTs com o NOVO secret — nunca usar jwt.io
+   # ou serviços externos (o secret não pode sair da máquina).
+   NEW_JWT_SECRET="$NEW_JWT_SECRET" node scripts/td-006/generate-supabase-jwts.js
+   # Saída: {"jwt_secret":"...","anon":"...","service_role":"..."}
    ```
 2. **Backup da .env**:
    ```bash
    cd /etc/easypanel/projects/alpes-ads/supabase/code/supabase/code
    cp .env .env.backup-td006-$(date +%s)
    ```
-3. **Update compose .env** com os 3 novos valores.
-4. **Restart em ordem** (evita gotrue+db assinar um JWT com secret
-   velho enquanto postgrest já valida com o novo):
+3. **Update compose .env** com os 3 novos valores (`JWT_SECRET`,
+   `ANON_KEY`, `SERVICE_ROLE_KEY`).
+4. **Recriar containers com as envs novas** — `docker restart`
+   **NÃO** relê o `.env`; só `docker compose up --force-recreate`
+   aplica os valores atualizados:
    ```bash
-   # Tudo que le JWT — parar primeiro
-   docker restart alpes-ads_supabase-auth-1 \
-                  alpes-ads_supabase-rest-1 \
-                  alpes-ads_supabase-storage-1 \
-                  alpes-ads_supabase-realtime-1 \
-                  alpes-ads_supabase-functions-1 \
-                  alpes-ads_supabase-supavisor-1 \
-                  alpes-ads_supabase-kong-1
+   cd /etc/easypanel/projects/alpes-ads/supabase/code/supabase/code
+   # Parar kong antes — evita tráfego no gateway durante a troca
+   docker stop alpes-ads_supabase-kong-1
+   # Recriar todos os JWT consumers em paralelo
+   docker compose up -d --force-recreate --no-deps \
+     auth rest storage realtime functions supavisor
+   # Subir kong com ANON/SERVICE_KEY novas
+   docker compose up -d --force-recreate --no-deps kong
    ```
-5. **Update consumidores** (env do container + recreate):
-   - `pegasus-crm`: mudar `NEXT_PUBLIC_SUPABASE_ANON_KEY`,
-     `SUPABASE_SERVICE_ROLE_KEY` na .env do CRM + recreate container.
-     (CRM precisa rebuild se as vars estão bakeadas no build; nosso
-     caso Next.js uses NEXT_PUBLIC_* at build — rebuild necessário)
+5. **Limpar refresh tokens órfãos** (sessões antigas invalidadas pela
+   rotação; manter a tabela suja não é vulnerabilidade mas polui o DB):
+   ```bash
+   docker exec alpes-ads_supabase-db-1 \
+     psql -U supabase_admin -d postgres \
+     -c 'DELETE FROM auth.refresh_tokens;'
+   ```
+6. **Update consumidores** (env do container + recreate):
+   - `pegasus-crm`: mudar `NEXT_PUBLIC_SUPABASE_ANON_KEY` e
+     `SUPABASE_SERVICE_ROLE_KEY` no `.env` do CRM.
+     **Rebuild é OBRIGATÓRIO**, não basta recreate: `NEXT_PUBLIC_*`
+     são bakeadas no bundle JS no build (`next build`), não lidas em
+     runtime. Sem rebuild, o browser continua enviando a ANON_KEY
+     velha e recebe 401.
+     ```bash
+     cd /apps/pegasus-crm
+     # Editar .env com as duas chaves novas
+     bash scripts/deploy.sh  # faz docker build + recreate
+     ```
    - `pegasus-ads`: N/A hoje; adicionar na Fase 2.
-6. **Validar**:
+7. **Validar**:
    ```bash
    curl -s https://supabase.alpesd.com.br/auth/v1/settings \
      -H "apikey: $NEW_ANON_KEY" | jq .
    # esperado: { "external": {...}, "disable_signup": ..., ... }
+
+   # Login real no CRM:
+   curl -sS -o /dev/null -w '%{http_code}\n' https://crm.alpesd.com.br/login
+   # esperado: 200
    ```
-7. **Aviso pós-rotação**: canal CRM com instrução pra relogar.
+8. **Aviso pós-rotação**: canal CRM com instrução pra relogar.
 
 ## Rollback
 
@@ -142,20 +168,35 @@ Se quebrar no step 4:
 ```bash
 cd /etc/easypanel/projects/alpes-ads/supabase/code/supabase/code
 cp .env.backup-td006-<ts> .env
-# restart mesma lista de containers
+docker compose up -d --force-recreate --no-deps \
+  auth rest storage realtime functions supavisor kong
 ```
 Voltamos ao demo secret. Usuários CRM que tinham sessão antes voltam
-a funcionar (JWT velho volta a ser válido).
+a funcionar (JWT velho volta a ser válido) **APENAS se o rollback
+acontecer ANTES do passo 5** (DELETE de refresh_tokens é
+irreversível — usuários precisam relogar após rollback se o DELETE
+já rodou).
+
+Se quebrar no step 6 (CRM rebuild):
+```bash
+# Backup do .env do CRM é feito automaticamente pelo update-crm-env.sh
+cp /apps/pegasus-crm/.env.backup-td006-<ts> /apps/pegasus-crm/.env
+cd /apps/pegasus-crm && bash scripts/deploy.sh
+```
+Volta o CRM ao ANON/SERVICE_KEY antigas — mas o cluster já está com
+secret novo, então CRM fica quebrado até rodar rollback completo
+(cluster + CRM).
 
 ## Checklist pré-execução
 
 - [ ] Coordenar com time CRM (canal + janela)
-- [ ] Gerar NEW_JWT_SECRET, NEW_ANON_KEY, NEW_SERVICE_ROLE_KEY
-      localmente
-- [ ] `grep -r "your-super-secret-jwt-token"` em /apps/ pra pegar
-      qualquer hardcoded que tenha escapado
-- [ ] Backup da .env do compose
-- [ ] Testar rollback dry-run (desbloqueia decisão se der merda)
+- [ ] `grep -rlI "your-super-secret-jwt-token"` em /apps/ e
+      /etc/easypanel/ retorna APENAS: arquivos `.env(.example)?`,
+      `docs/tech-debt.md`, `docs/migration/td-006-*`
+- [ ] Script `generate-supabase-jwts.js` roda localmente (não depende
+      de jwt.io ou serviços externos)
+- [ ] Backup da `.env` do compose automatizado no rotator
+- [ ] `scripts/td-006/rotate-jwt.sh --dry-run` rodado pelo menos 1x
 - [ ] Banner/aviso no CRM
 
 ## Dependências desbloqueadas

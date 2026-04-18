@@ -4,42 +4,32 @@
  * Tarefa 2.5 — Kill Rules automáticas (L0-L5)
  *
  * Avalia todas as kill rules para todos os criativos com métricas.
- * Identifica o CPL do controle (generation=0) e usa como referência.
+ * Identifica o CPL do controle (is_control=true > generation=0) e usa
+ * como referência.
  *
  * Body JSON (opcional):
  * {
  *   cpl_target?:  number   // CPL target em R$ (padrão: 25)
- *   apply?:       boolean  // Se true, aplica status 'killed' no DB para regras kill
+ *   apply?:       boolean  // Se true, aplica status 'killed' no DB
  *   dry_run?:     boolean  // Alias de apply=false (padrão: true = dry run)
  * }
  *
- * Resposta:
- * {
- *   cpl_target:    number
- *   control_cpl:   number | null
- *   evaluated:     number        // total de ADs avaliados
- *   triggered:     number        // ADs com alguma regra ativa
- *   applied:       number        // ADs que tiveram status atualizado no DB
- *   results: [
- *     {
- *       creative_id: string
- *       creative_name: string
- *       generation: number
- *       status: string
- *       metrics: { spend, leads, cpl, impressions, ctr, days_running }
- *       kill_rule: { level, name, action } | null
- *       all_rules: [{ level, name, action }]
- *       db_updated: boolean
- *     }
- *   ]
- * }
+ * MIGRADO NA FASE 1C (Wave 2):
+ *  - getDb() → withWorkspace (RLS)
+ *  - Aggregate SELECT (JOIN + SUM + GROUP BY) em sql``
+ *  - UPDATE status via Drizzle typed
+ *  - BUG CROSS-TENANT CORRIGIDO: legado não tinha filtro workspace_id
+ *    em creatives — agregava criativos de todas as workspaces. Agora
+ *    RLS filtra automático.
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getDb } from "@/lib/db";
+import { withWorkspace, sql } from "@/lib/db";
+import { creatives } from "@/lib/db/schema";
 import { requireAuth } from "@/lib/auth";
 import { evaluateKillRules, evaluateAllKillRules } from "@/config/kill-rules";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
+import { eq } from "drizzle-orm";
 
 export const runtime = "nodejs";
 
@@ -48,8 +38,6 @@ const DEFAULT_CPL_TARGET = KNOWN_CAMPAIGNS["T7_0003_RAT"]?.cplTarget ?? 25;
 export async function POST(req: NextRequest) {
   const auth = await requireAuth(req);
   if (auth instanceof NextResponse) return auth;
-
-  const db = getDb();
 
   interface EvaluateBody {
     cpl_target?: number;
@@ -70,28 +58,30 @@ export async function POST(req: NextRequest) {
   // apply=true ou dry_run=false → aplica no DB
   const shouldApply = body.apply === true || body.dry_run === false;
 
-  // ── 1. Buscar todos os criativos com métricas agregadas ──
-  const result = await db.execute(`
-    SELECT
-      c.id,
-      c.name,
-      c.generation,
-      c.is_control,
-      c.status,
-      c.parent_id,
-      SUM(m.spend)                                          AS total_spend,
-      SUM(m.impressions)                                    AS total_impressions,
-      SUM(m.clicks)                                         AS total_clicks,
-      SUM(m.leads)                                          AS total_leads,
-      AVG(m.ctr)                                            AS avg_ctr,
-      COUNT(DISTINCT m.date)                                AS days_count
-    FROM creatives c
-    JOIN metrics m ON m.creative_id = c.id
-    GROUP BY c.id, c.name, c.generation, c.is_control, c.status, c.parent_id
-    ORDER BY c.is_control DESC NULLS LAST, c.generation ASC, c.created_at ASC
-  `);
+  const rows = await withWorkspace(auth.workspace_id, async (tx) => {
+    const result = await tx.execute(sql`
+      SELECT
+        c.id,
+        c.name,
+        c.generation,
+        c.is_control,
+        c.status,
+        c.parent_id,
+        SUM(m.spend)           AS total_spend,
+        SUM(m.impressions)     AS total_impressions,
+        SUM(m.clicks)          AS total_clicks,
+        SUM(m.leads)           AS total_leads,
+        AVG(m.ctr)             AS avg_ctr,
+        COUNT(DISTINCT m.date) AS days_count
+      FROM creatives c
+      JOIN metrics m ON m.creative_id = c.id
+      GROUP BY c.id, c.name, c.generation, c.is_control, c.status, c.parent_id
+      ORDER BY c.is_control DESC NULLS LAST, c.generation ASC, c.created_at ASC
+    `);
+    return result as unknown as Array<Record<string, unknown>>;
+  });
 
-  if (result.rows.length === 0) {
+  if (rows.length === 0) {
     return NextResponse.json({
       cpl_target: cplTarget,
       control_cpl: null,
@@ -105,17 +95,15 @@ export async function POST(req: NextRequest) {
 
   // ── 2. Identificar control CPL (is_control=true > generation=0) ──
   let controlCpl: number | null = null;
-  // Primeiro tenta is_control=true
-  for (const row of result.rows) {
+  for (const row of rows) {
     if (row.is_control) {
       const totalSpend = Number(row.total_spend ?? 0);
       const totalLeads = Number(row.total_leads ?? 0);
       if (totalLeads > 0) { controlCpl = totalSpend / totalLeads; break; }
     }
   }
-  // Fallback: generation=0
   if (controlCpl === null) {
-    for (const row of result.rows) {
+    for (const row of rows) {
       if ((row.generation as number) === 0) {
         const totalSpend = Number(row.total_spend ?? 0);
         const totalLeads = Number(row.total_leads ?? 0);
@@ -125,11 +113,11 @@ export async function POST(req: NextRequest) {
   }
 
   // ── 3. Avaliar kill rules por criativo ──
-  const results = [];
+  const results: Array<Record<string, unknown>> = [];
   let triggered = 0;
   let applied = 0;
 
-  for (const row of result.rows) {
+  for (const row of rows) {
     const totalSpend = Number(row.total_spend ?? 0);
     const totalLeads = Number(row.total_leads ?? 0);
     const totalImpressions = Number(row.total_impressions ?? 0);
@@ -163,9 +151,11 @@ export async function POST(req: NextRequest) {
       const currentStatus = row.status as string;
       if (currentStatus !== "killed" && currentStatus !== "winner") {
         try {
-          await db.execute({
-            sql: `UPDATE creatives SET status = 'killed' WHERE id = ?`,
-            args: [row.id],
+          await withWorkspace(auth.workspace_id, async (tx) => {
+            await tx
+              .update(creatives)
+              .set({ status: "killed" })
+              .where(eq(creatives.id, row.id as string));
           });
           dbUpdated = true;
           applied++;
@@ -203,7 +193,7 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({
     cpl_target: cplTarget,
     control_cpl: controlCpl !== null ? Math.round(controlCpl * 100) / 100 : null,
-    evaluated: result.rows.length,
+    evaluated: rows.length,
     triggered,
     applied,
     dry_run: !shouldApply,
@@ -218,6 +208,6 @@ export async function GET(req: NextRequest) {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({}),
-    })
+    }),
   );
 }

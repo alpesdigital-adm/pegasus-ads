@@ -65,7 +65,7 @@ log "  ✓ Dependências OK, .env encontrado"
 
 if [[ $SKIP_GREP -eq 0 ]]; then
   HITS=$(grep -rlI 'your-super-secret-jwt-token' /apps/ /etc/easypanel/ 2>/dev/null \
-    | grep -Ev '(\.env(\.example)?|\.backup-td006|docs/(tech-debt|migration))' || true)
+    | grep -Ev '(\.env(\.example)?|\.backup-td006|docs/(tech-debt|migration)|scripts/td-006/)' || true)
   if [[ -n "$HITS" ]]; then
     echo "  ✗ Demo secret encontrado em arquivos não-ignoráveis:" >&2
     echo "$HITS" >&2

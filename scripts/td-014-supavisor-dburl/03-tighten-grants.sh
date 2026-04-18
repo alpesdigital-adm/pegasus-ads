@@ -58,7 +58,8 @@ docker exec "$DB_CONTAINER" psql -U supabase_admin -d "$META_DB" -c \
 echo
 
 log "Fix #1: REVOKE CREATE ON SCHEMA _supavisor"
-log "Fix #2: REVOKE privilégios tables em _supabase (schema vazio hoje)"
+log "Fix #2: guard pra schema _supabase se existir (twin 2026-04-18 confirmou"
+log "        que não existe hoje — _supabase é nome do database, não schema)"
 
 docker exec -i "$DB_CONTAINER" psql -U supabase_admin -d "$META_DB" -v ON_ERROR_STOP=1 <<SQL
 -- ============ Fix #1: _supavisor schema ============
@@ -72,21 +73,24 @@ docker exec -i "$DB_CONTAINER" psql -U supabase_admin -d "$META_DB" -v ON_ERROR_
 --   REVOKE CREATE ON SCHEMA _supavisor FROM supavisor_meta;
 REVOKE CREATE ON SCHEMA _supavisor FROM $ROLE;
 
--- ============ Fix #2: _supabase schema ============
--- Schema está vazio hoje. REVOKE ALL PRIVILEGES em tables (que não
--- existem), manter só USAGE + DEFAULT PRIVILEGES pra cobrir caso
--- imagem futura crie tables lá.
-REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA $META_DB FROM $ROLE;
-REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA $META_DB FROM $ROLE;
-
--- Mantém USAGE (precisa pra resolver nomes no schema) + DEFAULT
--- PRIVILEGES (cobertura preventiva)
-GRANT USAGE ON SCHEMA $META_DB TO $ROLE;
-
-ALTER DEFAULT PRIVILEGES IN SCHEMA $META_DB
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO $ROLE;
-ALTER DEFAULT PRIVILEGES IN SCHEMA $META_DB
-  GRANT USAGE ON SEQUENCES TO $ROLE;
+-- ============ Fix #2: schema homônimo "_supabase" (condicional) ============
+-- Gotcha descoberta 2026-04-18: META_DB=_supabase é NOME DO DATABASE, não
+-- schema. O database contém só schemas _supavisor e public. Se no futuro
+-- uma versão do Supavisor criar schema _supabase dentro deste DB, o bloco
+-- abaixo ajusta grants. Por enquanto é no-op.
+DO \$\$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = '_supabase') THEN
+    EXECUTE 'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA _supabase FROM $ROLE';
+    EXECUTE 'REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA _supabase FROM $ROLE';
+    EXECUTE 'GRANT USAGE ON SCHEMA _supabase TO $ROLE';
+    EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA _supabase GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO $ROLE';
+    EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA _supabase GRANT USAGE ON SEQUENCES TO $ROLE';
+    RAISE NOTICE 'Fix #2 aplicado: schema _supabase encontrado, grants ajustados.';
+  ELSE
+    RAISE NOTICE 'Fix #2 skip: schema _supabase não existe (esperado em clusters atuais).';
+  END IF;
+END \$\$;
 SQL
 
 ok "GRANTs tightened"

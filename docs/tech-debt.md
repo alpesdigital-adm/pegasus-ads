@@ -232,26 +232,57 @@ Neon inteiro some — leva as tabelas junto.
 
 ---
 
-## TD-007 — Staging Queue v1.5 schemas ausentes 🔴 open
+## TD-007 — Staging Queue — spec v2 aprovada 🟡 in-progress
 
 **Descoberto:** 2026-04-17 (Fase 1A da migração)
-**Dono:** Leandro (doc de especificação) + Claude (implementação)
-**Impacto:** o plano v1.4 referencia tabelas da "Staging Queue v1.5"
-(`publication_batches`, `publication_steps`, `step_dependencies`, `step_events`,
-`ad_blueprints`, `blueprint_versions`) mas o documento v1.5 com especificação
-completa de colunas NÃO está no repo. Sem ele, criar os schemas Drizzle é
-chute.
+**Atualizado:** 2026-04-18 (decisão de produto do Leandro + spec commitada)
+**Dono:** Leandro (decisões tomadas) + Claude (implementação)
+**Impacto:** bloqueio de especificação resolvido. Leandro escolheu
+**opção A (Build completo)** rejeitando Simplify porque custo de manter
+versão capenga + rebuild futuro é maior que fazer certo de uma vez.
 
-**Contexto:** o plano diz que os schemas devem existir na Fase 1 para evitar
-migration adicional depois. Mas criar schemas com colunas especulativas gera
-dívida real — a migration final terá que alterar tipo/nome/constraint.
+**Spec aprovada:** `docs/staging-queue-v2.md` (commit 82fcfb0, 1994 linhas)
 
-**Como resolver:** finalizar o doc `docs/staging-queue-v1.5.md` com
-especificação de colunas ANTES de adicionar os schemas Drizzle. Depois,
-adicionar em PR separado (Fase 1E ou Fase 6 antecipada).
+**Decisões de design (D1-D6):**
+- D1: Build completo — 4 tabelas, DAG, state machines, event log
+- D2: MVP com full DAG, sem blueprints, sem worker distribuído, sem
+  throttling global cross-workspace
+- D3: Worker cron+HTTP (pattern validado em `sync-all`/`collect`)
+- D4: Idempotência por verificação (GET antes de POST) + reconciliation
+  job semanal
+- D5: `dbAdmin` (BYPASSRLS) + filtro manual de workspace (pattern CRM)
+- D6: Activation Mode — ads criados PAUSED (default `after_all`),
+  ativados em lote no final. Modo `immediate` disponível pra reposição
+  urgente.
 
-**Quando:** antes da Fase 6 ou quando a feature de staging queue for
-priorizada (o que vier primeiro).
+**Arquitetura (4 tabelas):**
+- `publication_batches` — state machine scheduled→pending→running→paused→
+  succeeded/failed/partial_success/cancelled
+- `publication_steps` — unidade atômica retriable, 8 estados, backoff
+  5s→320s
+- `step_dependencies` — DAG com propagação de outputs (outputKey→inputKey)
+- `step_events` — append-only log pra debug/auditoria/progresso
+
+**Features completas do MVP:**
+- Pause/Resume mid-publication (entre steps)
+- Publicação agendada (`scheduled_at` promovido pelo worker)
+- Frontend real-time via Supabase Realtime (3 channels)
+- Progresso intra-step pra upload de vídeo
+- ETA dinâmico por média de step duration
+- 16+ step handlers
+- Migração incremental via feature flag `USE_STAGING_QUEUE`
+- Cancel seguro (after_all deixa ads PAUSED, zero spend)
+
+**Estimativa:** 12-15 dias de implementação.
+
+**Débitos aceitos (fora do MVP):**
+- Sem throttling global cross-workspace (0.5 dia quando necessário)
+- Sem two-phase commit (coberto por reconciliation)
+- Sem blueprints (`ad_blueprints`/`blueprint_versions` — 3 dias quando
+  virar prioridade de negócio)
+
+**Quando implementar:** próxima fase de engenharia. Leandro priorizou
+como fundação pra import pipeline (Fase 6 do plano v1.4).
 
 ---
 

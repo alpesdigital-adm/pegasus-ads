@@ -20,10 +20,19 @@
 // Demais handlers reais virão em commits incrementais.
 
 import { dbAdmin } from "@/lib/db";
-import { testRounds } from "@/lib/db/schema";
-import { eq, sql } from "drizzle-orm";
+import {
+  testRounds,
+  testRoundVariants,
+  publishedAds as publishedAdsTable,
+  creatives as creativesTable,
+  publicationSteps,
+} from "@/lib/db/schema";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import * as meta from "@/lib/meta";
-import { verifyPrePublish as runVerifyPrePublish } from "@/lib/ai-verify";
+import {
+  verifyPrePublish as runVerifyPrePublish,
+  verifyPostPublish as runVerifyPostPublish,
+} from "@/lib/ai-verify";
 import { generateMetaAdName } from "@/lib/creative-naming";
 import { UTM_TEMPLATE } from "@/config/campaigns";
 import { logger } from "@/lib/logger";
@@ -646,6 +655,451 @@ async function handleCreateAdSet(
   };
 }
 
+// ─── create_ad ────────────────────────────────────────────────────────────
+/**
+ * Cria ad na Meta vinculando adSet + creative. Status determinado por
+ * activationMode do batch:
+ *   - 'after_all' → PAUSED (activate_ads ativa em lote no fim, zero-spend
+ *                   em cancelamento mid-batch)
+ *   - 'immediate' → ACTIVE (comportamento legacy)
+ *
+ * Input:
+ *   - accountId               ← load_context
+ *   - adName                  ← factory (nome do ad lógico)
+ *   - metaAdsetId             ← create_adset (outputKey='metaAdsetId')
+ *   - metaCreativeId          ← create_creative
+ *   - activationMode          ← factory (copiado do batch.activation_mode)
+ *   - variantPairIndex        ← factory (índice pra persist_results correlacionar)
+ *
+ * Output: { metaAdId, metaEntityId, metaEntityType='ad', adName, status,
+ *           variantPairIndex }
+ */
+async function handleCreateAd(
+  input: Record<string, unknown>,
+  workspaceId: string,
+): Promise<Record<string, unknown>> {
+  const accountId = input.accountId as string | undefined;
+  const adName = input.adName as string | undefined;
+  const metaAdsetId = input.metaAdsetId as string | undefined;
+  const metaCreativeId = input.metaCreativeId as string | undefined;
+  const activationMode =
+    (input.activationMode as string | undefined) ?? "after_all";
+
+  if (!accountId || !adName || !metaAdsetId || !metaCreativeId) {
+    throw new Error(
+      "META_VALIDATION: create_ad requires accountId, adName, metaAdsetId, metaCreativeId",
+    );
+  }
+
+  const initialStatus: "PAUSED" | "ACTIVE" =
+    activationMode === "immediate" ? "ACTIVE" : "PAUSED";
+
+  const result = await meta.createAd({
+    accountId,
+    workspaceId,
+    adSetId: metaAdsetId,
+    creativeId: metaCreativeId,
+    name: adName,
+    status: initialStatus,
+  });
+
+  log.info(
+    { adName, adId: result.id, initialStatus, activationMode },
+    "ad created",
+  );
+
+  return {
+    metaAdId: result.id,
+    metaEntityId: result.id,
+    metaEntityType: "ad",
+    adName,
+    status: initialStatus,
+    variantPairIndex: input.variantPairIndex ?? null,
+  };
+}
+
+// ─── activate_ads ─────────────────────────────────────────────────────────
+/**
+ * Ativa em lote todos os ads criados pelo batch (modo 'after_all').
+ * Lista create_ad steps succeeded e chama Meta updateAdStatus('ACTIVE').
+ *
+ * Best-effort: falha individual de um ad não derruba o step — só zera o
+ * batch inteiro se NENHUM ad conseguiu ativar (activate_ads.status='failed'
+ * → test_rounds.status='failed' via finalizeBatch).
+ *
+ * Input: { batchId, accountId }
+ * Output: { totalAds, activated, failed, failures: [{adId, error}] }
+ */
+async function handleActivateAds(
+  input: Record<string, unknown>,
+  workspaceId: string,
+): Promise<Record<string, unknown>> {
+  const batchId = input.batchId as string | undefined;
+  if (!batchId) {
+    throw new Error("META_VALIDATION: activate_ads requires batchId");
+  }
+
+  // Busca create_ad steps succeeded do batch (BYPASSRLS + filtro workspace)
+  const adSteps = await dbAdmin
+    .select({
+      stepId: publicationSteps.id,
+      outputData: publicationSteps.outputData,
+    })
+    .from(publicationSteps)
+    .where(
+      and(
+        eq(publicationSteps.batchId, batchId),
+        eq(publicationSteps.workspaceId, workspaceId),
+        eq(publicationSteps.stepType, "create_ad"),
+        eq(publicationSteps.status, "succeeded"),
+      ),
+    );
+
+  if (adSteps.length === 0) {
+    throw new Error(
+      "activate_ads: no succeeded create_ad steps — nothing to activate",
+    );
+  }
+
+  const failures: Array<{ adId: string; error: string }> = [];
+  let activated = 0;
+
+  for (const step of adSteps) {
+    const output = (step.outputData ?? {}) as Record<string, unknown>;
+    const adId = output.metaAdId as string | undefined;
+    if (!adId) {
+      failures.push({
+        adId: String(step.stepId),
+        error: "create_ad output missing metaAdId",
+      });
+      continue;
+    }
+
+    try {
+      await meta.updateAdStatus(adId, "ACTIVE", workspaceId);
+      activated++;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      failures.push({ adId, error: msg });
+      log.warn({ adId, err: msg }, "activate_ads: ad failed to activate");
+    }
+  }
+
+  log.info(
+    { batchId, total: adSteps.length, activated, failed: failures.length },
+    "activate_ads completed",
+  );
+
+  if (activated === 0) {
+    throw new Error(
+      `activate_ads: zero ads activated out of ${adSteps.length} — all failures: ${JSON.stringify(failures)}`,
+    );
+  }
+
+  return {
+    totalAds: adSteps.length,
+    activated,
+    failed: failures.length,
+    failures,
+  };
+}
+
+// ─── verify_post_publish ──────────────────────────────────────────────────
+/**
+ * Verifica pós-publicação: conta create_ad steps succeeded vs expected.
+ *
+ * Input:  { batchId, expectedCount }
+ * Output: VerificationCheckpoint (passed, checks)
+ *
+ * Se !passed → throw META_VALIDATION (non-retryable: ads faltando não se
+ * materializam em retry). Conservador — força batch a failed/partial.
+ */
+async function handleVerifyPostPublish(
+  input: Record<string, unknown>,
+  workspaceId: string,
+): Promise<Record<string, unknown>> {
+  const batchId = input.batchId as string | undefined;
+  const expectedCount = Number(input.expectedCount ?? 0);
+  if (!batchId || !expectedCount) {
+    throw new Error(
+      "META_VALIDATION: verify_post_publish requires batchId and expectedCount",
+    );
+  }
+
+  const adSteps = await dbAdmin
+    .select({
+      stepId: publicationSteps.id,
+      outputData: publicationSteps.outputData,
+      status: publicationSteps.status,
+    })
+    .from(publicationSteps)
+    .where(
+      and(
+        eq(publicationSteps.batchId, batchId),
+        eq(publicationSteps.workspaceId, workspaceId),
+        eq(publicationSteps.stepType, "create_ad"),
+      ),
+    );
+
+  const succeeded = adSteps.filter((s) => s.status === "succeeded");
+  const adsCreated = succeeded.map((s) => {
+    const out = (s.outputData ?? {}) as Record<string, unknown>;
+    return {
+      adId: String(out.metaAdId ?? ""),
+      adName: String(out.adName ?? ""),
+      status: String(out.status ?? "UNKNOWN"),
+    };
+  });
+
+  const result = runVerifyPostPublish({
+    adsCreated,
+    expectedCount,
+  });
+
+  if (!result.passed) {
+    throw new Error(
+      `META_VALIDATION: post_publish failed — ${result.issues.join("; ")}`,
+    );
+  }
+
+  return {
+    passed: true,
+    score: result.score,
+    issues: result.issues,
+    suggestions: result.suggestions,
+    adsVerified: adsCreated.length,
+  };
+}
+
+// ─── persist_results ──────────────────────────────────────────────────────
+/**
+ * Step final: escreve os resultados do batch no banco local com atomicidade.
+ * Espelha a Persistência do pipeline legacy (publish.ts:289-328) — testRoundVariants
+ * marked como 'published' + publishedAds linha por feed/stories + creatives
+ * status='testing'.
+ *
+ * Input: { testRoundId, batchId }
+ * Side effects (transação dbAdmin):
+ *   - UPDATE testRoundVariants SET metaAdId/metaAdsetId/metaCreativeId, status='published'
+ *   - INSERT publishedAds (2 rows por pair: feed + stories)
+ *   - UPDATE creatives SET status='testing'
+ * Output: { variantsUpdated, publishedAdsInserted, creativesMarkedTesting }
+ *
+ * Reconstrução do contexto via queries nos steps do batch:
+ *   - load_context → variantPairs + adSetTemplate.name
+ *   - upload_image[feed/stories] (correlacionados por variantPairIndex) → imageHash
+ *   - create_ad → metaAdId/metaCreativeId/variantPairIndex
+ *   - create_adset → metaAdsetId (1 por pair)
+ */
+async function handlePersistResults(
+  input: Record<string, unknown>,
+  workspaceId: string,
+): Promise<Record<string, unknown>> {
+  const testRoundId = input.testRoundId as string | undefined;
+  const batchId = input.batchId as string | undefined;
+  if (!testRoundId || !batchId) {
+    throw new Error(
+      "META_VALIDATION: persist_results requires testRoundId and batchId",
+    );
+  }
+
+  // 1. load_context — tira variantPairs + adSetTemplate.name
+  const [loadStep] = await dbAdmin
+    .select({ outputData: publicationSteps.outputData })
+    .from(publicationSteps)
+    .where(
+      and(
+        eq(publicationSteps.batchId, batchId),
+        eq(publicationSteps.workspaceId, workspaceId),
+        eq(publicationSteps.stepType, "load_context"),
+        eq(publicationSteps.status, "succeeded"),
+      ),
+    )
+    .limit(1);
+
+  if (!loadStep) {
+    throw new Error(
+      "persist_results: load_context step not found or not succeeded",
+    );
+  }
+
+  const loadOutput = (loadStep.outputData ?? {}) as Record<string, unknown>;
+  const variantPairs = (loadOutput.variantPairs as VariantPair[]) ?? [];
+  const adSetTemplate = loadOutput.adSetTemplate as AdSetTemplate | undefined;
+  if (variantPairs.length === 0 || !adSetTemplate) {
+    throw new Error(
+      "persist_results: load_context output missing variantPairs or adSetTemplate",
+    );
+  }
+
+  // 2. create_ad / create_adset / upload_image — indexados por variantPairIndex
+  const [adSteps, adSetSteps, uploadSteps] = await Promise.all([
+    dbAdmin
+      .select({ inputData: publicationSteps.inputData, outputData: publicationSteps.outputData })
+      .from(publicationSteps)
+      .where(
+        and(
+          eq(publicationSteps.batchId, batchId),
+          eq(publicationSteps.workspaceId, workspaceId),
+          eq(publicationSteps.stepType, "create_ad"),
+          eq(publicationSteps.status, "succeeded"),
+        ),
+      ),
+    dbAdmin
+      .select({ inputData: publicationSteps.inputData, outputData: publicationSteps.outputData })
+      .from(publicationSteps)
+      .where(
+        and(
+          eq(publicationSteps.batchId, batchId),
+          eq(publicationSteps.workspaceId, workspaceId),
+          eq(publicationSteps.stepType, "create_adset"),
+          eq(publicationSteps.status, "succeeded"),
+        ),
+      ),
+    dbAdmin
+      .select({ inputData: publicationSteps.inputData, outputData: publicationSteps.outputData })
+      .from(publicationSteps)
+      .where(
+        and(
+          eq(publicationSteps.batchId, batchId),
+          eq(publicationSteps.workspaceId, workspaceId),
+          eq(publicationSteps.stepType, "upload_image"),
+          eq(publicationSteps.status, "succeeded"),
+        ),
+      ),
+  ]);
+
+  // Indexa por variantPairIndex
+  function indexByPair<T>(
+    rows: Array<{ inputData: unknown; outputData: unknown }>,
+    extract: (input: Record<string, unknown>, output: Record<string, unknown>) => T | null,
+  ): Map<number, T> {
+    const map = new Map<number, T>();
+    for (const r of rows) {
+      const inp = (r.inputData ?? {}) as Record<string, unknown>;
+      const out = (r.outputData ?? {}) as Record<string, unknown>;
+      const idx = inp.variantPairIndex as number | undefined;
+      if (idx === undefined) continue;
+      const value = extract(inp, out);
+      if (value !== null) map.set(idx, value);
+    }
+    return map;
+  }
+
+  const adByPair = indexByPair(adSteps, (_, out) => {
+    const id = out.metaAdId as string | undefined;
+    return id ? { metaAdId: id } : null;
+  });
+  const adSetByPair = indexByPair(adSetSteps, (_, out) => {
+    const id = out.metaAdsetId as string | undefined;
+    return id ? { metaAdsetId: id } : null;
+  });
+  // upload_image tem 2 por pair (feed + stories) — chave composta
+  const uploadByPairPlacement = new Map<string, string>(); // key: `${idx}:${placement}` → hash
+  for (const r of uploadSteps) {
+    const inp = (r.inputData ?? {}) as Record<string, unknown>;
+    const out = (r.outputData ?? {}) as Record<string, unknown>;
+    const idx = inp.variantPairIndex as number | undefined;
+    const placement = inp.placement as string | undefined;
+    const hash = out.imageHash as string | undefined;
+    if (idx === undefined || !placement || !hash) continue;
+    uploadByPairPlacement.set(`${idx}:${placement}`, hash);
+  }
+
+  // create_creative não é necessário pra persist (metaCreativeId vem via
+  // propagação no input do create_ad). Puxa do create_ad input.
+  const creativeByPair = indexByPair(adSteps, (inp) => {
+    const id = inp.metaCreativeId as string | undefined;
+    return id ? { metaCreativeId: id } : null;
+  });
+
+  // 3. Transação: 2 inserts publishedAds + 1 update variants + 1 update creatives por pair
+  let variantsUpdated = 0;
+  let publishedAdsInserted = 0;
+  let creativesMarkedTesting = 0;
+
+  await dbAdmin.transaction(async (tx) => {
+    for (let i = 0; i < variantPairs.length; i++) {
+      const pair = variantPairs[i];
+      const ad = adByPair.get(i);
+      const adSet = adSetByPair.get(i);
+      const creative = creativeByPair.get(i);
+      const feedHash = uploadByPairPlacement.get(`${i}:feed`);
+      const storiesHash = uploadByPairPlacement.get(`${i}:stories`);
+
+      if (!ad || !adSet || !creative || !feedHash || !storiesHash) {
+        log.warn(
+          { adName: pair.adName, i, hasAd: !!ad, hasAdSet: !!adSet, hasCreative: !!creative, hasFeedHash: !!feedHash, hasStoriesHash: !!storiesHash },
+          "persist_results: skipping pair — incomplete step outputs",
+        );
+        continue;
+      }
+
+      const variantIds = [pair.feed?.variantId, pair.stories?.variantId].filter(
+        Boolean,
+      ) as string[];
+      const creativeIds = [pair.feed?.creativeId, pair.stories?.creativeId].filter(
+        Boolean,
+      ) as string[];
+
+      if (variantIds.length > 0) {
+        const updated = await tx
+          .update(testRoundVariants)
+          .set({
+            metaAdId: ad.metaAdId,
+            metaAdsetId: adSet.metaAdsetId,
+            metaCreativeId: creative.metaCreativeId,
+            status: "published",
+          })
+          .where(inArray(testRoundVariants.id, variantIds))
+          .returning({ id: testRoundVariants.id });
+        variantsUpdated += updated.length;
+      }
+
+      for (const [variant, placement, imageHash] of [
+        [pair.feed, "feed", feedHash],
+        [pair.stories, "stories", storiesHash],
+      ] as const) {
+        if (!variant) continue;
+        await tx.insert(publishedAdsTable).values({
+          workspaceId,
+          variantId: variant.variantId,
+          creativeId: variant.creativeId,
+          metaAdId: ad.metaAdId,
+          metaAdsetId: adSet.metaAdsetId,
+          metaCreativeId: creative.metaCreativeId,
+          metaImageHash: imageHash,
+          adName: pair.adName,
+          adsetName: adSetTemplate.name,
+          placement,
+          status: "pending_review",
+        });
+        publishedAdsInserted++;
+      }
+
+      if (creativeIds.length > 0) {
+        const updated = await tx
+          .update(creativesTable)
+          .set({ status: "testing" })
+          .where(inArray(creativesTable.id, creativeIds))
+          .returning({ id: creativesTable.id });
+        creativesMarkedTesting += updated.length;
+      }
+    }
+  });
+
+  log.info(
+    { testRoundId, batchId, variantsUpdated, publishedAdsInserted, creativesMarkedTesting },
+    "persist_results completed",
+  );
+
+  return {
+    variantsUpdated,
+    publishedAdsInserted,
+    creativesMarkedTesting,
+  };
+}
+
 // ─── stubs ────────────────────────────────────────────────────────────────
 /**
  * Stub — lança NOT_IMPLEMENTED pra forçar isNonRetryable=true → falha
@@ -671,11 +1125,11 @@ export const stepHandlers: Record<string, StepHandler> = {
   create_creative: handleCreateCreative,
   create_adset: handleCreateAdSet,
 
-  // ── Fase 2C-D (próximos commits) ──
-  create_ad: notImplemented("create_ad"),
-  verify_post_publish: notImplemented("verify_post_publish"),
-  activate_ads: notImplemented("activate_ads"),
-  persist_results: notImplemented("persist_results"),
+  // ── Fase 2C (implementados neste commit) ──
+  create_ad: handleCreateAd,
+  activate_ads: handleActivateAds,
+  verify_post_publish: handleVerifyPostPublish,
+  persist_results: handlePersistResults,
 
   // ── Não usados por test_round_publish — implementar por demanda ──
   upload_video: notImplemented("upload_video"),

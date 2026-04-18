@@ -31,6 +31,7 @@ import {
   adminCreateUser,
   adminGetUserByEmail,
   adminSendPasswordReset,
+  adminUpdateUser,
   GotrueHttpError,
 } from "@/lib/supabase-auth";
 import { and, eq, isNull } from "drizzle-orm";
@@ -89,8 +90,19 @@ async function runMigration(opts: RunOptions): Promise<MigrationResult> {
 
   for (const row of pendingRows) {
     try {
-      // Evita duplicar se o user já existe no gotrue (re-run após falha parcial)
+      // Evita duplicar se o user já existe no gotrue (re-run após falha parcial).
+      // adminGetUserByEmail faz filtro client-side — retorna null OU user com
+      // email exato. Mesmo assim validamos aqui como defense-in-depth.
       let gotrueUser = await adminGetUserByEmail(row.email);
+
+      if (gotrueUser && gotrueUser.email?.toLowerCase() !== row.email.toLowerCase()) {
+        // Não deveria acontecer (adminGetUserByEmail valida), mas se gotrue
+        // devolver mismatch por alguma razão, ABORTA em vez de linkar errado
+        // (bug do dia 2026-04-18 — ligou Leandro a leandro@pegasus-crm.test).
+        throw new Error(
+          `gotrue retornou user com email ${gotrueUser.email} pra query ${row.email}. Aborted pra evitar link incorreto.`,
+        );
+      }
 
       if (!gotrueUser) {
         const password = opts.setPassword ?? crypto.randomBytes(24).toString("base64url");
@@ -101,7 +113,13 @@ async function runMigration(opts: RunOptions): Promise<MigrationResult> {
           user_metadata: { name: row.name, migrated_from_scrypt: true },
         });
       } else {
-        console.log(`[phase-2] ${row.email}: já existe no gotrue (${gotrueUser.id}) — só linkando.`);
+        console.log(`[phase-2] ${row.email}: já existe no gotrue (${gotrueUser.id}).`);
+        // Se --set-password foi passado, atualiza a senha do user existente
+        // pra garantir login imediato (antes o script só logava e pulava).
+        if (opts.setPassword) {
+          await adminUpdateUser(gotrueUser.id, { password: opts.setPassword });
+          console.log(`[phase-2] ${row.email}: senha atualizada via adminUpdateUser.`);
+        }
       }
 
       await dbAdmin

@@ -248,15 +248,45 @@ export async function adminSendPasswordReset(email: string, redirectTo?: string)
 }
 
 export async function adminGetUserByEmail(email: string): Promise<SupabaseUser | null> {
+  // ATENÇÃO: gotrue NÃO suporta filtro por email em GET /admin/users — o
+  // parâmetro ?email= é silenciosamente ignorado e a lista inteira volta
+  // paginada. Bug detectado em prod (2026-04-18) após script confiar em
+  // users[0] e ligar user errado. Fix: fetch paginado + filtro client-side.
   try {
-    const { users } = await gotrueFetch<{ users: SupabaseUser[] }>(
-      `/admin/users?email=${encodeURIComponent(email)}`,
-      { method: "GET", useServiceRole: true },
-    );
-    return users[0] ?? null;
+    const emailLower = email.toLowerCase();
+    const perPage = 1000;
+    for (let page = 1; page < 100; page++) {
+      const { users } = await gotrueFetch<{ users: SupabaseUser[] }>(
+        `/admin/users?page=${page}&per_page=${perPage}`,
+        { method: "GET", useServiceRole: true },
+      );
+      if (!users || users.length === 0) return null;
+      const match = users.find((u) => u.email?.toLowerCase() === emailLower);
+      if (match) return match;
+      if (users.length < perPage) return null;
+    }
+    return null;
   } catch {
     return null;
   }
+}
+
+export interface AdminUpdateUserInput {
+  password?: string;
+  email?: string;
+  user_metadata?: Record<string, unknown>;
+  app_metadata?: Record<string, unknown>;
+}
+
+export async function adminUpdateUser(
+  userId: string,
+  input: AdminUpdateUserInput,
+): Promise<SupabaseUser> {
+  return gotrueFetch<SupabaseUser>(`/admin/users/${userId}`, {
+    method: "PUT",
+    useServiceRole: true,
+    body: JSON.stringify(input),
+  });
 }
 
 // ── Cookie helpers ─────────────────────────────────────────────────────────

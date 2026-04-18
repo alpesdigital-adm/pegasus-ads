@@ -6,14 +6,10 @@ import {
 
 const PUBLIC_PATHS = ["/login", "/register", "/api/auth/", "/api/docs"];
 
-// Fase 2 introduziu cookies sb-access-token + sb-refresh-token (gotrue).
-// Aceitar qualquer um dos três como "tem auth" — validação real fica com
-// requireAuth() nos route handlers / pages.
-const AUTH_COOKIES = [
-  "pegasus_session",
-  SUPABASE_ACCESS_COOKIE,
-  SUPABASE_REFRESH_COOKIE,
-];
+// Fase 2 PR 2c: só cookies Supabase. Path legado `pegasus_session` removido
+// junto com a sessions table. Validação real fica com requireAuth() nos
+// route handlers / pages.
+const AUTH_COOKIES = [SUPABASE_ACCESS_COOKIE, SUPABASE_REFRESH_COOKIE];
 
 // Proxy (sucessor de middleware em Next 16) roda em contexto isolado das
 // routes — module-level state NÃO é compartilhado. Por isso não

@@ -149,21 +149,29 @@ clients migrados, remover o branch `TEST_LOG_API_KEY` do fluxo de auth.
 
 ---
 
-## TD-004 — Tabelas `users` e `sessions` obsoletas 🟡 in-progress
+## TD-004 — Tabelas `users` e `sessions` obsoletas 🟢 done
 
 **Descoberto:** 2026-04-17 (plano v1.3, seção 6.7)
-**Atualizado:** 2026-04-18 (cutover bridge — `users`/`sessions` migrados para
-pegasus_ads via `scripts/cutover/05-bridge-users-sessions.sh` porque sem eles
-login quebraria pós-swap; Fase 2 ainda em backlog)
-**Dono:** Claude (Fase 5, condicional à Fase 2 estabilizar)
-**Impacto:** duas tabelas que agora vivem em DOIS lugares — pegasus_ads
-(bridge ativa) e Neon (legado). Ambas continuam idênticas em estrutura. Vão
-ser substituídas por `auth.users` (gotrue) na Fase 2.
+**Atualizado:** 2026-04-18 (Fase 2 PR 2c — sessions dropado, password_hash
+removido, users vira profile local)
+**Dono:** Claude
+**Impacto:** resolvido. Migração completa pra Supabase gotrue (auth.users).
+public.users continua como profile local (name, avatar_url, auth_user_id
+NOT NULL), mas credencial mora em auth.users. sessions table foi dropada
+junto com o path scrypt/bcrypt de login.
 
-**Como resolver:** após Fase 2 + 30 dias estável sem regressão, `DROP TABLE
-users, sessions` no pegasus_ads (Neon já vai estar desligado nesse ponto).
+**Estado final (migration 0008):**
+- ✅ `DROP TABLE sessions CASCADE`
+- ✅ `ALTER TABLE users DROP COLUMN password_hash`
+- ✅ `ALTER TABLE users ALTER COLUMN auth_user_id SET NOT NULL`
+- ✅ bcryptjs removido do package.json
+- ✅ `/api/auth/login` só Supabase (sem fallback scrypt)
+- ✅ `/api/workspaces/switch` usa cookie `pegasus_workspace_id` em vez de
+  atualizar sessions.workspace_id
 
-**Quando:** 30 dias após Fase 2 + cleanup do Neon.
+**Cleanup de Neon:** o Neon blue ainda tem as tabelas antigas (bridge
+step 05). Quando rodar `scripts/cutover/04-remove-blue.sh` (pós-Fase 5),
+Neon inteiro some — leva as tabelas junto.
 
 ---
 

@@ -36,8 +36,8 @@ const OPENAPI_SPEC = {
       SessionAuth: {
         type: "apiKey",
         in: "cookie",
-        name: "pegasus_session",
-        description: "Cookie de sessão — obtido via POST /api/auth/login ou /api/auth/register",
+        name: "sb-access-token",
+        description: "Cookie de sessão Supabase Auth (gotrue JWT) — obtido via POST /api/auth/login ou /api/auth/register",
       },
       WorkspaceApiKey: {
         type: "apiKey",

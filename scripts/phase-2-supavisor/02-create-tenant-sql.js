@@ -2,23 +2,33 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 /**
  * Phase 2 — Supavisor Pooling (TD-002)
- * 02-create-tenant-sql.js — fallback quando RPC não disponível
+ * 02-create-tenant-sql.js — fallback quando RPC + eval não disponíveis
  *
- * Cifra a senha do pegasus_ads_app via AES-GCM usando VAULT_ENC_KEY do
- * Supavisor + INSERTa tenant/user no schema moderno (_supavisor.tenants +
- * _supavisor.users).
+ * ⚠️ AVISO CRÍTICO (descoberto 2026-04-18):
+ * Este script produz AES-GCM RAW (iv + ciphertext + authTag), mas
+ * Supavisor moderno usa Cloak.Ciphers.AES.GCM com envelope próprio:
+ *   <<version:1, tag_len:1, tag:N, iv:12, ciphertext+auth_tag:N>>
  *
- * Pré-req: 01-inspect.sh confirmou schema moderno, RPC não disponível.
+ * Resultado: INSERT vai passar, mas quando Supavisor tentar DECRYPT a senha
+ * no startup ou no dispatch, erro `cannot load ... as type
+ * Supavisor.Encrypted.Binary`.
  *
- * Uso:
+ * CAMINHO CANONICO (funciona em todas versões):
+ *   Usar `/app/bin/supavisor eval` (NÃO sofre do FQDN issue do `rpc`) pra
+ *   chamar Cloak direto — encryption automática no formato certo:
+ *
+ *   docker exec alpes-ads_supabase-supavisor-1 /app/bin/supavisor eval '
+ *     {:ok, ciphertext} = Supavisor.Vault.encrypt("password")
+ *     IO.puts(Base.encode16(ciphertext))
+ *   '
+ *
+ * Este script fica preservado pra emergência (ex: eval também quebrado) mas
+ * PRECISA verificar round-trip contra Cloak antes de usar em prod.
+ *
+ * Uso (CUIDADO):
  *   VAULT_ENC_KEY=$(docker exec alpes-ads_supabase-supavisor-1 printenv VAULT_ENC_KEY) \
  *   DB_APP_PASSWORD='senha' \
  *   node 02-create-tenant-sql.js
- *
- * Output: SQL ready-to-run pra copiar/colar em psql supabase_admin.
- *
- * POR QUE JS: AES-GCM em bash é inviável. Node crypto.createCipheriv é
- * nativo + portátil.
  */
 
 const crypto = require("crypto");

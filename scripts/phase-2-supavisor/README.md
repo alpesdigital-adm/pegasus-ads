@@ -16,16 +16,33 @@ storage).
 ```
 01-inspect.sh
   │
-  ├─ RPC disponível (/app/bin/supavisor existe)?
-  │    SIM → 02-create-tenant-rpc.sh  (caminho feliz, encryption Elixir interna)
-  │    NÃO → 02-create-tenant-sql.js  (extrai VAULT_ENC_KEY, cifra AES-GCM via Node, INSERT SQL)
+  ▼
+02-create-tenant-eval.sh  ← CANONICO (funciona em todas versões)
+  │                        usa `supavisor eval` pra Cloak encrypt + SQL
   │
-  ├─ 03-smoke.sh  (crítico — valida SET LOCAL em transaction mode)
+  ▼ (se eval falhar, fallbacks não recomendados:)
+  │   02-create-tenant-rpc.sh  ← falha com noconnection se hostname short
+  │   02-create-tenant-sql.js  ← AES-GCM raw ≠ formato Cloak (auth_tag quebra)
+  │
+  ▼
+03-smoke.sh  (crítico — valida SET LOCAL em transaction mode)
   │    PASS → 04-cutover.sh
   │    FAIL → revert (não fazer cutover)
   │
   └─ Monitor 1h, se OK fica, se quebrar: restore backup do .env
 ```
+
+### Por que eval é o caminho canonico (aprendizado de 2026-04-18)
+
+- **RPC** (`supavisor rpc`): depende de Erlang distribution + FQDN. Quebra
+  em containers com hostname short (`noconnection` / `Hostname X is illegal`).
+- **SQL + AES-GCM via Node** (`02-create-tenant-sql.js`): produz envelope
+  RAW (iv + ciphertext + authTag). Cloak usa envelope próprio
+  `<<version:1, tag_len:1, tag:N, iv:12, ciphertext+auth_tag:N>>`. Resulta
+  em `cannot load ... as type Supavisor.Encrypted.Binary` quando o
+  Supavisor tenta decifrar.
+- **Eval** (`supavisor eval`): roda no BEAM do release sem dependência de
+  distribution + encryption via Cloak nativo. Funciona em todas versões.
 
 ## O que cada script faz
 

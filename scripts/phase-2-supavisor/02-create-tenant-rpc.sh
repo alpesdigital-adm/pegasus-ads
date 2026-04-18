@@ -3,11 +3,17 @@
 # Phase 2 — Supavisor Pooling (TD-002)
 # 02-create-tenant-rpc.sh — cria tenant pegasus_ads via Elixir RPC
 # =============================================================================
-# CAMINHO FELIZ: usa /app/bin/supavisor rpc pra chamar
-# Supavisor.Tenants.create_tenant/1 direto no runtime — encryption da senha
-# é tratada internamente, sem precisar mexer com VAULT_ENC_KEY + AES-GCM.
+# ⚠️ AVISO (descoberto 2026-04-18): RPC pode falhar com `noconnection` /
+# `Hostname X is illegal` em builds onde RELEASE_DISTRIBUTION=name exige FQDN
+# mas o container tem hostname short (ex: 02f8816e2536). Se bater isso,
+# usar `eval` (NÃO sofre do mesmo issue):
 #
-# Pré-req: 01-inspect.sh confirmou que RPC está disponível.
+#   docker exec alpes-ads_supabase-supavisor-1 /app/bin/supavisor eval \
+#     'Supavisor.Tenants.create_tenant(%{...})'
+#
+# CAMINHO FELIZ (quando RPC funciona): usa /app/bin/supavisor rpc pra chamar
+# Supavisor.Tenants.create_tenant/1 direto no runtime — encryption da senha
+# é tratada internamente (Cloak).
 #
 # Uso:
 #   DB_APP_PASSWORD='senha_do_pegasus_ads_app' bash 02-create-tenant-rpc.sh

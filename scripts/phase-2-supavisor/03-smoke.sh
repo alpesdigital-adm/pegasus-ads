@@ -50,10 +50,12 @@ out=$(run_psql "SELECT 1+1")
 
 banner "Teste 3 — SET LOCAL persiste dentro da transação"
 # Simula withWorkspace() — SET LOCAL + SELECT depois dele, tudo no mesmo BEGIN
+# Nota: psql emite output pra cada comando (BEGIN, SET, SELECT, COMMIT).
+# `tail -1` pegava "COMMIT" — precisamos do penúltimo (valor do SELECT).
 out=$(run_psql "BEGIN;
 SELECT set_config('app.workspace_id', 'test-uuid-smoke-ws', true);
 SELECT current_setting('app.workspace_id', true) AS ws_id;
-COMMIT;" | tail -1)
+COMMIT;" | grep -v '^$' | tail -2 | head -1)
 if [[ "$out" == "test-uuid-smoke-ws" ]]; then
   pass "SET LOCAL persiste — RLS vai funcionar"
 else

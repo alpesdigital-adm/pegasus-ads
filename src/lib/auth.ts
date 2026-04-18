@@ -19,6 +19,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { dbAdmin, sql } from "./db";
 import {
   sessions,
+  users,
   workspaceMembers,
   apiKeys,
   workspaces,
@@ -26,6 +27,10 @@ import {
 } from "./db/schema";
 import { and, asc, desc, eq, gt, isNull } from "drizzle-orm";
 import crypto from "crypto";
+import {
+  verifySupabaseJwt,
+  SUPABASE_ACCESS_COOKIE,
+} from "./supabase-auth";
 
 // ── Types ──
 
@@ -62,7 +67,7 @@ export interface AuthContext {
   user_id: string;
   workspace_id: string;
   role: "owner" | "admin" | "member";
-  auth_method: "session" | "api_key";
+  auth_method: "supabase" | "session" | "api_key";
 }
 
 // ── Session Management (simple token-based) ──
@@ -199,15 +204,88 @@ export function generateApiKey(): string {
   return `pgs_${crypto.randomBytes(24).toString("hex")}`;
 }
 
+// ── Supabase session (Fase 2) ──
+// Resolve AuthContext a partir do cookie sb-access-token (JWT emitido por
+// gotrue). Verificação local via HS256 — não faz round-trip. O subject do JWT
+// (auth.users.id) é usado pra lookup em public.users via auth_user_id +
+// workspace preferido.
+//
+// Se `workspaceHint` (querystring ?workspace_id ou header x-workspace-id) for
+// passado e o usuário for membro, usa. Caso contrário, primeiro workspace
+// (ordem de ingresso) — mesmo comportamento do login legado.
+
+async function getSupabaseSession(
+  accessToken: string,
+  workspaceHint?: string,
+): Promise<AuthContext | null> {
+  const payload = verifySupabaseJwt(accessToken);
+  if (!payload?.sub) return null;
+
+  // Lookup local user pelo authUserId
+  const userRows = await dbAdmin
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.authUserId, payload.sub))
+    .limit(1);
+
+  if (userRows.length === 0) return null;
+  const localUserId = userRows[0].id;
+
+  // Pega workspace (hint ou primeiro)
+  const wsQuery = dbAdmin
+    .select({
+      workspaceId: workspaceMembers.workspaceId,
+      role: workspaceMembers.role,
+    })
+    .from(workspaceMembers)
+    .where(
+      workspaceHint
+        ? and(
+            eq(workspaceMembers.userId, localUserId),
+            eq(workspaceMembers.workspaceId, workspaceHint),
+          )
+        : eq(workspaceMembers.userId, localUserId),
+    )
+    .orderBy(asc(workspaceMembers.createdAt))
+    .limit(1);
+
+  const wsRows = await wsQuery;
+  if (wsRows.length === 0) return null;
+
+  return {
+    user_id: localUserId,
+    workspace_id: wsRows[0].workspaceId,
+    role: wsRows[0].role as "owner" | "admin" | "member",
+    auth_method: "supabase",
+  };
+}
+
 // ── Request Authentication ──
 
 /**
  * Extrai AuthContext de um request.
- * Tenta session cookie primeiro, depois API key header.
- * Retorna null se não autenticado.
+ *
+ * Ordem de tentativa (Fase 2 transition):
+ *  1. sb-access-token (Supabase Auth — gotrue JWT)
+ *  2. pegasus_session (legado scrypt/bcrypt — sessions table)
+ *  3. x-api-key header
+ *
+ * A ordem reflete preferência: Supabase > legado > API key. Sessões legadas
+ * continuam válidas até Fase 2c removê-las.
  */
 export async function authenticate(req: NextRequest): Promise<AuthContext | null> {
-  // 1. Try session cookie
+  // 1. Try Supabase Auth JWT (Fase 2)
+  const supabaseToken = req.cookies.get(SUPABASE_ACCESS_COOKIE)?.value;
+  if (supabaseToken) {
+    const workspaceHint =
+      req.nextUrl.searchParams.get("workspace_id") ||
+      req.headers.get("x-workspace-id") ||
+      undefined;
+    const ctx = await getSupabaseSession(supabaseToken, workspaceHint);
+    if (ctx) return ctx;
+  }
+
+  // 2. Try legacy session cookie
   const sessionToken = req.cookies.get(SESSION_COOKIE)?.value;
   if (sessionToken) {
     const ctx = await getSession(sessionToken);

@@ -27,6 +27,9 @@ export const users = pgTable("users", {
   passwordHash: text("password_hash"),
   googleId: text("google_id").unique(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  // Fase 2 — liga ao auth.users (gotrue). Nullable durante transição; passa a
+  // NOT NULL no final da Fase 2 após script de migração rodar.
+  authUserId: uuid("auth_user_id").unique(),
   // Legacy (descobertas no cutover 2026-04-18 — bridge step 0):
   accountId: integer("account_id"),
   role: varchar("role", { length: 20 }).notNull().default("viewer"),

@@ -76,7 +76,13 @@ export async function withWorkspace<T>(
   fn: (tx: Db) => Promise<T>,
 ): Promise<T> {
   return db.transaction(async (tx) => {
-    await tx.execute(sql`SET LOCAL app.workspace_id = ${workspaceId}`);
+    // Postgres não aceita bind params em `SET LOCAL` — usa set_config(name,
+    // value, is_local=true) que é funcionalmente equivalente e parametrizável.
+    // Bug original (4978fde) emitia `SET LOCAL app.workspace_id = $1`, que
+    // quebrava com 42601. Detectado em smoke test pós-rebuild Wave 7.
+    await tx.execute(
+      sql`SELECT set_config('app.workspace_id', ${workspaceId}::text, true)`,
+    );
     return fn(tx as unknown as Db);
   });
 }

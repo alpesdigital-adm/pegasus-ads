@@ -90,6 +90,7 @@ docker run -d \
   --env-file /apps/pegasus/.env \
   --network easypanel \
   --label traefik.enable=true \
+  --label traefik.docker.network=easypanel \
   --label "traefik.http.routers.pegasus-primary-http.rule=Host(\`$PRIMARY_HOST\`) || Host(\`$GREEN_HOST\`)" \
   --label "traefik.http.routers.pegasus-primary-http.entrypoints=http" \
   --label "traefik.http.routers.pegasus-primary-https.rule=Host(\`$PRIMARY_HOST\`) || Host(\`$GREEN_HOST\`)" \

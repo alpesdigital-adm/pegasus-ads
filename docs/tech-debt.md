@@ -12,6 +12,31 @@ precisam ser endereçadas. Atualize o status ao resolver cada item (não apague
 
 ---
 
+## TD-011 — /api/attribution ignora param `campaign_key` 🔴 open
+
+**Descoberto:** 2026-04-18 (Fase 1C Wave 2 — auditoria da rota pelo gêmeo VPS)
+**Dono:** Leandro (decisão de produto) + Claude (implementação)
+**Impacto:** a rota aceita `?campaign_key=...` na querystring, mas o
+SELECT agregado nunca usa esse valor como filtro. Métricas retornadas
+são globais (todos os criativos do workspace ≠ killed), não da campanha
+específica.
+
+**Contexto:** bug presente desde antes da migração Drizzle. O response
+documenta `campaign_key` como identificador da consulta, mas os números
+(`total_spend`, `total_leads`) não refletem isso.
+
+**Como resolver:**
+1. Sign-off do Leandro sobre a intenção original (era pra filtrar ou não?)
+2. Se SIM: adicionar JOIN com campaigns + WHERE c.campaign_key =
+   campaign.metaCampaignId (ou equivalente) no aggregate
+3. Se NÃO: remover o param do OpenAPI spec + doc + tipo de response pra
+   refletir que é global
+
+**Quando:** não é bloqueador. Valor numérico da API pode ter sido
+consumido "errado" por dashboards — revisar antes de consertar.
+
+---
+
 ## TD-009 — Cutover Neon → Supabase concluído 🟢 done
 
 **Descoberto:** 2026-04-17 (Fase 1B prep)

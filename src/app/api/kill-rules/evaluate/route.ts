@@ -14,13 +14,14 @@
  *   dry_run?:     boolean  // Alias de apply=false (padrão: true = dry run)
  * }
  *
- * MIGRADO NA FASE 1C (Wave 2):
- *  - getDb() → withWorkspace (RLS)
- *  - Aggregate SELECT (JOIN + SUM + GROUP BY) em sql``
- *  - UPDATE status via Drizzle typed
- *  - BUG CROSS-TENANT CORRIGIDO: legado não tinha filtro workspace_id
- *    em creatives — agregava criativos de todas as workspaces. Agora
- *    RLS filtra automático.
+ * MIGRADO NA FASE 1C (Wave 2, otimizado):
+ *  - getDb() → withWorkspace SINGLE TRANSACTION (sugestão do gêmeo VPS)
+ *  - Aggregate SELECT + avaliação + bulk UPDATE na mesma tx
+ *    → overhead de N transactions evitado (era 1 tx por UPDATE antes)
+ *  - Bulk UPDATE via inArray(killedIds) — um único UPDATE para todos
+ *    os criativos matados
+ *  - BUG CROSS-TENANT CORRIGIDO: legado não tinha filtro workspace_id.
+ *    Agora RLS filtra automático via withWorkspace.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -29,7 +30,7 @@ import { creatives } from "@/lib/db/schema";
 import { requireAuth } from "@/lib/auth";
 import { evaluateKillRules, evaluateAllKillRules } from "@/config/kill-rules";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
-import { eq } from "drizzle-orm";
+import { inArray } from "drizzle-orm";
 
 export const runtime = "nodejs";
 
@@ -55,11 +56,11 @@ export async function POST(req: NextRequest) {
   }
 
   const cplTarget = body.cpl_target ?? DEFAULT_CPL_TARGET;
-  // apply=true ou dry_run=false → aplica no DB
   const shouldApply = body.apply === true || body.dry_run === false;
 
-  const rows = await withWorkspace(auth.workspace_id, async (tx) => {
-    const result = await tx.execute(sql`
+  // Single transaction: SELECT + evaluate + bulk UPDATE
+  const { rows, killedIds } = await withWorkspace(auth.workspace_id, async (tx) => {
+    const aggResult = await tx.execute(sql`
       SELECT
         c.id,
         c.name,
@@ -78,7 +79,48 @@ export async function POST(req: NextRequest) {
       GROUP BY c.id, c.name, c.generation, c.is_control, c.status, c.parent_id
       ORDER BY c.is_control DESC NULLS LAST, c.generation ASC, c.created_at ASC
     `);
-    return result as unknown as Array<Record<string, unknown>>;
+    const rows = aggResult as unknown as Array<Record<string, unknown>>;
+
+    // Collect IDs to kill (se shouldApply e primaryRule disparar)
+    const killedIds: string[] = [];
+    if (shouldApply) {
+      for (const row of rows) {
+        const totalSpend = Number(row.total_spend ?? 0);
+        const totalLeads = Number(row.total_leads ?? 0);
+        const totalImpressions = Number(row.total_impressions ?? 0);
+        const avgCtr = Number(row.avg_ctr ?? 0);
+        const daysRunning = Number(row.days_count ?? 0);
+        const cpl = totalLeads > 0 ? totalSpend / totalLeads : null;
+
+        const primaryRule = evaluateKillRules({
+          spend: totalSpend, leads: totalLeads, cpl,
+          impressions: totalImpressions, ctr: avgCtr,
+          cpm: totalImpressions > 0 ? (totalSpend / totalImpressions) * 1000 : 0,
+          daysRunning, cplTarget,
+          benchmarkExists: false,
+          rolling5dCpl: null,
+          spend3d: 0, leads3d: 0, cpl3d: null,
+          spend7d: 0, leads7d: 0, cpl7d: null,
+        });
+
+        if (primaryRule) {
+          const currentStatus = row.status as string;
+          if (currentStatus !== "killed" && currentStatus !== "winner") {
+            killedIds.push(row.id as string);
+          }
+        }
+      }
+
+      // Bulk UPDATE: todos os matches num único statement
+      if (killedIds.length > 0) {
+        await tx
+          .update(creatives)
+          .set({ status: "killed" })
+          .where(inArray(creatives.id, killedIds));
+      }
+    }
+
+    return { rows, killedIds };
   });
 
   if (rows.length === 0) {
@@ -112,10 +154,10 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // ── 3. Avaliar kill rules por criativo ──
+  // ── 3. Montar resposta com flag db_updated baseado em killedIds ──
+  const killedSet = new Set(killedIds);
   const results: Array<Record<string, unknown>> = [];
   let triggered = 0;
-  let applied = 0;
 
   for (const row of rows) {
     const totalSpend = Number(row.total_spend ?? 0);
@@ -145,25 +187,7 @@ export async function POST(req: NextRequest) {
 
     if (primaryRule) triggered++;
 
-    // Aplicar no DB se solicitado e a regra é "kill"
-    let dbUpdated = false;
-    if (shouldApply && primaryRule) {
-      const currentStatus = row.status as string;
-      if (currentStatus !== "killed" && currentStatus !== "winner") {
-        try {
-          await withWorkspace(auth.workspace_id, async (tx) => {
-            await tx
-              .update(creatives)
-              .set({ status: "killed" })
-              .where(eq(creatives.id, row.id as string));
-          });
-          dbUpdated = true;
-          applied++;
-        } catch (err) {
-          console.error(`[KillRules] Erro ao matar criativo ${row.id}:`, err);
-        }
-      }
-    }
+    const dbUpdated = killedSet.has(row.id as string);
 
     results.push({
       creative_id: row.id,
@@ -195,7 +219,7 @@ export async function POST(req: NextRequest) {
     control_cpl: controlCpl !== null ? Math.round(controlCpl * 100) / 100 : null,
     evaluated: rows.length,
     triggered,
-    applied,
+    applied: killedIds.length,
     dry_run: !shouldApply,
     results,
   });

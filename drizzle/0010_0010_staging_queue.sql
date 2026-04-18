@@ -245,21 +245,47 @@ CREATE POLICY "workspace_isolation" ON "step_events"
 --
 -- step_dependencies NÃO entra no realtime (topologia do DAG é estática
 -- após criação do batch).
+--
+-- GUARD CONDICIONAL (descoberta 2026-04-18 pelo gêmeo VPS): a publication
+-- `supabase_realtime` existe HOJE apenas no DB `postgres` do cluster; o
+-- container alpes-ads_supabase-realtime-1 aponta pra DB_NAME=postgres, não
+-- pegasus_ads. Consequência: mesmo se criássemos a publication aqui, ela
+-- ficaria órfã (acumulando WAL sem consumer). Débito nomeado como TD-015
+-- no docs/tech-debt.md.
+--
+-- Por isso cada bloco abaixo verifica se a publication existe neste DB
+-- antes de ADD TABLE. Quando o Realtime for wireado pro pegasus_ads (via
+-- container dedicado, multi-tenant no container atual, ou outra abordagem),
+-- uma migration futura adiciona as 3 tables à publication — sem bloquear
+-- a Staging Queue de entrar em produção agora. Worker opera via cron,
+-- independente de Realtime.
 
 DO $$ BEGIN
-  ALTER PUBLICATION supabase_realtime ADD TABLE publication_batches;
+  IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE publication_batches;
+  ELSE
+    RAISE NOTICE 'supabase_realtime não existe neste DB — publication_batches fica fora do Realtime até TD-015 ser endereçado';
+  END IF;
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 --> statement-breakpoint
 
 DO $$ BEGIN
-  ALTER PUBLICATION supabase_realtime ADD TABLE publication_steps;
+  IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE publication_steps;
+  ELSE
+    RAISE NOTICE 'supabase_realtime não existe neste DB — publication_steps fica fora do Realtime até TD-015 ser endereçado';
+  END IF;
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 --> statement-breakpoint
 
 DO $$ BEGIN
-  ALTER PUBLICATION supabase_realtime ADD TABLE step_events;
+  IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE step_events;
+  ELSE
+    RAISE NOTICE 'supabase_realtime não existe neste DB — step_events fica fora do Realtime até TD-015 ser endereçado';
+  END IF;
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 --> statement-breakpoint

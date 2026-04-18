@@ -444,3 +444,49 @@ cp docker-compose.override.yml.pre-td014-* docker-compose.override.yml
 docker compose -p alpes-ads_supabase up -d supavisor --force-recreate
 # opcional: DROP ROLE supavisor_meta
 ```
+
+---
+
+## TD-015 — Realtime do cluster Supabase não wired pro DB `pegasus_ads` 🔴 open
+
+**Descoberto:** 2026-04-18 (gêmeo VPS tentando aplicar migration 0010 da
+Staging Queue v2)
+**Dono:** decisão pendente (Leandro + arquitetura do cluster)
+**Impacto:** frontend do Pegasus Ads não consegue receber eventos Realtime
+do banco `pegasus_ads`. Consequência prática no curto prazo: os 3 canais
+Realtime planejados pela Staging Queue v2 (`batch-{id}`, `steps-{id}`,
+`events-{id}`) não funcionam até TD-015 ser endereçado. Worker opera
+via cron independente, então não é bloqueante pra Fase 1/2 da queue,
+mas **bloqueia Fase 4** (frontend real-time de progresso).
+
+**Descoberta técnica:**
+- `pg_publication` em `pegasus_ads` está vazio — publication
+  `supabase_realtime` existe apenas no DB `postgres` do cluster.
+- Container `alpes-ads_supabase-realtime-1` tem `DB_NAME=postgres`, ou
+  seja, escuta WAL só do DB legacy — não enxerga mudanças em
+  `pegasus_ads` nem em outros DBs que venhamos a criar.
+
+**Mitigação imediata aplicada (migration 0010):**
+- `ALTER PUBLICATION supabase_realtime ADD TABLE …` virou guard
+  condicional com `IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname
+  = 'supabase_realtime')`. No DB `pegasus_ads` isso loga NOTICE e pula —
+  migration aplica limpo, nada fica plantado meia-pronto.
+- Ao endereçar TD-015, uma migration nova adiciona as 3 tabelas à
+  publication (`publication_batches`, `publication_steps`, `step_events`)
+  — `step_dependencies` fica fora (topologia estática do DAG).
+
+**Caminhos possíveis (decidir com calma):**
+1. **Container Realtime dedicado pro pegasus_ads** (novo
+   `alpes-ads_supabase-realtime-pegasus`): isolamento forte, custo
+   modesto (um container extra). Próximo do pattern que o Supabase
+   hosted usa em multi-project.
+2. **Multi-tenant no container atual** (Realtime v2 com múltiplos
+   tenants): menos container, mais config. Requer validar se a versão
+   do Realtime no cluster suporta e se o CRM (que usa o DB `postgres`)
+   não quebra no meio do caminho.
+3. **Trocar DB_NAME do container atual pra `pegasus_ads`**: quebra
+   qualquer dependência Realtime do CRM/`postgres`. Auditar antes.
+
+**Quando:** antes da Fase 4 da Staging Queue v2 (frontend real-time).
+Fases 1-3 podem seguir sem Realtime (UI cai em fallback polling ou
+simplesmente não mostra progresso granular até TD-015 fechar).

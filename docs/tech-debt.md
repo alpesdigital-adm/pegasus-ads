@@ -221,7 +221,7 @@ Neon inteiro some — leva as tabelas junto.
 ## TD-005 — `settings` global dropada 🟢 done
 
 **Descoberto:** 2026-04-17 (plano v1.3, seção 2.1)
-**Atualizado:** 2026-04-18 (consolidação executada antes da Fase 5)
+**Atualizado:** 2026-04-18 (migration 0009 aplicada em prod pelo gêmeo VPS, 19:56)
 **Dono:** Claude
 **Impacto:** resolvido. Tabela `settings` global foi dropada —
 auditoria mostrou que tinha só 2 classes de uso:
@@ -242,11 +242,22 @@ auditoria mostrou que tinha só 2 classes de uso:
   (zero frontend caller afetado — auditoria confirmou que a page
   `/settings` só gerencia Meta accounts, não usa esse endpoint).
 - ✅ Schema `settings` removido de `src/lib/db/schema/prompts.ts`
+- ✅ Aplicado em prod 2026-04-18 19:56 (gêmeo VPS): BEGIN/COMMIT,
+  hash registrado em `drizzle.__drizzle_migrations`. Na prática não
+  havia `last_ad_number` pra migrar (schema já estava limpo — só
+  órfãs do Apps Script). Green rebuildado + smoke: `/api/docs` 200,
+  `/api/settings` 401 sem cookie (roteando OK), logs limpos.
 
 **Sem schema `scope` enum nem `workspace_id NULL`** — abordagem rejeitada.
 A única key realmente global (`last_ad_number`) acabou sendo
 conceitualmente per-workspace mesmo. Não sobrou nenhum caso legítimo
 pra setting global, então não faz sentido preservar a complexidade.
+
+**Gotcha operacional (migrations futuras):** gravar o hash em
+`drizzle.__drizzle_migrations` exige `-U supabase_admin` (superuser).
+`-U postgres` falha com `permission denied for table __drizzle_migrations`
+— a table é owned por `pegasus_ads_admin` e `postgres` não tem grants.
+Atualizar snippet de apply pra usar `supabase_admin` por default.
 
 ---
 

@@ -4,49 +4,26 @@
  * Implanta (ou re-implanta) o Apps Script de sincronização do Log de Testes
  * diretamente na planilha Google Sheets do usuário, via Apps Script API.
  *
- * Pré-requisitos:
- *   - Google OAuth conectado com scope script.projects
- *   - Variável de ambiente TEST_LOG_API_KEY definida (opcional mas recomendada)
- *
  * Body JSON:
- * {
- *   spreadsheet_id: string   // ID da planilha (ex: "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms")
- *   api_base?:      string   // Override da base URL (padrão: https://pegasus.alpesd.com.br)
- * }
+ * { spreadsheet_id: string, api_base?: string }
  *
- * Resposta JSON (sucesso):
- * {
- *   ok:          true
- *   script_id:   string   // ID do projeto Apps Script criado/atualizado
- *   editor_url:  string   // URL para abrir o editor do script
- *   action:      "created" | "updated"
- *   message:     string
- * }
- *
- * Resposta JSON (erro):
- * {
- *   ok:      false
- *   error:   string
- *   details: string (opcional)
- * }
- *
- * Fluxo:
- *   1. Obtém access token válido (com scope script.projects)
- *   2. Verifica se já existe um script_id salvo nas settings do DB
- *   3a. Se não existe: POST /v1/projects → cria novo projeto Apps Script
- *       ligado ao container (spreadsheetId)
- *   3b. Se existe:     apenas atualiza o conteúdo (PUT /v1/projects/{id}/content)
- *   4. PUT /v1/projects/{id}/content → envia o código gerado pelo template
- *   5. Salva o script_id no DB (settings key: apps_script_id)
+ * MIGRADO NA FASE 1C (Wave 6 misc):
+ *  - getDb() → dbAdmin (tabela settings é global — TD-005)
+ *  - upsert via Drizzle onConflictDoUpdate (substitui SELECT+INSERT/UPDATE)
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { getValidAccessToken } from "@/lib/google-drive";
 import { buildAppsScript } from "@/config/apps-script-template";
-import { getDb } from "@/lib/db";
+import { dbAdmin } from "@/lib/db";
+import { settings } from "@/lib/db/schema";
 import { requireAuth } from "@/lib/auth";
+import { eq, sql } from "drizzle-orm";
+
+export const runtime = "nodejs";
 
 const SCRIPT_API_BASE = "https://script.googleapis.com/v1";
+const SCRIPT_ID_KEY = "apps_script_id";
 
 interface ScriptProject {
   scriptId: string;
@@ -62,42 +39,36 @@ interface AppsScriptFile {
 }
 
 async function getSavedScriptId(): Promise<string | null> {
-  const db = getDb();
   try {
-    const result = await db.execute({
-      sql: "SELECT value FROM settings WHERE key = 'apps_script_id'",
-    });
-    return result.rows.length > 0 ? (result.rows[0].value as string) : null;
+    const rows = await dbAdmin
+      .select({ value: settings.value })
+      .from(settings)
+      .where(eq(settings.key, SCRIPT_ID_KEY))
+      .limit(1);
+    return rows.length > 0 ? rows[0].value : null;
   } catch {
     return null;
   }
 }
 
 async function saveScriptId(scriptId: string): Promise<void> {
-  const db = getDb();
-  const existing = await db.execute({
-    sql: "SELECT key FROM settings WHERE key = ?",
-    args: ["apps_script_id"],
-  });
+  await dbAdmin
+    .insert(settings)
+    .values({ key: SCRIPT_ID_KEY, value: scriptId })
+    .onConflictDoUpdate({
+      target: settings.key,
+      set: { value: sql`EXCLUDED.value`, updatedAt: sql`NOW()` },
+    });
+}
 
-  if (existing.rows.length > 0) {
-    await db.execute({
-      sql: "UPDATE settings SET value = ?, updated_at = NOW() WHERE key = ?",
-      args: [scriptId, "apps_script_id"],
-    });
-  } else {
-    await db.execute({
-      sql: "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, NOW())",
-      args: ["apps_script_id", scriptId],
-    });
-  }
+async function clearScriptId(): Promise<void> {
+  await dbAdmin.delete(settings).where(eq(settings.key, SCRIPT_ID_KEY));
 }
 
 export async function POST(req: NextRequest) {
   const auth = await requireAuth(req);
   if (auth instanceof NextResponse) return auth;
 
-  // ── 1. Parse body ──
   let body: { spreadsheet_id?: string; api_base?: string };
   try {
     body = await req.json();
@@ -110,11 +81,10 @@ export async function POST(req: NextRequest) {
   if (!spreadsheetId) {
     return NextResponse.json(
       { ok: false, error: "Campo obrigatório: spreadsheet_id" },
-      { status: 400 }
+      { status: 400 },
     );
   }
 
-  // ── 2. Obter access token ──
   let accessToken: string;
   try {
     accessToken = await getValidAccessToken(auth.workspace_id);
@@ -125,26 +95,16 @@ export async function POST(req: NextRequest) {
         error: "Google não conectado. Faça o OAuth primeiro em /api/auth/google.",
         details: String(err),
       },
-      { status: 401 }
+      { status: 401 },
     );
   }
 
-  // ── 3. Gerar código do script ──
   const apiKey = process.env.TEST_LOG_API_KEY ?? "";
-  const scriptSource = buildAppsScript({
-    spreadsheetId,
-    apiKey,
-    apiBase,
-  });
+  const scriptSource = buildAppsScript({ spreadsheetId, apiKey, apiBase });
 
   const files: AppsScriptFile[] = [
+    { name: "sync_test_log", type: "SERVER_JS", source: scriptSource },
     {
-      name: "sync_test_log",
-      type: "SERVER_JS",
-      source: scriptSource,
-    },
-    {
-      // appsscript.json manifest — necessário para a API aceitar o push
       name: "appsscript",
       type: "JSON",
       source: JSON.stringify({
@@ -161,11 +121,9 @@ export async function POST(req: NextRequest) {
     },
   ];
 
-  // ── 4. Verificar se já existe script salvo ──
   let scriptId = await getSavedScriptId();
   let action: "created" | "updated" = scriptId ? "updated" : "created";
 
-  // ── 5a. Criar projeto se não existe ──
   if (!scriptId) {
     const createRes = await fetch(`${SCRIPT_API_BASE}/projects`, {
       method: "POST",
@@ -181,8 +139,6 @@ export async function POST(req: NextRequest) {
 
     if (!createRes.ok) {
       const errText = await createRes.text();
-
-      // Se falhou por scope insuficiente, orientar o usuário
       if (createRes.status === 403) {
         return NextResponse.json(
           {
@@ -193,13 +149,12 @@ export async function POST(req: NextRequest) {
               "Reconecte o Google em /api/auth/google para reautorizar com os novos escopos.",
             details: errText,
           },
-          { status: 403 }
+          { status: 403 },
         );
       }
-
       return NextResponse.json(
         { ok: false, error: "Falha ao criar projeto Apps Script.", details: errText },
-        { status: createRes.status }
+        { status: createRes.status },
       );
     }
 
@@ -209,7 +164,6 @@ export async function POST(req: NextRequest) {
     await saveScriptId(scriptId);
   }
 
-  // ── 5b. Atualizar conteúdo do script ──
   const contentRes = await fetch(`${SCRIPT_API_BASE}/projects/${scriptId}/content`, {
     method: "PUT",
     headers: {
@@ -221,13 +175,8 @@ export async function POST(req: NextRequest) {
 
   if (!contentRes.ok) {
     const errText = await contentRes.text();
-
-    // Se script foi deletado manualmente pelo usuário, limpar ID salvo e tentar recriar
     if (contentRes.status === 404) {
-      const db = getDb();
-      await db.execute({
-        sql: "DELETE FROM settings WHERE key = 'apps_script_id'",
-      });
+      await clearScriptId();
       return NextResponse.json(
         {
           ok: false,
@@ -236,17 +185,15 @@ export async function POST(req: NextRequest) {
             "Tente novamente — na próxima chamada um novo projeto será criado.",
           details: errText,
         },
-        { status: 404 }
+        { status: 404 },
       );
     }
-
     return NextResponse.json(
       { ok: false, error: "Falha ao atualizar conteúdo do script.", details: errText },
-      { status: contentRes.status }
+      { status: contentRes.status },
     );
   }
 
-  // ── 6. Retornar sucesso ──
   const editorUrl = `https://script.google.com/d/${scriptId}/edit`;
 
   return NextResponse.json({
@@ -269,7 +216,6 @@ export async function POST(req: NextRequest) {
   });
 }
 
-// GET: retorna status do script implantado
 export async function GET(req: NextRequest) {
   const auth = await requireAuth(req);
   if (auth instanceof NextResponse) return auth;

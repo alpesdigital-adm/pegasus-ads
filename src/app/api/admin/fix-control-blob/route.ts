@@ -14,14 +14,19 @@
  * GET  → diagnóstico: lista criativos com blob_url fora do Vercel Blob
  * POST → fix: recebe imagem (multipart ou base64 JSON) e atualiza o DB
  *
- * Uso via script local: ver scripts/fix-control-blob.mjs
+ * MIGRADO NA FASE 1C (Wave 6 misc):
+ *  - getDb() → withWorkspace (RLS escopa creatives por workspace)
+ *  - Queries tipadas via Drizzle
+ *  - uuid() mantido só para nome do blob (id do row via defaultRandom)
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { put } from "@vercel/blob";
-import { getDb } from "@/lib/db";
+import { withWorkspace } from "@/lib/db";
+import { creatives } from "@/lib/db/schema";
 import { requireAuth } from "@/lib/auth";
 import { v4 as uuid } from "uuid";
+import { eq, notLike } from "drizzle-orm";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -32,19 +37,22 @@ export async function GET(req: NextRequest) {
   const auth = await requireAuth(req);
   if (auth instanceof NextResponse) return auth;
 
-  const db = getDb();
-
-  // Criativo com URL fora do Vercel Blob = candidato a ter overlay da Meta
-  const result = await db.execute(
-    `SELECT id, name, blob_url, status, created_at
-     FROM creatives
-     WHERE blob_url NOT LIKE 'https://%.public.blob.vercel-storage.com/%'
-     ORDER BY created_at DESC`
+  const rows = await withWorkspace(auth.workspace_id, async (tx) =>
+    tx
+      .select({
+        id: creatives.id,
+        name: creatives.name,
+        blob_url: creatives.blobUrl,
+        status: creatives.status,
+        created_at: creatives.createdAt,
+      })
+      .from(creatives)
+      .where(notLike(creatives.blobUrl, "https://%.public.blob.vercel-storage.com/%")),
   );
 
   return NextResponse.json({
-    candidates: result.rows,
-    count: result.rowCount,
+    candidates: rows,
+    count: rows.length,
     note: "Criativos com blob_url fora do Vercel Blob — provavelmente CDN da Meta com overlay 'Conteúdo Sensível'.",
   });
 }
@@ -55,14 +63,12 @@ export async function POST(req: NextRequest) {
   const auth = await requireAuth(req);
   if (auth instanceof NextResponse) return auth;
 
-  const db = getDb();
   const contentType = req.headers.get("content-type") || "";
 
   let creativeName: string;
   let imageBuffer: Buffer;
   let mimeType = "image/png";
 
-  // Suporta multipart/form-data (para uso via cURL/Postman/script)
   if (contentType.includes("multipart/form-data")) {
     const formData = await req.formData();
     const nameField = formData.get("name");
@@ -71,70 +77,73 @@ export async function POST(req: NextRequest) {
     if (!nameField || !imageFile) {
       return NextResponse.json(
         { error: "Campos obrigatórios faltando: 'name' (string) e 'image' (File)" },
-        { status: 400 }
+        { status: 400 },
       );
     }
-
     creativeName = nameField.toString();
     mimeType = imageFile.type || "image/png";
     imageBuffer = Buffer.from(await imageFile.arrayBuffer());
   } else {
-    // JSON com base64 — usado pelo scripts/fix-control-blob.mjs
     interface FixBody {
       name?: string;
       imageBase64?: string;
       mimeType?: string;
     }
     const body = (await req.json()) as FixBody;
-
     if (!body.name || !body.imageBase64) {
       return NextResponse.json(
         { error: "Campos obrigatórios faltando: 'name' e 'imageBase64'" },
-        { status: 400 }
+        { status: 400 },
       );
     }
-
     creativeName = body.name;
     mimeType = body.mimeType || "image/png";
     imageBuffer = Buffer.from(body.imageBase64, "base64");
   }
 
-  // Verificar existência no DB
-  const existing = await db.execute({
-    sql: `SELECT id, name, blob_url FROM creatives WHERE name = ?`,
-    args: [creativeName],
-  });
-
-  if (existing.rows.length === 0) {
-    return NextResponse.json(
-      { error: `Criativo '${creativeName}' não encontrado no DB` },
-      { status: 404 }
-    );
-  }
-
-  const row = existing.rows[0];
-  const oldUrl = row.blob_url as string;
-
-  // Upload para Vercel Blob (substitui URL antiga)
+  // Uploads go outside the tx (Vercel Blob call, não-atômico com DB)
   const blob = await put(`creatives/${uuid()}.png`, imageBuffer, {
     access: "public",
     contentType: mimeType,
   });
 
-  // Atualizar blob_url no DB
-  await db.execute({
-    sql: `UPDATE creatives SET blob_url = ? WHERE name = ?`,
-    args: [blob.url, creativeName],
+  const result = await withWorkspace(auth.workspace_id, async (tx) => {
+    const existing = await tx
+      .select({
+        id: creatives.id,
+        name: creatives.name,
+        blobUrl: creatives.blobUrl,
+      })
+      .from(creatives)
+      .where(eq(creatives.name, creativeName))
+      .limit(1);
+
+    if (existing.length === 0) return null;
+
+    const row = existing[0];
+    await tx
+      .update(creatives)
+      .set({ blobUrl: blob.url })
+      .where(eq(creatives.name, creativeName));
+
+    return { id: row.id, oldUrl: row.blobUrl };
   });
 
-  console.log(`[fix-control-blob] ${creativeName}: ${oldUrl} → ${blob.url}`);
+  if (!result) {
+    return NextResponse.json(
+      { error: `Criativo '${creativeName}' não encontrado no DB` },
+      { status: 404 },
+    );
+  }
+
+  console.log(`[fix-control-blob] ${creativeName}: ${result.oldUrl} → ${blob.url}`);
 
   return NextResponse.json({
     success: true,
     creative: {
-      id: row.id,
+      id: result.id,
       name: creativeName,
-      old_blob_url: oldUrl,
+      old_blob_url: result.oldUrl,
       new_blob_url: blob.url,
     },
   });

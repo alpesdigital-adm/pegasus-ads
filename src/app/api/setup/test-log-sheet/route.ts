@@ -18,13 +18,23 @@
  * Retorna: { ok, action, spreadsheet_id, spreadsheet_url, summary }
  */
 
+/**
+ * MIGRADO NA FASE 1C (Wave 6 misc):
+ *  - getDb() → withWorkspace (fetchData) + dbAdmin (settings)
+ *  - String interpolation de datas substituída por sql`` params (SQL injection fix)
+ *  - getSetting/setSetting via Drizzle + onConflictDoUpdate
+ */
 import { NextRequest, NextResponse } from "next/server";
 import { getValidAccessToken, getSelectedFolderId } from "@/lib/google-drive";
-import { getDb } from "@/lib/db";
+import { withWorkspace, dbAdmin } from "@/lib/db";
+import { settings } from "@/lib/db/schema";
 import { requireAuth } from "@/lib/auth";
 import { evaluateKillRules } from "@/config/kill-rules";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
 import { buildAppsScript } from "@/config/apps-script-template";
+import { eq, sql } from "drizzle-orm";
+
+export const runtime = "nodejs";
 
 const SHEETS_API = "https://sheets.googleapis.com/v4/spreadsheets";
 const SCRIPT_API = "https://script.googleapis.com/v1";
@@ -68,19 +78,22 @@ const BRUTOS_HEADERS = [
 // ── Helpers DB ─────────────────────────────────────────────────────────────────
 
 async function getSetting(key: string): Promise<string | null> {
-  const db = getDb();
-  const res = await db.execute({ sql: "SELECT value FROM settings WHERE key = ?", args: [key] });
-  return res.rows.length > 0 ? (res.rows[0].value as string) : null;
+  const rows = await dbAdmin
+    .select({ value: settings.value })
+    .from(settings)
+    .where(eq(settings.key, key))
+    .limit(1);
+  return rows.length > 0 ? rows[0].value : null;
 }
 
 async function setSetting(key: string, value: string): Promise<void> {
-  const db = getDb();
-  const exists = await db.execute({ sql: "SELECT key FROM settings WHERE key = ?", args: [key] });
-  if (exists.rows.length > 0) {
-    await db.execute({ sql: "UPDATE settings SET value = ?, updated_at = NOW() WHERE key = ?", args: [value, key] });
-  } else {
-    await db.execute({ sql: "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, NOW())", args: [key, value] });
-  }
+  await dbAdmin
+    .insert(settings)
+    .values({ key, value })
+    .onConflictDoUpdate({
+      target: settings.key,
+      set: { value: sql`EXCLUDED.value`, updatedAt: sql`NOW()` },
+    });
 }
 
 // ── Helpers de data ────────────────────────────────────────────────────────────
@@ -103,29 +116,43 @@ function nowBR(): string {
 
 // ── Buscar dados do banco ──────────────────────────────────────────────────────
 
-async function fetchData(cplTarget: number) {
-  const db = getDb();
+async function fetchData(workspaceId: string, cplTarget: number) {
   const { from, to } = dateRange(90);
 
-  const creativesResult = await db.execute(`
-    SELECT
-      c.name, c.status, c.generation,
-      SUM(m.spend)           AS total_spend,
-      SUM(m.impressions)     AS total_impressions,
-      SUM(m.clicks)          AS total_clicks,
-      SUM(m.leads)           AS total_leads,
-      AVG(m.cpm)             AS avg_cpm,
-      AVG(m.ctr)             AS avg_ctr,
-      COUNT(DISTINCT m.date) AS days_count
-    FROM creatives c
-    LEFT JOIN metrics m ON m.creative_id = c.id
-      AND m.date BETWEEN '${from}' AND '${to}'
-    GROUP BY c.id, c.name, c.status, c.generation
-    ORDER BY c.generation ASC, c.created_at ASC
-  `);
+  const { creativesRows, rawRows } = await withWorkspace(workspaceId, async (tx) => {
+    const creativesRes = await tx.execute(sql`
+      SELECT
+        c.name, c.status, c.generation,
+        SUM(m.spend)           AS total_spend,
+        SUM(m.impressions)     AS total_impressions,
+        SUM(m.clicks)          AS total_clicks,
+        SUM(m.leads)           AS total_leads,
+        AVG(m.cpm)             AS avg_cpm,
+        AVG(m.ctr)             AS avg_ctr,
+        COUNT(DISTINCT m.date) AS days_count
+      FROM creatives c
+      LEFT JOIN metrics m ON m.creative_id = c.id
+        AND m.date BETWEEN ${from} AND ${to}
+      GROUP BY c.id, c.name, c.status, c.generation
+      ORDER BY c.generation ASC, c.created_at ASC
+    `);
+
+    const rawRes = await tx.execute(sql`
+      SELECT c.name, m.date, m.spend, m.impressions, m.cpm, m.ctr, m.clicks, m.leads, m.cpl, m.meta_ad_id
+      FROM creatives c
+      JOIN metrics m ON m.creative_id = c.id
+      WHERE m.date BETWEEN ${from} AND ${to}
+      ORDER BY c.name ASC, m.date ASC
+    `);
+
+    return {
+      creativesRows: creativesRes as unknown as Array<Record<string, unknown>>,
+      rawRows: rawRes as unknown as Array<Record<string, unknown>>,
+    };
+  });
 
   let controlCpl: number | null = null;
-  for (const row of creativesResult.rows) {
+  for (const row of creativesRows) {
     if ((row.generation as number) === 0) {
       const spend = Number(row.total_spend ?? 0);
       const leads = Number(row.total_leads ?? 0);
@@ -133,7 +160,7 @@ async function fetchData(cplTarget: number) {
     }
   }
 
-  const criativos: SheetRow[] = creativesResult.rows.map((row) => {
+  const criativos: SheetRow[] = creativesRows.map((row) => {
     const spend    = Number(row.total_spend ?? 0);
     const leads    = Number(row.total_leads ?? 0);
     const impressions = Number(row.total_impressions ?? 0);
@@ -172,15 +199,7 @@ async function fetchData(cplTarget: number) {
     };
   });
 
-  const rawResult = await db.execute(`
-    SELECT c.name, m.date, m.spend, m.impressions, m.cpm, m.ctr, m.clicks, m.leads, m.cpl, m.meta_ad_id
-    FROM creatives c
-    JOIN metrics m ON m.creative_id = c.id
-    WHERE m.date BETWEEN '${from}' AND '${to}'
-    ORDER BY c.name ASC, m.date ASC
-  `);
-
-  const dadosBrutos = rawResult.rows.map((row) => ({
+  const dadosBrutos = rawRows.map((row) => ({
     nome:       getAdBaseName(row.name as string),
     date:       row.date as string,
     spend:      Math.round(Number(row.spend ?? 0) * 100) / 100,
@@ -476,7 +495,7 @@ export async function POST(req: NextRequest) {
   // ── 2. Dados do banco ──
   let data: Awaited<ReturnType<typeof fetchData>>;
   try {
-    data = await fetchData(cplTarget);
+    data = await fetchData(auth.workspace_id, cplTarget);
   } catch (err) {
     return NextResponse.json(
       { ok: false, error: "Erro ao buscar dados do banco.", details: String(err) },

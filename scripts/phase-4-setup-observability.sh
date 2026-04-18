@@ -82,7 +82,11 @@ PROM_CONF_DIR=/apps/pegasus/infra/prometheus
 install -d -m 755 "$PROM_CONF_DIR"
 cp "$PROM_CONF_DIR/prometheus.yml.tpl" "$PROM_CONF_DIR/prometheus.yml"
 printf '%s' "$SCRAPE_TOKEN" > "$PROM_CONF_DIR/scrape-token"
-chmod 600 "$PROM_CONF_DIR/scrape-token"
+# 0644 porque o Prometheus container roda como nobody (uid 65534) e precisa
+# ler o arquivo. O diretório pai (/apps/pegasus) já fica atrás de root no
+# host — only-root access é garantido via permissões do diretório, não do
+# arquivo. Se virar concerning, rodar o container como root via --user.
+chmod 644 "$PROM_CONF_DIR/scrape-token"
 ok "prometheus.yml + scrape-token prontos"
 
 # ── 4. Prometheus container ─────────────────────────────────────────────

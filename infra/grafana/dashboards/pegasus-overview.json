@@ -15,7 +15,7 @@
       "id": 1,
       "type": "timeseries",
       "title": "Requests / min (por status)",
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "fieldConfig": {
         "defaults": { "unit": "reqpm", "custom": { "fillOpacity": 10, "lineWidth": 1 } },
@@ -34,7 +34,7 @@
       "id": 2,
       "type": "timeseries",
       "title": "Latência HTTP (p50 / p95 / p99)",
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
       "fieldConfig": {
         "defaults": { "unit": "s", "custom": { "fillOpacity": 5, "lineWidth": 1 } },
@@ -63,7 +63,7 @@
       "id": 3,
       "type": "timeseries",
       "title": "Erros 5xx / min (por rota)",
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
       "fieldConfig": {
         "defaults": { "unit": "reqpm", "custom": { "fillOpacity": 10, "lineWidth": 1 } },
@@ -82,7 +82,7 @@
       "id": 4,
       "type": "timeseries",
       "title": "Memória residente + event loop lag",
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
       "fieldConfig": {
         "defaults": { "custom": { "fillOpacity": 5, "lineWidth": 1 } },
@@ -115,7 +115,7 @@
       "id": 5,
       "type": "stat",
       "title": "Requests / min (último 1m)",
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 16 },
       "fieldConfig": {
         "defaults": {
@@ -143,7 +143,7 @@
       "id": 6,
       "type": "stat",
       "title": "Erros 5xx (última 1h)",
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 16 },
       "fieldConfig": {
         "defaults": {
@@ -171,7 +171,7 @@
       "id": 7,
       "type": "stat",
       "title": "p95 HTTP (última 5m)",
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 4, "w": 6, "x": 12, "y": 16 },
       "fieldConfig": {
         "defaults": {

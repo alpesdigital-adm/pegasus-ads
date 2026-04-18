@@ -88,74 +88,10 @@ export async function withWorkspace<T>(
 export { sql, schema };
 
 // =============================================================================
-// Legacy adapter: getDb().execute()
+// Legacy adapters REMOVIDOS na Fase 1C Wave 7
 // =============================================================================
-// 57 rotas API ainda usam a interface antiga { rows, rowCount } do db.ts sobre
-// @neondatabase/serverless. Este adapter mantém a interface mas roda sobre
-// postgres-js + dbAdmin (BYPASSRLS). A migração gradual para Drizzle +
-// withWorkspace() acontece rota por rota na Fase 1C+.
-//
-// Por que dbAdmin e não db? As rotas legadas continuam filtrando WHERE
-// workspace_id = ? manualmente. Se usássemos a role `pegasus_ads_app`, as
-// queries retornariam zero rows (não há SET LOCAL app.workspace_id no
-// adapter). Logo, durante a transição, o fail-safe RLS não se aplica à
-// interface legada — a segurança continua nos filtros WHERE.
-
-export interface QueryResult {
-  rows: Record<string, unknown>[];
-  rowCount: number;
-}
-
-export interface DbClient {
-  execute(
-    query: string | { sql: string; args?: unknown[] },
-  ): Promise<QueryResult>;
-}
-
-// Converte placeholders `?` (legado) para `$1, $2, ...` do Postgres.
-function convertPlaceholders(queryText: string): string {
-  let i = 0;
-  return queryText.replace(/\?/g, () => `$${++i}`);
-}
-
-let legacyClient: DbClient | null = null;
-
-export function getDb(): DbClient {
-  if (!legacyClient) {
-    legacyClient = {
-      async execute(query) {
-        let text: string;
-        let params: unknown[] = [];
-        if (typeof query === "string") {
-          text = convertPlaceholders(query);
-        } else {
-          text = convertPlaceholders(query.sql);
-          params = query.args ?? [];
-        }
-        // postgres-js: .unsafe(sql, params) retorna array de rows com .count.
-        // Em contraste com @neondatabase/serverless que retornava { rows, rowCount }.
-        const rows = (await adminConnection.unsafe(
-          text,
-          params as (string | number | boolean | Date | null)[],
-        )) as unknown as Record<string, unknown>[];
-        return {
-          rows,
-          rowCount: rows.length,
-        };
-      },
-    };
-  }
-  return legacyClient;
-}
-
-// =============================================================================
-// initDb — shim de compatibilidade (10 rotas legadas)
-// =============================================================================
-// O antigo db.ts rodava CREATE TABLE IF NOT EXISTS em boot. Isso foi substituído
-// por migrations Drizzle (drizzle-kit generate/push). Esta função continua
-// exportada apenas para não quebrar os imports em rotas não migradas — ela
-// agora retorna o client legado e não executa DDL.
-// TODO (Fase 1C): remover initDb() após migrar as 10 rotas para Drizzle.
-export async function initDb(): Promise<DbClient> {
-  return getDb();
-}
+// `getDb()` e `initDb()` existiam como shim para 57 rotas que usavam a
+// interface { rows, rowCount } do Neon serverless. Todas foram migradas
+// para Drizzle via `withWorkspace` (RLS enforced) ou `dbAdmin` (BYPASSRLS
+// para crons/auth/queries globais). Qualquer referência residual deve
+// ser reportada — migrate to Drizzle.

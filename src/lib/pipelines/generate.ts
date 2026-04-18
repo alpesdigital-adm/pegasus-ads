@@ -11,10 +11,25 @@
  * 7. Upload para Google Drive
  * 8. Checkpoint post_generation
  * 9. Atualizar test_round status
+ *
+ * MIGRADO NA FASE 1C (Wave 7 libs):
+ *  - getDb() → withWorkspace (RLS escopa todas as tabelas envolvidas)
+ *  - Cada "sub-bloco" de DB usa withWorkspace separado (pipeline roda
+ *    Gemini + blob uploads entre queries; transação única manteria
+ *    conexão aberta por minutos)
+ *  - uuid() manual removido quando possível (defaultRandom no schema)
  */
 
-import { v4 as uuid } from "uuid";
-import { getDb } from "../db";
+import { withWorkspace } from "../db";
+import {
+  pipelineExecutions,
+  testRounds,
+  testRoundVariants,
+  creatives,
+  creativeEdges,
+  prompts,
+} from "../db/schema";
+import { eq, sql } from "drizzle-orm";
 import { generateImage } from "../gemini";
 import { buildVariantPrompt, getVariableType, parseColorSpec, type ControlTexts } from "../ai-prompt";
 import { verifyPostGeneration } from "../ai-verify";
@@ -23,40 +38,28 @@ import { uploadToGoogleDrive, getSelectedFolderId } from "../google-drive";
 import { put } from "@vercel/blob";
 import type { PipelineStep } from "../types";
 
-// ── Resize com sharp (se disponível) ou fallback ──
-// Em serverless Vercel, sharp pode não estar disponível.
-// O Gemini gera 1024x1024 (Feed) e 768x1344 (Stories).
-// Precisamos redimensionar para 1080x1080 e 1080x1920.
-
 async function resizeImage(
   imageBase64: string,
   targetWidth: number,
-  targetHeight: number
+  targetHeight: number,
 ): Promise<Buffer> {
   const inputBuffer = Buffer.from(imageBase64, "base64");
-
   try {
-    // Tentar usar sharp se disponível
     const sharp = (await import("sharp")).default;
     return await sharp(inputBuffer)
       .resize(targetWidth, targetHeight, { fit: "cover" })
       .png()
       .toBuffer();
   } catch {
-    // Fallback: retorna sem resize (melhor que falhar)
     console.warn("[GeneratePipeline] sharp não disponível, retornando imagem sem resize");
     return inputBuffer;
   }
 }
 
-// ── Pre-fase: Decisão de Paleta via Text-Only ──
-// Chamada Gemini text-only que decide a paleta de cores antes de gerar as imagens.
-// Isso garante consistência entre Feed e Stories sem depender de text + image simultâneos.
-
 async function fetchColorSpec(
   controlBase64: string,
   controlMimeType: string,
-  variableValue?: string
+  variableValue?: string,
 ): Promise<Record<string, string> | null> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return null;
@@ -100,31 +103,20 @@ PALETTE_SPEC::{"primary":"#hexcode","secondary":"#hexcode","accent":"#hexcode","
       body: JSON.stringify(body),
     });
 
-    if (!response.ok) {
-      console.warn("[GeneratePipeline] Color spec pre-phase API error:", response.status);
-      return null;
-    }
+    if (!response.ok) return null;
 
-    const data = await response.json() as {
+    const data = (await response.json()) as {
       candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
     };
-    const parts = data.candidates?.[0]?.content?.parts || [];
-    let text = "";
-    for (const part of parts) {
-      if (part.text) text += part.text;
-    }
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) return null;
 
-    const colorSpec = parseColorSpec(text);
-    console.log("[GeneratePipeline] Color spec pre-phase result:", JSON.stringify(colorSpec));
-    console.log("[GeneratePipeline] Color spec raw text:", text.slice(0, 300));
-    return colorSpec;
+    return parseColorSpec(text);
   } catch (err) {
-    console.warn("[GeneratePipeline] Color spec pre-phase failed:", err);
+    console.error("[GeneratePipeline] fetchColorSpec error:", err);
     return null;
   }
 }
-
-// ── Pipeline Principal ──
 
 export interface GeneratePipelineInput {
   testRoundId: string;
@@ -134,7 +126,6 @@ export interface GeneratePipelineInput {
   variableValue?: string;
   numVariants?: number;
   workspaceId: string;
-  /** Textos exatos do controle para evitar erros de ortografia na geração */
   controlTexts?: ControlTexts;
 }
 
@@ -154,25 +145,30 @@ export interface GeneratePipelineOutput {
 }
 
 export async function runGeneratePipeline(
-  input: GeneratePipelineInput
+  input: GeneratePipelineInput,
 ): Promise<GeneratePipelineOutput> {
-  const db = getDb();
+  const ws = input.workspaceId;
   const steps: PipelineStep[] = [];
   const numVariants = input.numVariants || 1;
   const variants: GeneratePipelineOutput["variants"] = [];
 
-  // Registrar execução no pipeline_executions
-  const executionId = uuid();
-  await db.execute({
-    sql: `INSERT INTO pipeline_executions (id, test_round_id, pipeline_type, status, input_data)
-          VALUES (?, ?, 'generate', 'running', ?)`,
-    args: [executionId, input.testRoundId, JSON.stringify(input)],
-  });
-
-  // Atualizar status do test round
-  await db.execute({
-    sql: "UPDATE test_rounds SET status = 'generating', updated_at = NOW() WHERE id = ?",
-    args: [input.testRoundId],
+  // ── Inicialização: registrar execução + atualizar status do test round ──
+  const { executionId } = await withWorkspace(ws, async (tx) => {
+    const [exec] = await tx
+      .insert(pipelineExecutions)
+      .values({
+        workspaceId: ws,
+        testRoundId: input.testRoundId,
+        pipelineType: "generate",
+        status: "running",
+        inputData: input as unknown as Record<string, unknown>,
+      })
+      .returning({ id: pipelineExecutions.id });
+    await tx
+      .update(testRounds)
+      .set({ status: "generating", updatedAt: sql`NOW()` })
+      .where(eq(testRounds.id, input.testRoundId));
+    return { executionId: exec.id };
   });
 
   try {
@@ -180,20 +176,25 @@ export async function runGeneratePipeline(
     const step1: PipelineStep = { name: "fetch_control", status: "running", started_at: new Date().toISOString() };
     steps.push(step1);
 
-    const controlRow = await db.execute({
-      sql: "SELECT id, name, blob_url, prompt FROM creatives WHERE id = ?",
-      args: [input.controlCreativeId],
+    const control = await withWorkspace(ws, async (tx) => {
+      const rows = await tx
+        .select({
+          id: creatives.id,
+          name: creatives.name,
+          blobUrl: creatives.blobUrl,
+          prompt: creatives.prompt,
+        })
+        .from(creatives)
+        .where(eq(creatives.id, input.controlCreativeId))
+        .limit(1);
+      return rows[0] ?? null;
     });
 
-    if (controlRow.rows.length === 0) {
+    if (!control) {
       throw new Error(`Control creative ${input.controlCreativeId} not found`);
     }
 
-    const control = controlRow.rows[0];
-    const controlBlobUrl = control.blob_url as string;
-
-    // Fetch control image as base64
-    const controlResponse = await fetch(controlBlobUrl);
+    const controlResponse = await fetch(control.blobUrl);
     const controlBuffer = await controlResponse.arrayBuffer();
     const controlBase64 = Buffer.from(controlBuffer).toString("base64");
     const controlMimeType = controlResponse.headers.get("content-type") || "image/png";
@@ -201,7 +202,7 @@ export async function runGeneratePipeline(
     step1.status = "completed";
     step1.completed_at = new Date().toISOString();
 
-    // ── Step 2: Pré-fase — decisão de paleta (text-only) + build prompts ──
+    // ── Step 2: Pré-fase — paleta + prompts ──
     const step2: PipelineStep = { name: "generate_prompts", status: "running", started_at: new Date().toISOString() };
     steps.push(step2);
 
@@ -210,14 +211,11 @@ export async function runGeneratePipeline(
       throw new Error(`Variable type "${input.variableType}" not found in catalog`);
     }
 
-    // Pré-fase: para variáveis visuais, busca paleta via chamada text-only
-    // Isso garante que Feed e Stories usem exatamente as mesmas cores
     let colorSpec: Record<string, string> | null = null;
     if (variableTypeDef.category === "visual") {
       colorSpec = await fetchColorSpec(controlBase64, controlMimeType, input.variableValue);
     }
 
-    // Construir prompts com colorSpec (aplicado tanto no Feed quanto no Stories)
     const feedPrompt = buildVariantPrompt({
       variableType: variableTypeDef,
       variableValue: input.variableValue,
@@ -234,10 +232,14 @@ export async function runGeneratePipeline(
       colorSpec: colorSpec ?? undefined,
     });
 
-    // Salvar prompt usado no test round
-    await db.execute({
-      sql: "UPDATE test_rounds SET ai_prompt_used = ?, updated_at = NOW() WHERE id = ?",
-      args: [JSON.stringify({ feed: feedPrompt, stories: storiesPrompt, colorSpec }), input.testRoundId],
+    await withWorkspace(ws, async (tx) => {
+      await tx
+        .update(testRounds)
+        .set({
+          aiPromptUsed: JSON.stringify({ feed: feedPrompt, stories: storiesPrompt, colorSpec }),
+          updatedAt: sql`NOW()`,
+        })
+        .where(eq(testRounds.id, input.testRoundId));
     });
 
     step2.status = "completed";
@@ -249,12 +251,10 @@ export async function runGeneratePipeline(
       const step3: PipelineStep = { name: variantStepName, status: "running", started_at: new Date().toISOString() };
       steps.push(step3);
 
-      // Próximo número de AD
-      const adNumber = await getNextAdNumber();
+      const adNumber = await getNextAdNumber(ws);
       const { feedName, storiesName } = generateCreativeNamePair(adNumber);
       const adName = generateMetaAdName(adNumber);
 
-      // Gerar Feed (Nano Banana 2 — gemini-3.1-flash-image-preview)
       const feedResult = await generateImage({
         prompt: feedPrompt,
         referenceImages: [{ base64: controlBase64, mimeType: controlMimeType }],
@@ -268,7 +268,6 @@ export async function runGeneratePipeline(
         throw new Error(step3.error);
       }
 
-      // Gerar Stories (Nano Banana 2 — mesma paleta do Feed via colorSpec pré-fase)
       const storiesResult = await generateImage({
         prompt: storiesPrompt,
         referenceImages: [{ base64: controlBase64, mimeType: controlMimeType }],
@@ -282,81 +281,106 @@ export async function runGeneratePipeline(
         throw new Error(step3.error);
       }
 
-      // Resize
       const feedBuffer = await resizeImage(feedResult.images[0].base64, 1080, 1080);
       const storiesBuffer = await resizeImage(storiesResult.images[0].base64, 1080, 1920);
 
-      // Salvar no Vercel Blob
-      const feedCreativeId = uuid();
-      const storiesCreativeId = uuid();
-
+      // ── Uploads para Vercel Blob ──
+      // IDs são gerados pelo defaultRandom() do schema, mas precisamos do path
+      // do blob antes do insert → usamos timestamp como path-only fallback.
+      const blobPathSuffix = `${Date.now()}-${i}`;
       const [feedBlob, storiesBlob] = await Promise.all([
-        put(`creatives/${feedCreativeId}.png`, feedBuffer, { access: "public", contentType: "image/png" }),
-        put(`creatives/${storiesCreativeId}.png`, storiesBuffer, { access: "public", contentType: "image/png" }),
+        put(`creatives/${blobPathSuffix}-feed.png`, feedBuffer, { access: "public", contentType: "image/png" }),
+        put(`creatives/${blobPathSuffix}-stories.png`, storiesBuffer, { access: "public", contentType: "image/png" }),
       ]);
 
-      // Determinar generation
-      const parentRow = await db.execute({
-        sql: "SELECT generation FROM creatives WHERE id = ?",
-        args: [input.controlCreativeId],
-      });
-      const generation = parentRow.rows.length > 0 ? (parentRow.rows[0].generation as number) + 1 : 1;
+      // ── Persistência: creatives + edges + prompts + variants ──
+      const { feedCreativeId, storiesCreativeId } = await withWorkspace(ws, async (tx) => {
+        const parentRow = await tx
+          .select({ generation: creatives.generation })
+          .from(creatives)
+          .where(eq(creatives.id, input.controlCreativeId))
+          .limit(1);
+        const generation = parentRow.length > 0 ? (parentRow[0].generation ?? 0) + 1 : 1;
 
-      // Salvar criativos no banco
-      await db.execute({
-        sql: `INSERT INTO creatives (id, name, blob_url, prompt, model, width, height, parent_id, generation, status)
-              VALUES (?, ?, ?, ?, ?, 1080, 1080, ?, ?, 'generated')`,
-        args: [feedCreativeId, feedName, feedBlob.url, feedPrompt, feedResult.model, input.controlCreativeId, generation],
-      });
+        const [feedRow] = await tx
+          .insert(creatives)
+          .values({
+            workspaceId: ws,
+            name: feedName,
+            blobUrl: feedBlob.url,
+            prompt: feedPrompt,
+            model: feedResult.model,
+            width: 1080,
+            height: 1080,
+            parentId: input.controlCreativeId,
+            generation,
+            status: "generated",
+          })
+          .returning({ id: creatives.id });
 
-      await db.execute({
-        sql: `INSERT INTO creatives (id, name, blob_url, prompt, model, width, height, parent_id, generation, status)
-              VALUES (?, ?, ?, ?, ?, 1080, 1920, ?, ?, 'generated')`,
-        args: [storiesCreativeId, storiesName, storiesBlob.url, storiesPrompt, storiesResult.model, input.controlCreativeId, generation],
-      });
+        const [storiesRow] = await tx
+          .insert(creatives)
+          .values({
+            workspaceId: ws,
+            name: storiesName,
+            blobUrl: storiesBlob.url,
+            prompt: storiesPrompt,
+            model: storiesResult.model,
+            width: 1080,
+            height: 1920,
+            parentId: input.controlCreativeId,
+            generation,
+            status: "generated",
+          })
+          .returning({ id: creatives.id });
 
-      // Criar edges
-      for (const cid of [feedCreativeId, storiesCreativeId]) {
-        await db.execute({
-          sql: `INSERT INTO creative_edges (id, source_id, target_id, relationship, variable_isolated)
-                VALUES (?, ?, ?, 'variation', ?)`,
-          args: [uuid(), input.controlCreativeId, cid, input.variableType],
+        for (const cid of [feedRow.id, storiesRow.id]) {
+          await tx.insert(creativeEdges).values({
+            workspaceId: ws,
+            sourceId: input.controlCreativeId,
+            targetId: cid,
+            relationship: "variation",
+            variableIsolated: input.variableType,
+          });
+        }
+
+        for (const [cid, promptText, model] of [
+          [feedRow.id, feedPrompt, feedResult.model],
+          [storiesRow.id, storiesPrompt, storiesResult.model],
+        ] as const) {
+          await tx.insert(prompts).values({
+            creativeId: cid,
+            promptText,
+            promptFormat: "json",
+            model,
+          });
+        }
+
+        await tx.insert(testRoundVariants).values({
+          testRoundId: input.testRoundId,
+          creativeId: feedRow.id,
+          role: "variant",
+          placement: "feed",
+          status: "generated",
         });
-      }
 
-      // Salvar prompts
-      for (const [cid, prompt, model] of [
-        [feedCreativeId, feedPrompt, feedResult.model],
-        [storiesCreativeId, storiesPrompt, storiesResult.model],
-      ]) {
-        await db.execute({
-          sql: `INSERT INTO prompts (id, creative_id, prompt_text, prompt_format, model) VALUES (?, ?, ?, 'json', ?)`,
-          args: [uuid(), cid, prompt, model],
+        await tx.insert(testRoundVariants).values({
+          testRoundId: input.testRoundId,
+          creativeId: storiesRow.id,
+          role: "variant",
+          placement: "stories",
+          status: "generated",
         });
-      }
 
-      // Registrar variantes no test_round_variants
-      const feedVariantId = uuid();
-      const storiesVariantId = uuid();
-
-      await db.execute({
-        sql: `INSERT INTO test_round_variants (id, test_round_id, creative_id, role, placement, status)
-              VALUES (?, ?, ?, 'variant', 'feed', 'generated')`,
-        args: [feedVariantId, input.testRoundId, feedCreativeId],
+        return { feedCreativeId: feedRow.id, storiesCreativeId: storiesRow.id };
       });
 
-      await db.execute({
-        sql: `INSERT INTO test_round_variants (id, test_round_id, creative_id, role, placement, status)
-              VALUES (?, ?, ?, 'variant', 'stories', 'generated')`,
-        args: [storiesVariantId, input.testRoundId, storiesCreativeId],
-      });
-
-      // Upload para Google Drive
+      // Upload para Google Drive (não-crítico)
       try {
-        const folderId = await getSelectedFolderId(input.workspaceId);
+        const folderId = await getSelectedFolderId(ws);
         if (folderId) {
-          await uploadToGoogleDrive(input.workspaceId, feedName, feedBuffer, "image/png", folderId);
-          await uploadToGoogleDrive(input.workspaceId, storiesName, storiesBuffer, "image/png", folderId);
+          await uploadToGoogleDrive(ws, feedName, feedBuffer, "image/png", folderId);
+          await uploadToGoogleDrive(ws, storiesName, storiesBuffer, "image/png", folderId);
         }
       } catch (driveError) {
         console.error("[GeneratePipeline] Drive upload failed:", driveError);
@@ -366,7 +390,7 @@ export async function runGeneratePipeline(
       step3.completed_at = new Date().toISOString();
 
       variants.push({
-        creativeId: feedCreativeId, // Feed como ID principal
+        creativeId: feedCreativeId,
         feedBlobUrl: feedBlob.url,
         storiesBlobUrl: storiesBlob.url,
         feedName,
@@ -374,6 +398,7 @@ export async function runGeneratePipeline(
         adName,
         adNumber,
       });
+      void storiesCreativeId; // mantido para semântica futura
     }
 
     // ── Step 8: Verificação post_generation ──
@@ -386,39 +411,58 @@ export async function runGeneratePipeline(
       expectedHeight: 1080,
       variantWidth: 1080,
       variantHeight: 1080,
-      variantImageBase64: "present", // simplificado — imagem existe
+      variantImageBase64: "present",
     });
 
-    await db.execute({
-      sql: "UPDATE test_rounds SET ai_verification = ?, status = 'reviewing', updated_at = NOW() WHERE id = ?",
-      args: [JSON.stringify({ post_generation: verification }), input.testRoundId],
+    await withWorkspace(ws, async (tx) => {
+      await tx
+        .update(testRounds)
+        .set({
+          aiVerification: { post_generation: verification } as unknown as Record<string, unknown>,
+          status: "reviewing",
+          updatedAt: sql`NOW()`,
+        })
+        .where(eq(testRounds.id, input.testRoundId));
+      await tx
+        .update(pipelineExecutions)
+        .set({
+          status: "completed",
+          outputData: { variants } as unknown as Record<string, unknown>,
+          steps: steps as unknown as Record<string, unknown>,
+          completedAt: sql`NOW()`,
+          durationMs: sql`EXTRACT(EPOCH FROM (NOW() - started_at))::INTEGER * 1000`,
+        })
+        .where(eq(pipelineExecutions.id, executionId));
     });
 
     step8.status = "completed";
     step8.completed_at = new Date().toISOString();
 
-    // Atualizar pipeline execution como completed
-    await db.execute({
-      sql: `UPDATE pipeline_executions SET status = 'completed', output_data = ?, steps = ?, completed_at = NOW(),
-            duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at))::INTEGER * 1000
-            WHERE id = ?`,
-      args: [JSON.stringify({ variants }), JSON.stringify(steps), executionId],
-    });
-
-    return { testRoundId: input.testRoundId, variants, steps, verification: verification as unknown as Record<string, unknown> };
-
+    return {
+      testRoundId: input.testRoundId,
+      variants,
+      steps,
+      verification: verification as unknown as Record<string, unknown>,
+    };
   } catch (error) {
-    // Marcar como falha
     const errorMsg = error instanceof Error ? error.message : "Unknown error";
 
-    await db.execute({
-      sql: "UPDATE test_rounds SET status = 'failed', updated_at = NOW() WHERE id = ?",
-      args: [input.testRoundId],
-    });
-
-    await db.execute({
-      sql: `UPDATE pipeline_executions SET status = 'failed', error_message = ?, steps = ?, completed_at = NOW() WHERE id = ?`,
-      args: [errorMsg, JSON.stringify(steps), executionId],
+    await withWorkspace(ws, async (tx) => {
+      await tx
+        .update(testRounds)
+        .set({ status: "failed", updatedAt: sql`NOW()` })
+        .where(eq(testRounds.id, input.testRoundId));
+      await tx
+        .update(pipelineExecutions)
+        .set({
+          status: "failed",
+          errorMessage: errorMsg,
+          steps: steps as unknown as Record<string, unknown>,
+          completedAt: sql`NOW()`,
+        })
+        .where(eq(pipelineExecutions.id, executionId));
+    }).catch((dbErr) => {
+      console.error("[GeneratePipeline] Failed to record error state:", dbErr);
     });
 
     throw error;

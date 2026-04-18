@@ -1,4 +1,23 @@
-import { getDb } from "./db";
+/**
+ * MIGRADO NA FASE 1C (Wave 7 libs):
+ *  - getDb() → dbAdmin (queries cross-tenant para plans + counts por workspace)
+ *  - Queries tipadas via Drizzle
+ *
+ * plans é tabela global (sem workspace_id) — dbAdmin é a escolha correta.
+ * Counts por workspace usam dbAdmin com filtro explícito (evita travessia
+ * RLS para manter a função callable de contextos sem transação aberta).
+ */
+import { dbAdmin } from "./db";
+import {
+  plans,
+  workspaces,
+  creatives,
+  campaigns,
+  workspaceMetaAccounts,
+  workspaceMembers,
+  apiKeys,
+} from "./db/schema";
+import { and, eq, isNull, sql } from "drizzle-orm";
 
 export interface PlanLimits {
   max_creatives: number;
@@ -18,14 +37,13 @@ export async function getPlanLimits(planName: string): Promise<PlanLimits> {
   const cached = planCache.get(planName);
   if (cached) return cached;
 
-  const db = getDb();
-  const result = await db.execute({
-    sql: "SELECT * FROM plans WHERE name = ?",
-    args: [planName],
-  });
+  const rows = await dbAdmin
+    .select()
+    .from(plans)
+    .where(eq(plans.name, planName))
+    .limit(1);
 
-  if (result.rows.length === 0) {
-    // Default free limits
+  if (rows.length === 0) {
     return {
       max_creatives: 50,
       max_campaigns: 3,
@@ -39,17 +57,17 @@ export async function getPlanLimits(planName: string): Promise<PlanLimits> {
     };
   }
 
-  const row = result.rows[0];
+  const row = rows[0];
   const limits: PlanLimits = {
-    max_creatives: row.max_creatives as number,
-    max_campaigns: row.max_campaigns as number,
-    max_meta_accounts: row.max_meta_accounts as number,
-    max_members: row.max_members as number,
-    max_api_keys: row.max_api_keys as number,
-    ai_generations_per_month: row.ai_generations_per_month as number,
-    price_cents: row.price_cents as number,
-    plan_name: row.name as string,
-    display_name: row.display_name as string,
+    max_creatives: row.maxCreatives,
+    max_campaigns: row.maxCampaigns,
+    max_meta_accounts: row.maxMetaAccounts,
+    max_members: row.maxMembers,
+    max_api_keys: row.maxApiKeys,
+    ai_generations_per_month: row.aiGenerationsPerMonth,
+    price_cents: row.priceCents,
+    plan_name: row.name,
+    display_name: row.displayName,
   };
 
   planCache.set(planName, limits);
@@ -57,14 +75,6 @@ export async function getPlanLimits(planName: string): Promise<PlanLimits> {
 }
 
 export type Resource = "creatives" | "campaigns" | "meta_accounts" | "members" | "api_keys";
-
-const RESOURCE_TABLE_MAP: Record<Resource, { table: string; column: string }> = {
-  creatives: { table: "creatives", column: "workspace_id" },
-  campaigns: { table: "campaigns", column: "workspace_id" },
-  meta_accounts: { table: "workspace_meta_accounts", column: "workspace_id" },
-  members: { table: "workspace_members", column: "workspace_id" },
-  api_keys: { table: "api_keys", column: "workspace_id" },
-};
 
 const RESOURCE_LIMIT_MAP: Record<Resource, keyof PlanLimits> = {
   creatives: "max_creatives",
@@ -74,54 +84,81 @@ const RESOURCE_LIMIT_MAP: Record<Resource, keyof PlanLimits> = {
   api_keys: "max_api_keys",
 };
 
+async function countResource(workspaceId: string, resource: Resource): Promise<number> {
+  const wsFilter = (col: ReturnType<typeof eq>) => col;
+
+  switch (resource) {
+    case "creatives": {
+      const [r] = await dbAdmin
+        .select({ cnt: sql<number>`COUNT(*)::int` })
+        .from(creatives)
+        .where(wsFilter(eq(creatives.workspaceId, workspaceId)));
+      return Number(r?.cnt ?? 0);
+    }
+    case "campaigns": {
+      const [r] = await dbAdmin
+        .select({ cnt: sql<number>`COUNT(*)::int` })
+        .from(campaigns)
+        .where(wsFilter(eq(campaigns.workspaceId, workspaceId)));
+      return Number(r?.cnt ?? 0);
+    }
+    case "meta_accounts": {
+      const [r] = await dbAdmin
+        .select({ cnt: sql<number>`COUNT(*)::int` })
+        .from(workspaceMetaAccounts)
+        .where(wsFilter(eq(workspaceMetaAccounts.workspaceId, workspaceId)));
+      return Number(r?.cnt ?? 0);
+    }
+    case "members": {
+      const [r] = await dbAdmin
+        .select({ cnt: sql<number>`COUNT(*)::int` })
+        .from(workspaceMembers)
+        .where(wsFilter(eq(workspaceMembers.workspaceId, workspaceId)));
+      return Number(r?.cnt ?? 0);
+    }
+    case "api_keys": {
+      const [r] = await dbAdmin
+        .select({ cnt: sql<number>`COUNT(*)::int` })
+        .from(apiKeys)
+        .where(and(eq(apiKeys.workspaceId, workspaceId), isNull(apiKeys.revokedAt)));
+      return Number(r?.cnt ?? 0);
+    }
+  }
+}
+
 export async function checkLimit(
   workspaceId: string,
-  resource: Resource
+  resource: Resource,
 ): Promise<{ allowed: boolean; current: number; limit: number; plan: string }> {
-  const db = getDb();
+  const wsRows = await dbAdmin
+    .select({ plan: workspaces.plan })
+    .from(workspaces)
+    .where(eq(workspaces.id, workspaceId))
+    .limit(1);
 
-  // Get workspace plan
-  const wsResult = await db.execute({
-    sql: "SELECT plan FROM workspaces WHERE id = ?",
-    args: [workspaceId],
-  });
-  const plan = (wsResult.rows[0]?.plan as string) || "free";
+  const plan = wsRows[0]?.plan || "free";
   const limits = await getPlanLimits(plan);
-
-  // Count current usage
-  const { table, column } = RESOURCE_TABLE_MAP[resource];
-  const revokedClause = resource === "api_keys" ? " AND revoked_at IS NULL" : "";
-  const countResult = await db.execute({
-    sql: `SELECT COUNT(*) as cnt FROM ${table} WHERE ${column} = ?${revokedClause}`,
-    args: [workspaceId],
-  });
-  const current = Number(countResult.rows[0]?.cnt ?? 0);
+  const current = await countResource(workspaceId, resource);
   const limit = limits[RESOURCE_LIMIT_MAP[resource]] as number;
 
-  return {
-    allowed: current < limit,
-    current,
-    limit,
-    plan,
-  };
+  return { allowed: current < limit, current, limit, plan };
 }
 
 export async function getWorkspaceUsage(workspaceId: string): Promise<{
   plan: PlanLimits;
   usage: Record<Resource, { current: number; limit: number }>;
 }> {
-  const db = getDb();
+  const wsRows = await dbAdmin
+    .select({ plan: workspaces.plan })
+    .from(workspaces)
+    .where(eq(workspaces.id, workspaceId))
+    .limit(1);
 
-  const wsResult = await db.execute({
-    sql: "SELECT plan FROM workspaces WHERE id = ?",
-    args: [workspaceId],
-  });
-  const planName = (wsResult.rows[0]?.plan as string) || "free";
+  const planName = wsRows[0]?.plan || "free";
   const plan = await getPlanLimits(planName);
 
   const resources: Resource[] = ["creatives", "campaigns", "meta_accounts", "members", "api_keys"];
   const usage: Record<string, { current: number; limit: number }> = {};
-
   for (const resource of resources) {
     const result = await checkLimit(workspaceId, resource);
     usage[resource] = { current: result.current, limit: result.limit };

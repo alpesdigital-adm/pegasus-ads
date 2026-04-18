@@ -10,16 +10,24 @@
  *
  * O sufixo F/S é determinado pelas dimensões reais da imagem, não por
  * declaração manual.
+ *
+ * MIGRADO NA FASE 1C (Wave 7 libs):
+ *  - getDb() → withWorkspace + dbAdmin
+ *  - getNextAdNumber agora exige workspaceId (antes era global, risco de
+ *    colisão cross-tenant)
+ *  - settings (global) via dbAdmin — TD-005 overlap
  */
 
-import { getDb } from "./db";
+import { withWorkspace, dbAdmin } from "./db";
+import { creatives, publishedAds, settings } from "./db/schema";
+import { eq, sql } from "drizzle-orm";
 
 interface NamingConfig {
-  prefix: string;        // ex: "T7EBMX"
-  separator: string;     // ex: "-"
-  adPrefix: string;      // ex: "AD"
-  padLength: number;     // ex: 3 (AD001, AD012)
-  extension: string;     // ex: ".png"
+  prefix: string;
+  separator: string;
+  adPrefix: string;
+  padLength: number;
+  extension: string;
 }
 
 const DEFAULT_CONFIG: NamingConfig = {
@@ -30,79 +38,74 @@ const DEFAULT_CONFIG: NamingConfig = {
   extension: ".png",
 };
 
-/**
- * Detecta sufixo de placement baseado nas dimensões reais da imagem.
- * Feed (1:1 ou próximo) → "F"
- * Stories (9:16 ou próximo vertical) → "S"
- * Vídeo → "VD" (se aplicável)
- */
 export function detectPlacementSuffix(width: number, height: number): "F" | "S" {
   const ratio = width / height;
-  // Stories: ratio < 0.7 (vertical)
-  // Feed: ratio >= 0.7 (quadrado ou horizontal)
   return ratio < 0.7 ? "S" : "F";
 }
 
 /**
- * Busca o próximo número de AD disponível.
+ * Busca o próximo número de AD disponível DENTRO do workspace.
  *
- * Busca em 3 fontes (para cobrir criativos feitos manualmente fora do sistema):
- * 1. Tabela `creatives` — todos os criativos no grafo
- * 2. Tabela `published_ads` — ads publicados via pipeline (campo ad_name)
- * 3. Tabela `settings` — chave `last_ad_number` como fallback/override manual
- *
- * Retorna max(todas as fontes) + 1.
+ * Fontes (todas escopadas ao workspace exceto settings, que é global):
+ * 1. creatives (workspace via RLS)
+ * 2. published_ads (workspace via RLS)
+ * 3. settings (global, key=last_ad_number — override manual)
  */
-export async function getNextAdNumber(config: NamingConfig = DEFAULT_CONFIG): Promise<number> {
-  const db = getDb();
-
-  let maxNumber = 0;
-  // Regex genérico: captura qualquer AD seguido de dígitos, independente do prefixo
+export async function getNextAdNumber(
+  workspaceId: string,
+  config: NamingConfig = DEFAULT_CONFIG,
+): Promise<number> {
   const regex = /AD(\d+)/i;
 
-  // Fonte 1: creatives — busca QUALQUER nome com "AD" seguido de números
-  const creativesResult = await db.execute({
-    sql: "SELECT name FROM creatives WHERE name LIKE '%AD%'",
-  });
-
-  for (const row of creativesResult.rows) {
-    const name = row.name as string;
-    const match = name.match(regex);
-    if (match) {
-      const num = parseInt(match[1], 10);
-      if (num > maxNumber) maxNumber = num;
-    }
-  }
-
-  // Fonte 2: published_ads — ads publicados via pipeline
-  try {
-    const publishedResult = await db.execute({
-      sql: "SELECT ad_name FROM published_ads WHERE ad_name LIKE '%AD%'",
-    });
-
-    for (const row of publishedResult.rows) {
-      const name = row.ad_name as string;
-      const match = name.match(regex);
-      if (match) {
-        const num = parseInt(match[1], 10);
-        if (num > maxNumber) maxNumber = num;
+  const { maxFromCreatives, maxFromAds } = await withWorkspace(
+    workspaceId,
+    async (tx) => {
+      let maxC = 0;
+      const cRows = await tx
+        .select({ name: creatives.name })
+        .from(creatives)
+        .where(sql`${creatives.name} LIKE '%AD%'`);
+      for (const row of cRows) {
+        const m = row.name.match(regex);
+        if (m) {
+          const n = parseInt(m[1], 10);
+          if (n > maxC) maxC = n;
+        }
       }
-    }
-  } catch {
-    // Tabela pode não existir ainda
-  }
 
-  // Fonte 3: settings — override manual para cobrir criativos criados fora do sistema
-  try {
-    const settingsResult = await db.execute({
-      sql: "SELECT value FROM settings WHERE key = 'last_ad_number'",
-    });
-
-    if (settingsResult.rows.length > 0) {
-      const settingsNum = parseInt(settingsResult.rows[0].value as string, 10);
-      if (!isNaN(settingsNum) && settingsNum > maxNumber) {
-        maxNumber = settingsNum;
+      let maxA = 0;
+      try {
+        const aRows = await tx
+          .select({ adName: publishedAds.adName })
+          .from(publishedAds)
+          .where(sql`${publishedAds.adName} LIKE '%AD%'`);
+        for (const row of aRows) {
+          if (!row.adName) continue;
+          const m = row.adName.match(regex);
+          if (m) {
+            const n = parseInt(m[1], 10);
+            if (n > maxA) maxA = n;
+          }
+        }
+      } catch {
+        // tabela pode não existir em testes
       }
+
+      return { maxFromCreatives: maxC, maxFromAds: maxA };
+    },
+  );
+
+  let maxNumber = Math.max(maxFromCreatives, maxFromAds);
+
+  try {
+    const rows = await dbAdmin
+      .select({ value: settings.value })
+      .from(settings)
+      .where(eq(settings.key, "last_ad_number"))
+      .limit(1);
+    if (rows.length > 0) {
+      const n = parseInt(rows[0].value, 10);
+      if (!isNaN(n) && n > maxNumber) maxNumber = n;
     }
   } catch {
     // ignore
@@ -111,65 +114,42 @@ export async function getNextAdNumber(config: NamingConfig = DEFAULT_CONFIG): Pr
   return maxNumber + 1;
 }
 
-/**
- * Gera o nome completo de um criativo.
- *
- * @param adNumber - Número do AD (ex: 14)
- * @param width - Largura da imagem
- * @param height - Altura da imagem
- * @param config - Configuração de naming (opcional)
- * @returns Nome completo (ex: "T7EBMX-AD014F.png")
- */
 export function generateCreativeName(
   adNumber: number,
   width: number,
   height: number,
-  config: NamingConfig = DEFAULT_CONFIG
+  config: NamingConfig = DEFAULT_CONFIG,
 ): string {
   const suffix = detectPlacementSuffix(width, height);
   const paddedNumber = String(adNumber).padStart(config.padLength, "0");
   return `${config.prefix}${config.separator}${config.adPrefix}${paddedNumber}${suffix}${config.extension}`;
 }
 
-/**
- * Gera par de nomes (Feed + Stories) para um mesmo AD number.
- */
 export function generateCreativeNamePair(
   adNumber: number,
-  config: NamingConfig = DEFAULT_CONFIG
+  config: NamingConfig = DEFAULT_CONFIG,
 ): { feedName: string; storiesName: string } {
   const paddedNumber = String(adNumber).padStart(config.padLength, "0");
   const base = `${config.prefix}${config.separator}${config.adPrefix}${paddedNumber}`;
-
   return {
     feedName: `${base}F${config.extension}`,
     storiesName: `${base}S${config.extension}`,
   };
 }
 
-/**
- * Gera o nome do Ad no Meta Ads (sem extensão, sem sufixo de placement).
- * Ex: "T7EBMX-AD014"
- */
 export function generateMetaAdName(
   adNumber: number,
-  config: NamingConfig = DEFAULT_CONFIG
+  config: NamingConfig = DEFAULT_CONFIG,
 ): string {
   const paddedNumber = String(adNumber).padStart(config.padLength, "0");
   return `${config.prefix}${config.separator}${config.adPrefix}${paddedNumber}`;
 }
 
-/**
- * Extrai o número do AD a partir de um nome de criativo.
- */
 export function extractAdNumber(name: string): number | null {
   const match = name.match(/AD(\d+)/i);
   return match ? parseInt(match[1], 10) : null;
 }
 
-/**
- * Valida se um nome segue a convenção correta.
- */
 export function isValidCreativeName(name: string): boolean {
   return /^T\d+EBMX-AD\d{3}[FS](\.png)?$/i.test(name);
 }

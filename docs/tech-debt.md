@@ -385,18 +385,27 @@ via easypanel. Downtime real ~10s, cluster healthy rápido. Mudanças
 futuras em env do Supabase stack via easypanel devem prever esse
 side-effect em janela de maintenance.
 
-**Peer review — follow-ups não-bloqueadores:**
-- GRANT `CREATE ON SCHEMA _supavisor` pode ser excessivo (Supavisor
-  provavelmente só escreve rows, não cria tabelas em runtime). Teste
-  seguro: REVOKE + observar 24h.
-- `_supabase` schema ganhou ALL PRIVILEGES em todas tables — escopo
-  pode ser reduzido após auditar quais tables dele pertencem ao
-  Supavisor vs outras ferramentas (Studio/Realtime).
-- Sem monitoring ativo — se role for revogada/deletada, pooling
-  quebra silenciosamente. Adicionar healthcheck no cron:
-  `SELECT 1 FROM _supavisor.tenants LIMIT 1` via pool.
-- Senha sem política de rotação — considerar reset a cada 180d ou
-  quando SSH access à VPS mudar.
+**Peer review — follow-ups endereçados (2026-04-18):**
+
+1. ✅ **GRANT `CREATE ON SCHEMA _supavisor` removido** via
+   `scripts/td-014-supavisor-dburl/03-tighten-grants.sh`.
+   Runtime Supavisor só escreve rows. Antes de `docker pull supabase/
+   supavisor:NEW`, re-grant temporário pra deixar migrations rodarem.
+
+2. ✅ **Escopo de `_supabase` reduzido**. Leandro confirmou que o schema
+   está VAZIO (as 5 tables do metadata ficam em `_supavisor.*`).
+   Mantido só USAGE + DEFAULT PRIVILEGES (cobre futuras tables sem
+   GRANT ALL imediato).
+
+3. ✅ **Healthcheck estrutural** em `/api/health` (commit ao fechar).
+   Valida connectivity via pool + SET LOCAL em transaction mode.
+   Retorna 503 se algo quebrar. Pode ser apontado por uptime monitor
+   externo. Cron diário sync-all continua valendo como canário implícito.
+
+4. ✅ **Política de rotação documentada** em
+   `docs/operations/cluster-runbook.md`. Triggers: 180d, mudança de
+   SSH access no VPS, suspeita de comprometimento, `docker cp` de
+   `.env` pra fora, janela anual. Inclui runbook passo-a-passo.
 
 **Rollback disponível (não recomendado, mas documentado):**
 ```bash

@@ -31,7 +31,7 @@ export const publishedAds = pgTable("published_ads", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
-// NOTA: As tabelas da Staging Queue v1.5 (publication_batches, publication_steps,
-// step_dependencies, step_events) NÃO entram nesta PR — o documento v1.5 não
-// está no repo e especificação de colunas é incompleta. Ficam como TD-007 para
-// quando o plano v1.5 for finalizado, antes ou durante a Fase 6.
+// Staging Queue v2 (TD-007) vive em ./staging-queue.ts — 4 tabelas
+// (publication_batches, publication_steps, step_dependencies, step_events)
+// + 2 enums. Spec completa em docs/staging-queue-v2.md. Adicionada em
+// 2026-04-18 (migration 0010).

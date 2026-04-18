@@ -51,10 +51,7 @@ export function detectPlacementSuffix(width: number, height: number): "F" | "S" 
  * 2. published_ads (workspace via RLS)
  * 3. settings (global, key=last_ad_number — override manual)
  */
-export async function getNextAdNumber(
-  workspaceId: string,
-  config: NamingConfig = DEFAULT_CONFIG,
-): Promise<number> {
+export async function getNextAdNumber(workspaceId: string): Promise<number> {
   const regex = /AD(\d+)/i;
 
   const { maxFromCreatives, maxFromAds } = await withWorkspace(

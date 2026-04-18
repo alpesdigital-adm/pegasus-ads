@@ -15,7 +15,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withWorkspace, sql } from "@/lib/db";
 import { alerts, creatives } from "@/lib/db/schema";
 import { requireAuth } from "@/lib/auth";
-import { and, desc, eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 
 export const runtime = "nodejs";
 

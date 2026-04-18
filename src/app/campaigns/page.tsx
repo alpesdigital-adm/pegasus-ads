@@ -1,6 +1,4 @@
 "use client";
-/* eslint-disable @typescript-eslint/no-explicit-any */
-// TODO(fase-4-cleanup): tipar os `any` restantes (handlers de form).
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -37,6 +35,10 @@ interface Totals {
   active_ads: number;
   cpl_meta: number | null;
   cpl_crm: number | null;
+  ctr: number;
+  cpm: number;
+  lpv: number;
+  connect_rate: number;
 }
 
 const PERIOD_OPTIONS = [
@@ -201,9 +203,9 @@ export default function CampaignsPage() {
             <MetricCard label="Qualificados" value={fmtInt(totals.leads_qualified)} />
             <MetricCard label="CPL Meta" value={fmt(totals.cpl_meta, "R$ ")} />
             <MetricCard label="CPL CRM" value={fmt(totals.cpl_crm, "R$ ")} highlight />
-            <MetricCard label="CTR" value={fmtPct((totals as any).ctr || 0)} />
-            <MetricCard label="CPM" value={fmt((totals as any).cpm, "R$ ")} />
-            <MetricCard label="% LPV" value={fmtPct((totals as any).connect_rate || 0)} />
+            <MetricCard label="CTR" value={fmtPct(totals.ctr || 0)} />
+            <MetricCard label="CPM" value={fmt(totals.cpm, "R$ ")} />
+            <MetricCard label="% LPV" value={fmtPct(totals.connect_rate || 0)} />
           </div>
         )}
 

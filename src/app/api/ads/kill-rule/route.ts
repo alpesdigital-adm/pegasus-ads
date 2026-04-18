@@ -25,7 +25,7 @@ import { requireAuth } from "@/lib/auth";
 import { getTokenForWorkspace } from "@/lib/meta";
 import { withWorkspace, sql } from "@/lib/db";
 import { campaigns } from "@/lib/db/schema";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;

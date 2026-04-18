@@ -502,7 +502,7 @@ function ConceptRowGroup({
   toggleAngle: (key: string) => void;
   toggleAd: (key: string) => void;
 }) {
-  const pctSpend = concept.spend; // will be used for bar widths if needed
+  // (pctSpend removido — placeholder que nunca foi usado)
 
   return (
     <>
@@ -543,7 +543,6 @@ function ConceptRowGroup({
           <AngleRowGroup
             key={aKey}
             angle={angle}
-            aKey={aKey}
             isOpen={aOpen}
             onToggle={() => toggleAngle(aKey)}
             expandedAds={expandedAds}
@@ -558,11 +557,10 @@ function ConceptRowGroup({
 // ── Angle Row Group ──
 
 function AngleRowGroup({
-  angle, aKey, isOpen, onToggle,
+  angle, isOpen, onToggle,
   expandedAds, toggleAd,
 }: {
   angle: AngleNode;
-  aKey: string;
   isOpen: boolean;
   onToggle: () => void;
   expandedAds: Set<string>;

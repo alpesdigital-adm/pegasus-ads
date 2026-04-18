@@ -19,14 +19,19 @@
  * - 400 VALIDATION_ERROR: campos ausentes
  * - 403 FORBIDDEN: apenas owner/admin
  * - 409 ACCOUNT_EXISTS: conta já vinculada ao workspace
+ *
+ * MIGRADO NA FASE 1C (Wave 4 — workspaces):
+ *  - initDb()/getDb() removidos
+ *  - Duplicate check + DELETE via Drizzle typed builder + dbAdmin
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth, AuthContext } from "@/lib/auth";
-import { initDb, getDb } from "@/lib/db";
+import { dbAdmin } from "@/lib/db";
+import { workspaceMetaAccounts } from "@/lib/db/schema";
 import { addMetaAccount, getMetaAccounts } from "@/lib/workspace";
+import { and, eq } from "drizzle-orm";
 
 export async function GET(req: NextRequest) {
-  await initDb();
   const authResult = await requireAuth(req);
   if (authResult instanceof NextResponse) return authResult;
   const ctx = authResult as AuthContext;
@@ -37,7 +42,6 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  await initDb();
   const authResult = await requireAuth(req);
   if (authResult instanceof NextResponse) return authResult;
   const ctx = authResult as AuthContext;
@@ -83,13 +87,18 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Check duplicate
-  const db = getDb();
-  const existing = await db.execute({
-    sql: `SELECT id FROM workspace_meta_accounts WHERE workspace_id = ? AND meta_account_id = ?`,
-    args: [ctx.workspace_id, meta_account_id],
-  });
-  if (existing.rows.length > 0) {
+  const existing = await dbAdmin
+    .select({ id: workspaceMetaAccounts.id })
+    .from(workspaceMetaAccounts)
+    .where(
+      and(
+        eq(workspaceMetaAccounts.workspaceId, ctx.workspace_id),
+        eq(workspaceMetaAccounts.metaAccountId, meta_account_id),
+      ),
+    )
+    .limit(1);
+
+  if (existing.length > 0) {
     return NextResponse.json(
       { error: "ACCOUNT_EXISTS", message: "This Meta account is already linked to your workspace" },
       { status: 409 }
@@ -115,7 +124,6 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
-  await initDb();
   const authResult = await requireAuth(req);
   if (authResult instanceof NextResponse) return authResult;
   const ctx = authResult as AuthContext;
@@ -133,11 +141,14 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ error: "VALIDATION_ERROR", message: "id is required" }, { status: 400 });
   }
 
-  const db = getDb();
-  await db.execute({
-    sql: `DELETE FROM workspace_meta_accounts WHERE id = ? AND workspace_id = ?`,
-    args: [id, ctx.workspace_id],
-  });
+  await dbAdmin
+    .delete(workspaceMetaAccounts)
+    .where(
+      and(
+        eq(workspaceMetaAccounts.id, id),
+        eq(workspaceMetaAccounts.workspaceId, ctx.workspace_id),
+      ),
+    );
 
   return NextResponse.json({ ok: true });
 }

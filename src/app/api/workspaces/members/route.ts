@@ -8,33 +8,42 @@
  * - 403 FORBIDDEN: apenas owner/admin pode gerenciar membros
  * - 404 USER_NOT_FOUND: email não encontrado
  * - 409 ALREADY_MEMBER: já é membro
+ *
+ * MIGRADO NA FASE 1C (Wave 4 — workspaces):
+ *  - initDb()/getDb() removidos
+ *  - JOIN users + workspace_members via Drizzle innerJoin
+ *  - User lookup + duplicate check em dbAdmin (typed builder)
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth, AuthContext } from "@/lib/auth";
-import { initDb, getDb } from "@/lib/db";
+import { dbAdmin } from "@/lib/db";
+import { users, workspaceMembers } from "@/lib/db/schema";
 import { addWorkspaceMember, removeWorkspaceMember } from "@/lib/workspace";
+import { and, asc, eq } from "drizzle-orm";
 
 export async function GET(req: NextRequest) {
-  await initDb();
   const authResult = await requireAuth(req);
   if (authResult instanceof NextResponse) return authResult;
   const ctx = authResult as AuthContext;
 
-  const db = getDb();
-  const result = await db.execute({
-    sql: `SELECT u.id, u.email, u.name, u.avatar_url, wm.role, wm.created_at
-          FROM workspace_members wm
-          JOIN users u ON u.id = wm.user_id
-          WHERE wm.workspace_id = ?
-          ORDER BY wm.created_at ASC`,
-    args: [ctx.workspace_id],
-  });
+  const members = await dbAdmin
+    .select({
+      id: users.id,
+      email: users.email,
+      name: users.name,
+      avatar_url: users.avatarUrl,
+      role: workspaceMembers.role,
+      created_at: workspaceMembers.createdAt,
+    })
+    .from(workspaceMembers)
+    .innerJoin(users, eq(users.id, workspaceMembers.userId))
+    .where(eq(workspaceMembers.workspaceId, ctx.workspace_id))
+    .orderBy(asc(workspaceMembers.createdAt));
 
-  return NextResponse.json({ members: result.rows });
+  return NextResponse.json({ members });
 }
 
 export async function POST(req: NextRequest) {
-  await initDb();
   const authResult = await requireAuth(req);
   if (authResult instanceof NextResponse) return authResult;
   const ctx = authResult as AuthContext;
@@ -58,27 +67,33 @@ export async function POST(req: NextRequest) {
 
   const memberRole = role === "admin" ? "admin" : "member";
 
-  const db = getDb();
-  const userResult = await db.execute({
-    sql: `SELECT id FROM users WHERE email = ?`,
-    args: [email.toLowerCase()],
-  });
+  const userRow = await dbAdmin
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.email, email.toLowerCase()))
+    .limit(1);
 
-  if (userResult.rows.length === 0) {
+  if (userRow.length === 0) {
     return NextResponse.json(
       { error: "USER_NOT_FOUND", message: `No user found with email: ${email}` },
       { status: 404 }
     );
   }
 
-  const userId = userResult.rows[0].id as string;
+  const userId = userRow[0].id;
 
-  // Check if already member
-  const existing = await db.execute({
-    sql: `SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?`,
-    args: [ctx.workspace_id, userId],
-  });
-  if (existing.rows.length > 0) {
+  const existing = await dbAdmin
+    .select({ userId: workspaceMembers.userId })
+    .from(workspaceMembers)
+    .where(
+      and(
+        eq(workspaceMembers.workspaceId, ctx.workspace_id),
+        eq(workspaceMembers.userId, userId),
+      ),
+    )
+    .limit(1);
+
+  if (existing.length > 0) {
     return NextResponse.json(
       { error: "ALREADY_MEMBER", message: "User is already a member of this workspace" },
       { status: 409 }
@@ -91,7 +106,6 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
-  await initDb();
   const authResult = await requireAuth(req);
   if (authResult instanceof NextResponse) return authResult;
   const ctx = authResult as AuthContext;

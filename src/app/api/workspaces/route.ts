@@ -6,14 +6,19 @@
  * - 401 UNAUTHORIZED: não autenticado
  * - 400 VALIDATION_ERROR: campos ausentes ou slug duplicado
  * - 409 SLUG_EXISTS: slug já em uso
+ *
+ * MIGRADO NA FASE 1C (Wave 4 — workspaces):
+ *  - initDb()/getDb() removidos (workspace.ts já migrado; initDb é no-op)
+ *  - slug uniqueness via Drizzle typed builder + dbAdmin
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth, AuthContext } from "@/lib/auth";
-import { initDb, getDb } from "@/lib/db";
+import { dbAdmin } from "@/lib/db";
+import { workspaces } from "@/lib/db/schema";
 import { getUserWorkspaces, createWorkspace } from "@/lib/workspace";
+import { eq } from "drizzle-orm";
 
 export async function GET(req: NextRequest) {
-  await initDb();
   const authResult = await requireAuth(req);
   if (authResult instanceof NextResponse) return authResult;
   const ctx = authResult as AuthContext;
@@ -32,7 +37,6 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  await initDb();
   const authResult = await requireAuth(req);
   if (authResult instanceof NextResponse) return authResult;
   const ctx = authResult as AuthContext;
@@ -54,13 +58,12 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Check slug uniqueness
-  const db = getDb();
-  const existing = await db.execute({
-    sql: `SELECT id FROM workspaces WHERE slug = ?`,
-    args: [slug],
-  });
-  if (existing.rows.length > 0) {
+  const existing = await dbAdmin
+    .select({ id: workspaces.id })
+    .from(workspaces)
+    .where(eq(workspaces.slug, slug))
+    .limit(1);
+  if (existing.length > 0) {
     return NextResponse.json(
       { error: "SLUG_EXISTS", message: "A workspace with this slug already exists" },
       { status: 409 }

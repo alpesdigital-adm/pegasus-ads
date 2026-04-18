@@ -4,10 +4,17 @@
  * Kill rules drill-down usando classified_insights (local, sem Meta API).
  * Agrupa por adset → ads com métricas por janela.
  * CRM leads cruzados via (utm_content, utm_term).
+ *
+ * MIGRADO NA FASE 1C (Wave 2):
+ *  - classified_insights é global (sem workspace_id) → dbAdmin (BYPASSRLS)
+ *  - crm_leads é workspace-scoped → withWorkspace (RLS)
+ *  - 4 queries em classified_insights paralelas via Promise.all — as 3 derivadas
+ *    (main + 3d + 7d) viravam sequenciais no legado; ganha latência aqui.
+ *  - Queries em sql`` — CAST/CASE/GROUP BY são mais legíveis que Drizzle ORM
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
-import { getDb } from "@/lib/db";
+import { dbAdmin, withWorkspace, sql } from "@/lib/db";
 import { evaluateKillRules, type KillRuleMetrics } from "@/config/kill-rules";
 
 export const runtime = "nodejs";
@@ -39,13 +46,17 @@ export async function GET(
   }
 
   try {
-    const db = getDb();
     const daysBack = windowToDays(windowParam);
-    const dateFilter = daysBack === 0 ? "date = CURRENT_DATE" : `date >= CURRENT_DATE - INTERVAL '${daysBack} days'`;
 
-    // 1. Ads with metrics from classified_insights
-    const adsResult = await db.execute({
-      sql: `
+    // Date filters — usamos fragmentos sql`` para compor ternário
+    const mainDateFilter = daysBack === 0
+      ? sql`date = CURRENT_DATE`
+      : sql`date >= CURRENT_DATE - (${daysBack}::INTEGER * INTERVAL '1 day')`;
+
+    // ── classified_insights queries (GLOBAL → dbAdmin, em paralelo) ──
+    const [adsRes, benchRes, w3dRes, w7dRes] = await Promise.all([
+      // 1. Ads with metrics
+      dbAdmin.execute(sql`
         SELECT
           ad_id,
           ad_name,
@@ -62,27 +73,56 @@ export async function GET(
           CASE WHEN SUM(impressions) > 0 THEN (SUM(CAST(spend AS FLOAT)) / SUM(impressions) * 1000) ELSE 0 END AS cpm,
           COUNT(DISTINCT date) AS days_count
         FROM classified_insights
-        WHERE campaign_id = ?
-          AND ${dateFilter}
+        WHERE campaign_id = ${campaignId}
+          AND ${mainDateFilter}
         GROUP BY ad_id, ad_name, adset_id, adset_name, campaign_name
         ORDER BY SUM(CAST(spend AS FLOAT)) DESC
-      `,
-      args: [campaignId],
-    });
+      `),
+      // 5. Campaign-level rolling 5d CPL for benchmark
+      dbAdmin.execute(sql`
+        SELECT
+          SUM(CAST(spend AS FLOAT)) AS total_spend,
+          SUM(leads) AS total_leads
+        FROM classified_insights
+        WHERE campaign_id = ${campaignId}
+          AND date >= CURRENT_DATE - INTERVAL '5 days'
+      `),
+      // 6a. Per-ad 3d window
+      dbAdmin.execute(sql`
+        SELECT ad_id, adset_id, SUM(CAST(spend AS FLOAT)) AS spend, SUM(leads) AS leads
+        FROM classified_insights
+        WHERE campaign_id = ${campaignId}
+          AND date >= CURRENT_DATE - INTERVAL '3 days'
+        GROUP BY ad_id, adset_id
+      `),
+      // 6b. Per-ad 7d window
+      dbAdmin.execute(sql`
+        SELECT ad_id, adset_id, SUM(CAST(spend AS FLOAT)) AS spend, SUM(leads) AS leads
+        FROM classified_insights
+        WHERE campaign_id = ${campaignId}
+          AND date >= CURRENT_DATE - INTERVAL '7 days'
+        GROUP BY ad_id, adset_id
+      `),
+    ]);
 
-    // 2. Campaign name for CRM lookup
+    const adsRows = adsRes as unknown as Array<Record<string, unknown>>;
+    const benchRows = benchRes as unknown as Array<Record<string, unknown>>;
+    const w3dRows = w3dRes as unknown as Array<Record<string, unknown>>;
+    const w7dRows = w7dRes as unknown as Array<Record<string, unknown>>;
+
+    // Campaign name for CRM lookup
     let campaignName = "";
-    if (adsResult.rows.length > 0) {
-      campaignName = (adsResult.rows[0].campaign_name as string) || "";
+    if (adsRows.length > 0) {
+      campaignName = (adsRows[0].campaign_name as string) || "";
     }
 
-    // 3. CRM leads grouped by (utm_content, utm_term) — filtered by same window
-    const crmDateFilter = daysBack === 0
-      ? "AND subscribed_at >= CURRENT_DATE"
-      : `AND subscribed_at >= CURRENT_DATE - INTERVAL '${daysBack} days'`;
+    // ── CRM leads (workspace-scoped → withWorkspace) ──
+    const crmRows = await withWorkspace(auth.workspace_id, async (tx) => {
+      const crmDateClause = daysBack === 0
+        ? sql`AND subscribed_at >= CURRENT_DATE`
+        : sql`AND subscribed_at >= CURRENT_DATE - (${daysBack}::INTEGER * INTERVAL '1 day')`;
 
-    const crmResult = await db.execute({
-      sql: `
+      const res = await tx.execute(sql`
         SELECT
           utm_content,
           utm_term,
@@ -91,17 +131,16 @@ export async function GET(
           COUNT(*) AS total_leads,
           SUM(CASE WHEN is_qualified THEN 1 ELSE 0 END) AS qualified_leads
         FROM crm_leads
-        WHERE workspace_id = ?
-          AND (utm_campaign LIKE ? OR campaign_id = ?)
-          ${crmDateFilter}
+        WHERE (utm_campaign LIKE ${"%" + campaignName + "%"} OR campaign_id = ${campaignId})
+          ${crmDateClause}
         GROUP BY utm_content, utm_term, ad_id, adset_id
-      `,
-      args: [auth.workspace_id, `%${campaignName}%`, campaignId],
+      `);
+      return res as unknown as Array<Record<string, unknown>>;
     });
 
     // Build CRM map — strict matching only (no __ANY__ fallback to prevent cross-campaign leaks)
     const crmMap = new Map<string, { total: number; qualified: number }>();
-    for (const r of crmResult.rows) {
+    for (const r of crmRows) {
       const entry = { total: Number(r.total_leads || 0), qualified: Number(r.qualified_leads || 0) };
       // By names: (adName, adsetName) — primary key
       if (r.utm_content && r.utm_term) {
@@ -113,64 +152,37 @@ export async function GET(
       }
     }
 
-    const hasCrmData = crmResult.rows.length > 0;
+    const hasCrmData = crmRows.length > 0;
 
-    // 4. Resolve CRM leads per ad
     function resolveLeads(adName: string, adId: string, adsetName: string, adsetId: string) {
       if (!hasCrmData) return { leads: 0, qualified: 0, source: "meta" as const };
-      // Try (adName, adsetName) — strict match
       const byName = crmMap.get(`${adName.toUpperCase()}||${adsetName.toUpperCase()}`);
       if (byName) return { leads: byName.total, qualified: byName.qualified, source: "crm" as const };
-      // Try (adId, adsetId) — fallback
       const byId = crmMap.get(`ID:${adId}||${adsetId}`);
       if (byId) return { leads: byId.total, qualified: byId.qualified, source: "crm" as const };
-      // No match = 0 leads for this ad×adset in this campaign
       return { leads: 0, qualified: 0, source: "crm" as const };
     }
 
-    // 5. Campaign-level rolling 5d CPL for benchmark
-    const benchResult = await db.execute({
-      sql: `
-        SELECT
-          SUM(CAST(spend AS FLOAT)) AS total_spend,
-          SUM(leads) AS total_leads
-        FROM classified_insights
-        WHERE campaign_id = ? AND date >= CURRENT_DATE - INTERVAL '5 days'
-      `,
-      args: [campaignId],
-    });
-    const benchSpend = Number(benchResult.rows[0]?.total_spend || 0);
-    const benchLeads = Number(benchResult.rows[0]?.total_leads || 0);
+    // Benchmark
+    const benchSpend = Number(benchRows[0]?.total_spend || 0);
+    const benchLeads = Number(benchRows[0]?.total_leads || 0);
     const rolling5dCpl = benchLeads > 0 ? benchSpend / benchLeads : 0;
 
     const CPL_TARGET = 32.77; // CPL meta do planejamento (cenário realista)
 
-    // 6. Per-ad windowed data (3d and 7d) for L3/L4 kill rules
-    const windows3dResult = await db.execute({
-      sql: `SELECT ad_id, adset_id, SUM(CAST(spend AS FLOAT)) AS spend, SUM(leads) AS leads
-            FROM classified_insights WHERE campaign_id = ? AND date >= CURRENT_DATE - INTERVAL '3 days'
-            GROUP BY ad_id, adset_id`,
-      args: [campaignId],
-    });
+    // Build window maps
     const w3dMap = new Map<string, { spend: number; leads: number }>();
-    for (const r of windows3dResult.rows) {
+    for (const r of w3dRows) {
       w3dMap.set(`${r.ad_id}||${r.adset_id}`, { spend: Number(r.spend || 0), leads: Number(r.leads || 0) });
     }
-
-    const windows7dResult = await db.execute({
-      sql: `SELECT ad_id, adset_id, SUM(CAST(spend AS FLOAT)) AS spend, SUM(leads) AS leads
-            FROM classified_insights WHERE campaign_id = ? AND date >= CURRENT_DATE - INTERVAL '7 days'
-            GROUP BY ad_id, adset_id`,
-      args: [campaignId],
-    });
     const w7dMap = new Map<string, { spend: number; leads: number }>();
-    for (const r of windows7dResult.rows) {
+    for (const r of w7dRows) {
       w7dMap.set(`${r.ad_id}||${r.adset_id}`, { spend: Number(r.spend || 0), leads: Number(r.leads || 0) });
     }
 
-    // 6b. Benchmark: exists ad with spend > 20× CPL meta & CPL ≤ CPL meta?
+    // Benchmark: exists ad with spend > 20× CPL meta & CPL ≤ CPL meta?
     let benchmarkExists = false;
-    for (const row of adsResult.rows) {
+    for (const row of adsRows) {
       const spend = Number(row.spend || 0);
       const crm = resolveLeads(
         row.ad_name as string, row.ad_id as string,
@@ -186,7 +198,7 @@ export async function GET(
       }
     }
 
-    // 7. Build ads with kill rules
+    // Build ads with kill rules
     const ads = [];
     let killCount = 0;
     let totalSpend = 0;
@@ -195,7 +207,7 @@ export async function GET(
     let totalQualified = 0;
     let activeCount = 0;
 
-    for (const row of adsResult.rows) {
+    for (const row of adsRows) {
       const spend = Number(row.spend || 0);
       const impressions = Number(row.impressions || 0);
       const clicks = Number(row.clicks || 0);
@@ -214,20 +226,17 @@ export async function GET(
       const cpl = leadsForRules > 0 ? spend / leadsForRules : null;
       const cpm = impressions > 0 ? (spend / impressions) * 1000 : 0;
 
-      // Qualified metrics
       const cplQualified = crm.qualified > 0 ? spend / crm.qualified : null;
       const qualificationRate = crm.leads > 0 ? (crm.qualified / crm.leads) * 100 : null;
 
-      // Window data for L3/L4
       const adKey = `${row.ad_id}||${row.adset_id}`;
       const w3d = w3dMap.get(adKey) || { spend: 0, leads: 0 };
       const w7d = w7dMap.get(adKey) || { spend: 0, leads: 0 };
-      const leads3d = hasCrmData ? crm.leads : w3d.leads; // CRM not windowed separately yet, use meta for windows
+      const leads3d = hasCrmData ? crm.leads : w3d.leads;
       const leads7d = hasCrmData ? crm.leads : w7d.leads;
       const cpl3d = leads3d > 0 ? w3d.spend / leads3d : null;
       const cpl7d = leads7d > 0 ? w7d.spend / leads7d : null;
 
-      // Kill rules (spec original)
       const killMetrics: KillRuleMetrics = {
         spend,
         leads: leadsForRules,
@@ -279,7 +288,6 @@ export async function GET(
       });
     }
 
-    // Campaign-level qualified metrics
     const totalCplQualified = totalQualified > 0 ? totalSpend / totalQualified : null;
     const totalQualificationRate = totalLeadsCrm > 0 ? (totalQualified / totalLeadsCrm) * 100 : null;
 
@@ -291,7 +299,7 @@ export async function GET(
       benchmark_exists: benchmarkExists,
       leads_source: hasCrmData ? "crm" : "meta",
       rolling_5d_cpl: Math.round(rolling5dCpl * 100) / 100,
-      total_ads: adsResult.rows.length,
+      total_ads: adsRows.length,
       active_ads: activeCount,
       kill_candidates: killCount,
       total_spend: Math.round(totalSpend * 100) / 100,

@@ -447,6 +447,42 @@ docker compose -p alpes-ads_supabase up -d supavisor --force-recreate
 
 ---
 
+## TD-016 — Alerta "integridade estatística do test_round" no cockpit 🔴 open
+
+**Descoberto:** 2026-04-18 (peer review da regra `finalizeBatch` → `test_rounds.status`)
+**Dono:** time de frontend / UX
+**Impacto:** cosmético/operacional — a regra "status reflete tráfego real"
+pode marcar `test_round.status='live'` em cenários onde o teste A/B está
+estatisticamente comprometido. Exemplo: batch em `immediate` mode com 4
+variantes, 3 delas falham no `create_ad` (não-críticos) e só 1 roda. A
+partial_success vira `live`, mas o ângulo principal do teste pode ter
+sido justamente a que falhou — o round está "live" com validade
+científica comprometida.
+
+**Estado atual:**
+- `finalizeBatch` escreve `test_round.status='live'` respeitando a regra
+  de tráfego real (pelo menos 1 ad ativo)
+- `step_events` batch-level registra a regra aplicada (reason) pra
+  trilha de auditoria — a decisão do round fica rastreável
+- UI do Pegasus NÃO diferencia round com 100% ads vs round com parcial
+  dos ads
+
+**Solução proposta:**
+- Cockpit mostra badge "⚠️ Round live com N/M ads ativos — integridade do
+  teste comprometida" quando `published_ads` count < `test_round_variants`
+  count (com status='published')
+- Opcional: notificação (email/slack) pro owner do round na primeira vez
+  que isso acontece — permite decisão humana de killar e relançar
+
+**Prioridade:** 3 (cosmético operacional). Não bloqueia publicação nem
+análise manual. Pode virar prioridade 1 se começarmos a automatizar
+winner-detection sobre dados incompletos.
+
+**Quando:** Fase 4 do plano (frontend real-time) ou depois, conforme
+demanda de análise aparecer.
+
+---
+
 ## TD-015 — Realtime do cluster Supabase não wired pro DB `pegasus_ads` 🔴 open
 
 **Descoberto:** 2026-04-18 (gêmeo VPS tentando aplicar migration 0010 da

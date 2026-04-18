@@ -33,7 +33,6 @@ import {
   verifyPrePublish as runVerifyPrePublish,
   verifyPostPublish as runVerifyPostPublish,
 } from "@/lib/ai-verify";
-import { generateMetaAdName } from "@/lib/creative-naming";
 import { UTM_TEMPLATE } from "@/config/campaigns";
 import { logger } from "@/lib/logger";
 
@@ -74,27 +73,15 @@ interface AdContent {
 /**
  * Root step do DAG pro batch type 'test_round_publish'.
  *
- * Input:  { testRoundId: string }
- * Output: {
- *   testRoundId, metaCampaignId, accountId, pageId, instagramUserId,
- *   variantPairs: VariantPair[],
- *   adSetTemplate: AdSetTemplate,
- *   adContent: AdContent,
- *   urlTags: string,
- * }
+ * Arquitetura (Fase 2D refactor): o factory createTestRoundBatch faz
+ * pre-loading SÍNCRONO de todo contexto (campaign meta_*, variants,
+ * adSetTemplate via Meta API, adContent via fallback) e injeta direto
+ * nos inputData dos steps downstream. Load_context fica trivial:
+ *  - Valida test_round ainda existe no workspace (rare race)
+ *  - Muta test_rounds.status='publishing' (marca início do batch)
  *
- * Responsabilidades:
- *  1. Carregar test_round + campaign (SELECT dbAdmin + filter workspace)
- *  2. Carregar variantes (variant role, status generated|verified)
- *  3. Buscar adSetTemplate na Meta (primeiro ad set ACTIVE da campanha)
- *  4. Resolver ad content via fallback (DB config → Meta API → cache write).
- *     Faz parte desse step pra falhar rápido (step 0) antes de upload/create.
- *  5. Mutar test_rounds.status='publishing'.
- *
- * Side-effects:
- *  - UPDATE test_rounds SET status='publishing' (marca início do batch)
- *  - UPDATE campaigns SET config.ad_content (cache do fallback, só se Meta
- *    API foi consultada)
+ * Input:  { testRoundId }
+ * Output: { testRoundId, validatedAt }
  */
 async function handleLoadContext(
   input: Record<string, unknown>,
@@ -102,251 +89,36 @@ async function handleLoadContext(
 ): Promise<Record<string, unknown>> {
   const testRoundId = input.testRoundId as string | undefined;
   if (!testRoundId) {
-    throw new Error("META_VALIDATION: load_context requires testRoundId in input");
+    throw new Error("META_VALIDATION: load_context requires testRoundId");
   }
 
-  // 1. test_round + campaign (JOIN)
-  const roundRes = await dbAdmin.execute<{
-    id: string;
-    workspace_id: string;
-    campaign_id: string;
-    status: string;
-    ai_verification: unknown;
-    meta_campaign_id: string;
-    meta_account_id: string;
-    page_id: string;
-    instagram_user_id: string;
-    config: unknown;
-    cpl_target: unknown;
-  }>(sql`
-    SELECT tr.id, tr.workspace_id, tr.campaign_id, tr.status, tr.ai_verification,
-           c.meta_campaign_id, c.meta_account_id, c.page_id, c.instagram_user_id,
-           c.config, c.cpl_target
-    FROM test_rounds tr
-    JOIN campaigns c ON tr.campaign_id = c.id
-    WHERE tr.id = ${testRoundId}
-      AND tr.workspace_id = ${workspaceId}
-    LIMIT 1
-  `);
-  if (roundRes.length === 0) {
-    throw new Error(
-      `load_context: test_round ${testRoundId} not found in workspace ${workspaceId}`,
-    );
-  }
-  const round = roundRes[0];
+  const [round] = await dbAdmin
+    .select({ id: testRounds.id, status: testRounds.status })
+    .from(testRounds)
+    .where(
+      and(
+        eq(testRounds.id, testRoundId),
+        eq(testRounds.workspaceId, workspaceId),
+      ),
+    )
+    .limit(1);
 
-  const metaCampaignId = round.meta_campaign_id;
-  const accountId = round.meta_account_id;
-  const pageId = round.page_id;
-  const instagramUserId = round.instagram_user_id;
-  const campaignConfig: Record<string, unknown> =
-    typeof round.config === "string"
-      ? JSON.parse(round.config)
-      : ((round.config as Record<string, unknown>) ?? {});
-
-  if (!metaCampaignId || !accountId || !pageId || !instagramUserId) {
+  if (!round) {
     throw new Error(
-      `META_VALIDATION: load_context — campaign ${round.campaign_id} missing meta_campaign_id/account_id/page_id/instagram_user_id`,
+      `load_context: test_round ${testRoundId} disappeared from workspace ${workspaceId}`,
     );
   }
 
-  // 2. variants (feed + stories rows)
-  const variantRes = await dbAdmin.execute<{
-    id: string;
-    creative_id: string;
-    placement: string;
-    blob_url: string;
-    creative_name: string;
-  }>(sql`
-    SELECT trv.id, trv.creative_id, trv.placement,
-           cr.blob_url, cr.name AS creative_name
-    FROM test_round_variants trv
-    JOIN creatives cr ON trv.creative_id = cr.id
-    JOIN test_rounds tr ON trv.test_round_id = tr.id
-    WHERE trv.test_round_id = ${testRoundId}
-      AND tr.workspace_id = ${workspaceId}
-      AND trv.role = 'variant'
-      AND trv.status IN ('generated', 'verified')
-    ORDER BY cr.name
-  `);
-
-  if (variantRes.length === 0) {
-    throw new Error(
-      `META_VALIDATION: load_context — no variants found for test_round ${testRoundId} in status generated|verified`,
-    );
-  }
-
-  const variantPairs = groupVariantsByAd(variantRes);
-  if (variantPairs.length === 0) {
-    throw new Error(
-      `META_VALIDATION: load_context — variants present but zero VariantPairs after grouping (regex mismatch?)`,
-    );
-  }
-
-  // 3. adSetTemplate (Meta API)
-  const adSetTemplateRaw = await meta.getAdSetTemplate(metaCampaignId, workspaceId);
-  if (!adSetTemplateRaw) {
-    throw new Error(
-      `META_VALIDATION: load_context — no ad set template found for campaign ${metaCampaignId}`,
-    );
-  }
-  const adSetTemplate: AdSetTemplate = {
-    name: String(adSetTemplateRaw.name ?? ""),
-    dailyBudgetCents: String(
-      campaignConfig.daily_budget ??
-        adSetTemplateRaw.daily_budget ??
-        "8000",
-    ),
-    bidStrategy: String(
-      campaignConfig.bid_strategy ??
-        adSetTemplateRaw.bid_strategy ??
-        "LOWEST_COST_WITHOUT_CAP",
-    ),
-    billingEvent: String(adSetTemplateRaw.billing_event ?? "IMPRESSIONS"),
-    optimizationGoal: String(
-      adSetTemplateRaw.optimization_goal ?? "OFFSITE_CONVERSIONS",
-    ),
-    targeting: (adSetTemplateRaw.targeting as Record<string, unknown>) ?? {},
-    promotedObject:
-      (adSetTemplateRaw.promoted_object as Record<string, unknown>) ?? {},
-  };
-
-  // 4. ad content — DB config → Meta API → cache (moved from legacy pipeline)
-  const adContent = await resolveAdContent(
-    metaCampaignId,
-    accountId,
-    workspaceId,
-    campaignConfig,
-  );
-
-  // 5. Muta status → 'publishing'
   await dbAdmin
     .update(testRounds)
     .set({ status: "publishing", updatedAt: sql`NOW()` })
     .where(eq(testRounds.id, testRoundId));
 
-  log.info(
-    {
-      testRoundId,
-      variantPairs: variantPairs.length,
-      adSetTemplateName: adSetTemplate.name,
-      dailyBudget: adSetTemplate.dailyBudgetCents,
-    },
-    "context loaded",
-  );
+  log.info({ testRoundId }, "test_round marked publishing");
 
   return {
     testRoundId,
-    metaCampaignId,
-    accountId,
-    pageId,
-    instagramUserId,
-    variantPairs,
-    adSetTemplate,
-    adContent,
-    urlTags: UTM_TEMPLATE,
-  };
-}
-
-function groupVariantsByAd(
-  rows: Array<{
-    id: string;
-    creative_id: string;
-    placement: string;
-    blob_url: string;
-    creative_name: string;
-  }>,
-): VariantPair[] {
-  const map = new Map<string, VariantPair>();
-
-  for (const row of rows) {
-    const matched = row.creative_name?.match(/AD(\d+)/i);
-    if (!matched) continue;
-    const adNumber = parseInt(matched[1], 10);
-    const adName = generateMetaAdName(adNumber);
-
-    if (!map.has(adName)) {
-      map.set(adName, { adName, adNumber });
-    }
-
-    const pair = map.get(adName)!;
-    const data = {
-      variantId: row.id,
-      creativeId: row.creative_id,
-      blobUrl: row.blob_url,
-    };
-
-    if (row.placement === "feed") pair.feed = data;
-    else if (row.placement === "stories") pair.stories = data;
-  }
-
-  // Remove pares incompletos (sem feed OU sem stories) — AdSetTemplate
-  // espera ambos placements. Se faltar um, skip (evita criar ad quebrado).
-  const complete: VariantPair[] = [];
-  for (const pair of map.values()) {
-    if (pair.feed && pair.stories) complete.push(pair);
-    else {
-      log.warn(
-        { adName: pair.adName, hasFeed: !!pair.feed, hasStories: !!pair.stories },
-        "incomplete variant pair skipped",
-      );
-    }
-  }
-  return complete;
-}
-
-async function resolveAdContent(
-  metaCampaignId: string,
-  accountId: string,
-  workspaceId: string,
-  campaignConfig: Record<string, unknown>,
-): Promise<AdContent> {
-  // 1. DB config (override manual, mais prioritário)
-  const cached = campaignConfig.ad_content as AdContent | undefined;
-  if (cached?.link && cached?.body && cached?.title) {
-    log.info("using ad_content from campaign config (DB)");
-    return {
-      body: cached.body,
-      title: cached.title,
-      link: cached.link,
-      callToAction: cached.callToAction ?? "LEARN_MORE",
-    };
-  }
-
-  // 2. Meta API
-  log.info({ metaCampaignId }, "fetching ad content from meta api");
-  const metaContent = await meta.getAdContentFromCampaign(
-    metaCampaignId,
-    workspaceId,
-  );
-  if (!metaContent?.link || !metaContent?.body || !metaContent?.title) {
-    throw new Error(
-      `META_VALIDATION: No ad content (body/title/link) for campaign ${metaCampaignId}. ` +
-        `Configure ad_content in campaign.config or ensure the campaign has at least one ACTIVE ad with creative content.`,
-    );
-  }
-
-  // 3. Cache write (best-effort — falha de cache não derruba o step)
-  try {
-    await dbAdmin.execute(sql`
-      UPDATE campaigns SET config = jsonb_set(
-        COALESCE(config::jsonb, '{}'::jsonb),
-        '{ad_content}',
-        ${JSON.stringify(metaContent)}::jsonb
-      )
-      WHERE meta_campaign_id = ${metaCampaignId}
-        AND meta_account_id = ${accountId}
-    `);
-    log.info("cached ad_content in campaign.config");
-  } catch (err) {
-    log.warn({ err }, "failed to cache ad_content (non-fatal)");
-  }
-
-  return {
-    body: metaContent.body,
-    title: metaContent.title,
-    link: metaContent.link,
-    callToAction: metaContent.callToAction ?? "LEARN_MORE",
+    validatedAt: new Date().toISOString(),
   };
 }
 
@@ -878,18 +650,23 @@ async function handleVerifyPostPublish(
  * marked como 'published' + publishedAds linha por feed/stories + creatives
  * status='testing'.
  *
- * Input: { testRoundId, batchId }
+ * Input: {
+ *   testRoundId,
+ *   batchId,
+ *   variantPairs,       ← injetado pelo factory no momento de criação do batch
+ *   adSetTemplateName,  ← injetado pelo factory (só o nome — demais campos ficam em create_adset)
+ * }
  * Side effects (transação dbAdmin):
  *   - UPDATE testRoundVariants SET metaAdId/metaAdsetId/metaCreativeId, status='published'
  *   - INSERT publishedAds (2 rows por pair: feed + stories)
  *   - UPDATE creatives SET status='testing'
  * Output: { variantsUpdated, publishedAdsInserted, creativesMarkedTesting }
  *
- * Reconstrução do contexto via queries nos steps do batch:
- *   - load_context → variantPairs + adSetTemplate.name
- *   - upload_image[feed/stories] (correlacionados por variantPairIndex) → imageHash
- *   - create_ad → metaAdId/metaCreativeId/variantPairIndex
- *   - create_adset → metaAdsetId (1 por pair)
+ * Reconstrução dos IDs Meta via queries nos steps do batch (indexado por
+ * variantPairIndex):
+ *   - upload_image[feed/stories] → imageHash
+ *   - create_ad → metaAdId (+ metaCreativeId via inputData propagado)
+ *   - create_adset → metaAdsetId
  */
 async function handlePersistResults(
   input: Record<string, unknown>,
@@ -897,38 +674,18 @@ async function handlePersistResults(
 ): Promise<Record<string, unknown>> {
   const testRoundId = input.testRoundId as string | undefined;
   const batchId = input.batchId as string | undefined;
+  const variantPairs = (input.variantPairs as VariantPair[] | undefined) ?? [];
+  const adSetTemplateName =
+    (input.adSetTemplateName as string | undefined) ?? "";
+
   if (!testRoundId || !batchId) {
     throw new Error(
       "META_VALIDATION: persist_results requires testRoundId and batchId",
     );
   }
-
-  // 1. load_context — tira variantPairs + adSetTemplate.name
-  const [loadStep] = await dbAdmin
-    .select({ outputData: publicationSteps.outputData })
-    .from(publicationSteps)
-    .where(
-      and(
-        eq(publicationSteps.batchId, batchId),
-        eq(publicationSteps.workspaceId, workspaceId),
-        eq(publicationSteps.stepType, "load_context"),
-        eq(publicationSteps.status, "succeeded"),
-      ),
-    )
-    .limit(1);
-
-  if (!loadStep) {
+  if (variantPairs.length === 0 || !adSetTemplateName) {
     throw new Error(
-      "persist_results: load_context step not found or not succeeded",
-    );
-  }
-
-  const loadOutput = (loadStep.outputData ?? {}) as Record<string, unknown>;
-  const variantPairs = (loadOutput.variantPairs as VariantPair[]) ?? [];
-  const adSetTemplate = loadOutput.adSetTemplate as AdSetTemplate | undefined;
-  if (variantPairs.length === 0 || !adSetTemplate) {
-    throw new Error(
-      "persist_results: load_context output missing variantPairs or adSetTemplate",
+      "META_VALIDATION: persist_results requires variantPairs and adSetTemplateName from factory",
     );
   }
 
@@ -1070,7 +827,7 @@ async function handlePersistResults(
           metaCreativeId: creative.metaCreativeId,
           metaImageHash: imageHash,
           adName: pair.adName,
-          adsetName: adSetTemplate.name,
+          adsetName: adSetTemplateName,
           placement,
           status: "pending_review",
         });

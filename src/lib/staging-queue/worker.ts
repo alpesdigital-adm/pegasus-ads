@@ -12,11 +12,12 @@
 // passam por RLS intencionalmente — orquestração é cross-workspace por design.
 
 import { dbAdmin } from "@/lib/db";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import {
   publicationBatches,
   publicationSteps,
   stepDependencies,
+  testRounds,
 } from "@/lib/db/schema";
 import {
   calculateNextRetry,
@@ -367,6 +368,7 @@ async function finalizeBatch(
   batchId: string,
   status: "succeeded" | "partial_success" | "failed",
 ): Promise<void> {
+  // 1. Finaliza batch em si (sempre acontece)
   await dbAdmin.execute(sql`
     UPDATE publication_batches
     SET status = ${status}::batch_status,
@@ -375,7 +377,119 @@ async function finalizeBatch(
         locked_at = NULL
     WHERE id = ${batchId}
   `);
-  log.info({ batchId, status }, "batch finalized");
+
+  // 2. Propaga status pro test_rounds (só se batchType = test_round_publish).
+  // Regra "status reflete tráfego real": succeeded=live, failed=failed,
+  // partial_success inspeciona activate_ads pra decidir.
+  const [batch] = await dbAdmin
+    .select({
+      batchType: publicationBatches.batchType,
+      testRoundId: publicationBatches.testRoundId,
+      workspaceId: publicationBatches.workspaceId,
+    })
+    .from(publicationBatches)
+    .where(eq(publicationBatches.id, batchId));
+
+  if (batch?.batchType === "test_round_publish" && batch.testRoundId) {
+    const { roundStatus, reason } = await resolveTestRoundStatus(
+      batchId,
+      status,
+    );
+
+    await dbAdmin
+      .update(testRounds)
+      .set({
+        status: roundStatus,
+        // publishedAt marca finalização do batch (não primeira impression
+        // real na Meta). Se no futuro quisermos medir "tempo de pacing
+        // desde publicação", esse delta importa — cobre por TD-menor
+        // anotado inline, não vale resolver agora.
+        ...(roundStatus === "live" ? { publishedAt: sql`NOW()` } : {}),
+        updatedAt: sql`NOW()`,
+      })
+      .where(eq(testRounds.id, batch.testRoundId));
+
+    // Event meta batch-level (step_id=NULL desde migration 0011).
+    // Trilha de auditoria: que regra levou o round pro status final.
+    await dbAdmin.execute(sql`
+      INSERT INTO step_events (batch_id, workspace_id, from_status, to_status, message, metadata)
+      VALUES (
+        ${batchId},
+        ${batch.workspaceId},
+        ${status},
+        ${roundStatus},
+        ${`test_round.status → ${roundStatus} (rule: ${reason})`},
+        ${JSON.stringify({
+          batchFinalStatus: status,
+          testRoundStatus: roundStatus,
+          reason,
+        })}::jsonb
+      )
+    `);
+
+    log.info(
+      { batchId, testRoundId: batch.testRoundId, status, roundStatus, reason },
+      "test_round status propagated",
+    );
+  } else {
+    log.info({ batchId, status }, "batch finalized");
+  }
+}
+
+/**
+ * Decide test_rounds.status baseado no status final do batch.
+ *
+ * Regra "status reflete tráfego real":
+ *   succeeded          → live (all good)
+ *   failed             → failed (algo crítico quebrou)
+ *   partial_success    → depende do activate_ads:
+ *     activate_ads.succeeded         → live (ads foram ativados, tráfego real)
+ *     activate_ads não sucedeu       → failed (zero tráfego)
+ *     activate_ads não existe no DAG → live (modo immediate: create_ad cria
+ *                                       ACTIVE direto, partial = algum ad
+ *                                       não-crítico falhou mas outros rodam)
+ */
+async function resolveTestRoundStatus(
+  batchId: string,
+  batchStatus: "succeeded" | "partial_success" | "failed",
+): Promise<{ roundStatus: string; reason: string }> {
+  if (batchStatus === "succeeded") {
+    return { roundStatus: "live", reason: "all_steps_succeeded" };
+  }
+  if (batchStatus === "failed") {
+    return { roundStatus: "failed", reason: "critical_step_failed" };
+  }
+
+  // partial_success — inspeciona activate_ads
+  const [activateStep] = await dbAdmin
+    .select({ status: publicationSteps.status })
+    .from(publicationSteps)
+    .where(
+      and(
+        eq(publicationSteps.batchId, batchId),
+        eq(publicationSteps.stepType, "activate_ads"),
+      ),
+    )
+    .limit(1);
+
+  if (!activateStep) {
+    // Modo immediate: sem activate_ads. partial_success = algum create_ad
+    // não-crítico falhou, outros succeeded com status=ACTIVE. Tráfego real.
+    return {
+      roundStatus: "live",
+      reason: "partial_success_immediate_mode",
+    };
+  }
+  if (activateStep.status === "succeeded") {
+    return {
+      roundStatus: "live",
+      reason: "partial_success_with_active_traffic",
+    };
+  }
+  return {
+    roundStatus: "failed",
+    reason: `partial_success_no_active_traffic_activate_step_${activateStep.status}`,
+  };
 }
 
 async function getBatchStatus(batchId: string): Promise<string | null> {

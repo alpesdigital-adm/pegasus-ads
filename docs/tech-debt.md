@@ -87,51 +87,48 @@ não confundir falha real de CI com ruído residual.
 
 ---
 
-## TD-002 — Configurar Supavisor no pegasus_ads 🟡 in-progress (deferred)
+## TD-002 — Supavisor pooling ativo 🟢 done
 
 **Descoberto:** 2026-04-17 (Fase 0 da migração)
-**Atualizado:** 2026-04-18 (pós-cutover: investigação revelou
-schema/versão do Supavisor incompatível com o script — deferido)
-**Dono:** Claude / Leandro (pós-cutover estabilizado)
-**Impacto:** o cluster já tem Supavisor (`alpes-ads_supabase-supavisor-1`),
-mas NINGUÉM usa hoje (CRM e Ads ambos em conexão direta porta 5432).
-Supavisor seria ganho de multiplexing/pool, não bloqueador.
+**Atualizado:** 2026-04-18 (cutover executado pós-Fase 2 — fundação
+direito antes do telhado, decisão do Leandro)
+**Dono:** Claude (implementação) + Leandro (autorização)
+**Impacto:** pegasus-ads passa a conectar no Postgres via Supavisor em
+transaction mode (porta 6543). Ganho imediato: multiplexing de conexões,
+app pool de 10 no postgres-js serve N requests concorrentes sem abrir
+novas conexões reais ao banco.
 
-**Contexto (expandido 2026-04-18):**
-- O cluster roda Supavisor moderno: tenants em
-  `_supabase._supavisor.tenants` + usuários em `_supavisor.users` com
-  `db_pass_encrypted bytea` (AES-GCM via API_JWT_SECRET)
-- Script `scripts/phase-1b/02-supavisor-add-tenant.sh` assumia schema
-  antigo (colunas `db_user/db_password` inline em tenants) — agora
-  detecta o schema moderno e ABORTA com erro claro, em vez de tentar
-  INSERT inválido
-- HTTP API em `:4000/api/tenants` retorna 404 (esta versão não expõe
-  management REST)
-- CRM NÃO usa Supavisor (mesmo padrão direto porta 5432) — precedente
-  de "viver sem pooling" já está estabelecido
-- `API_JWT_SECRET` continua com valor demo público (TD-006 overlap)
+**Estado final:**
+- ✅ Tenant `pegasus_ads` em `_supabase._supavisor.tenants`
+- ✅ User `pegasus_ads_app` com db_pass_encrypted (formato Cloak correto)
+- ✅ `DATABASE_URL` = Supavisor :6543 (pooled, transaction mode)
+- ✅ `DATABASE_URL_ADMIN` = direto :5432 (BYPASSRLS, migrations)
+- ✅ Smoke 5/5: connectivity, prepare:false, SET LOCAL persiste na
+  transação, SET LOCAL não vaza entre transações, RLS end-to-end
+- ✅ Rotas withWorkspace() retornando dados reais via pool
 
-**Riscos pendentes:** RLS `SET LOCAL app.workspace_id` pode não
-persistir em transaction-mode (precisa validar antes de swapear
-DATABASE_URL em prod)
+**pg_stat_activity pós-cutover:**
+```
+pegasus_ads_app    | Supavisor             | 1  ← app via pool
+pegasus_ads_app    | Supavisor auth_query  | 1  ← gatekeeper
+pegasus_ads_admin  | postgres.js           | 1  ← admin direto
+```
 
-**Como resolver (ordem):**
-1. Rotacionar `API_JWT_SECRET` + `SECRET_KEY_BASE` do Supavisor
-   (coordenar com time CRM — depende do plano TD-006)
-2. Criar tenant via SQL direto em `_supavisor.tenants`
-   (require_user=false, sem auth) + row em `_supavisor.users` com
-   db_pass_encrypted correto (cifrar com chave derivada do novo
-   API_JWT_SECRET — ou usar Supavisor CLI/Elixir shell dentro do
-   container: `docker exec ... bin/supavisor rpc ...`)
-3. Reiniciar Supavisor, validar conexão pooled com `psql`
-4. Testar `SET LOCAL app.workspace_id` + query em RLS scope dentro de
-   transaction — confirmar que persiste
-5. Trocar `DATABASE_URL` do pegasus-ads para a URL via Supavisor,
-   rebuildar green
-6. Monitorar 1h — se quebrar, reverter para direto em 30s
+**Aprendizados documentados em `scripts/phase-2-supavisor/`:**
+- `eval` é caminho canonical (não sofre do issue de FQDN do `rpc`)
+- Encryption do Supavisor usa envelope Cloak próprio
+  (`<<version:1, tag_len:1, tag:N, iv:12, ct+auth_tag:N>>`), NÃO AES-GCM
+  raw — script Node deprecated com warning
+- Schema moderno (Supavisor 2.7.4): `tenants.id`/`users.id` sem default
+  (gen_random_uuid explícito), `db_user_alias` NOT NULL, UNIQUE em
+  `(db_user_alias, tenant_external_id, mode_type)`, `require_user=true`
+  evita exigir `auth_query`
+- `SET LOCAL` funciona em transaction mode — verificado empiricamente,
+  conexão Postgres é dedicada BEGIN→COMMIT
 
-**Quando:** depois do cutover estabilizar (monitor 24-48h OK) E
-depois de rotacionar segredos demo do cluster (TD-006). Não é P1.
+**TDs relacionados que continuam abertos:**
+- TD-014 — DATABASE_URL demo no container Supavisor (credencial do
+  metadata DB interno, não afeta pooling)
 
 ---
 

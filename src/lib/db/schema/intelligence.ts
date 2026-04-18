@@ -52,6 +52,29 @@ export const hypotheses = pgTable("hypotheses", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
+// ─── templates ────────────────────────────────────────────────────────────
+// Template library de padrões visuais validados (tarefa 4.4).
+// Originalmente criado via CREATE TABLE IF NOT EXISTS na rota. Adicionado
+// aos schemas Drizzle na Fase 1C Wave 4 + migration 0005.
+// RLS via workspace_id.
+export const templates = pgTable("templates", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").references(() => workspaces.id),
+  name: text("name").notNull(),
+  description: text("description"),
+  funnelKey: text("funnel_key").notNull(),
+  sourceCreativeId: uuid("source_creative_id").references(() => creatives.id, {
+    onDelete: "set null",
+  }),
+  dimensions: jsonb("dimensions").notNull().default({}),
+  promptFragment: text("prompt_fragment"),
+  cplValidated: doublePrecision("cpl_validated"),
+  status: text("status").notNull().default("active"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
 // ─── alerts ───────────────────────────────────────────────────────────────
 // Alertas de anomalia (kill rules, CPL spike, etc). RLS via workspace_id.
 export const alerts = pgTable("alerts", {

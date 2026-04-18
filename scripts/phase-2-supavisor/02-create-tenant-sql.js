@@ -82,50 +82,57 @@ try {
 
 // SQL pronto pra rodar
 console.log(`-- =============================================================
--- Tenant + user pegasus_ads para Supavisor (schema moderno)
+-- Tenant + user pegasus_ads para Supavisor (schema moderno v1.1x+)
 -- Rode como: docker exec -i alpes-ads_supabase-db-1 \\
 --             psql -U supabase_admin -d _supabase -v ON_ERROR_STOP=1
+--
+-- 3 ajustes aplicados após bate-cabeça na primeira execução (2026-04-18):
+--  1. tenants.id e users.id são uuid NOT NULL SEM default → gen_random_uuid()
+--  2. users.db_user_alias é NOT NULL (formato user.tenant da connection string)
+--  3. UNIQUE em users é (db_user_alias, tenant_external_id, mode_type)
+--  4. require_user=true evita exigir auth_query (opção mais simples quando
+--     connection string usa formato user.alias)
 -- =============================================================
 
 BEGIN;
 
 -- 1. Tenant
 INSERT INTO _supavisor.tenants (
-  external_id, db_host, db_port, db_database,
+  id, external_id, db_host, db_port, db_database,
   default_pool_size, default_max_clients,
   ip_version, default_parameter_status, require_user,
   inserted_at, updated_at
 ) VALUES (
+  gen_random_uuid(),
   'pegasus_ads', 'alpes-ads_supabase-db-1', 5432, 'pegasus_ads',
   15, 100,
-  'auto', '{}'::jsonb, false,
+  'auto', '{}'::jsonb, true,
   NOW(), NOW()
 ) ON CONFLICT (external_id) DO NOTHING;
 
 -- 2. User com senha cifrada (AES-GCM)
+--    require_user=true usa db_user_alias no formato user.tenant da conn string
 INSERT INTO _supavisor.users (
-  tenant_external_id, db_user, db_pass_encrypted,
+  id, tenant_external_id, db_user, db_user_alias, db_pass_encrypted,
   pool_size, mode_type, is_manager,
   inserted_at, updated_at
 ) VALUES (
+  gen_random_uuid(),
   'pegasus_ads',
+  'pegasus_ads_app',
   'pegasus_ads_app',
   decode('${hexEncoded}', 'hex'),
   15, 'transaction', true,
   NOW(), NOW()
-) ON CONFLICT (tenant_external_id, db_user) DO UPDATE SET
+) ON CONFLICT (db_user_alias, tenant_external_id, mode_type) DO UPDATE SET
   db_pass_encrypted = EXCLUDED.db_pass_encrypted,
   pool_size = EXCLUDED.pool_size,
-  mode_type = EXCLUDED.mode_type,
   updated_at = NOW();
 
 COMMIT;
 
--- 3. Reload config no Supavisor (sem restart)
--- docker exec alpes-ads_supabase-supavisor-1 \\
---   /app/bin/supavisor rpc 'Supavisor.Tenants.reload_cache("pegasus_ads")'
-
--- Se RPC não disponível, restart container:
+-- 3. Restart Supavisor pra recarregar cache (RPC reload_cache pode falhar
+--    por noconnection em Erlang distribution — restart é mais confiável).
 -- docker restart alpes-ads_supabase-supavisor-1
 `);
 

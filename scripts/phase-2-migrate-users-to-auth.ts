@@ -32,6 +32,8 @@ import {
   adminGetUserByEmail,
   adminSendPasswordReset,
   adminUpdateUser,
+  APP_TAG,
+  ensureAppEnrolled,
   GotrueHttpError,
 } from "@/lib/supabase-auth";
 import { and, eq, isNull } from "drizzle-orm";
@@ -111,6 +113,9 @@ async function runMigration(opts: RunOptions): Promise<MigrationResult> {
           password,
           email_confirm: true,
           user_metadata: { name: row.name, migrated_from_scrypt: true },
+          // SSO-ready: tag no app pegasus_ads. Não overwrite — gotrue cria
+          // apps=["pegasus_ads"] pela primeira vez.
+          app_metadata: { apps: [APP_TAG] },
         });
       } else {
         console.log(`[phase-2] ${row.email}: já existe no gotrue (${gotrueUser.id}).`);
@@ -120,6 +125,8 @@ async function runMigration(opts: RunOptions): Promise<MigrationResult> {
           await adminUpdateUser(gotrueUser.id, { password: opts.setPassword });
           console.log(`[phase-2] ${row.email}: senha atualizada via adminUpdateUser.`);
         }
+        // Enrola em pegasus_ads preservando outros apps (CRM etc).
+        gotrueUser = await ensureAppEnrolled(gotrueUser);
       }
 
       await dbAdmin

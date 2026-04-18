@@ -24,7 +24,9 @@ import { dbAdmin } from "@/lib/db";
 import { users } from "@/lib/db/schema";
 import { createWorkspace } from "@/lib/workspace";
 import {
+  APP_TAG,
   GotrueHttpError,
+  ensureAppEnrolled,
   setSupabaseCookies,
   signUp,
   type SupabaseSession,
@@ -114,6 +116,17 @@ export async function POST(req: NextRequest) {
         { error: "INTERNAL_ERROR", message: "Supabase signup retornou sem user.id" },
         { status: 500 },
       );
+    }
+
+    // SSO multi-app: tagga user com app_metadata.apps=["pegasus_ads"].
+    // /signup não aceita app_metadata — precisa ser via admin API logo após.
+    // ensureAppEnrolled é idempotente e preserva outros apps caso já exista.
+    try {
+      await ensureAppEnrolled(supabaseUser, APP_TAG);
+    } catch (err) {
+      console.warn("[auth/register] ensureAppEnrolled falhou:", err);
+      // Não-crítico pro fluxo de registro — profile local é criado mesmo
+      // sem a tag. Reconciliação pode ser feita depois via one-off SQL.
     }
 
     // Cria profile local

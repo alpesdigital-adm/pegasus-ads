@@ -240,6 +240,53 @@ export async function adminCreateUser(input: AdminCreateUserInput): Promise<Supa
   });
 }
 
+// ── App scoping (SSO multi-app) ────────────────────────────────────────────
+// O cluster Supabase (alpes-ads_supabase_*) roda UM gotrue compartilhado entre
+// pegasus-ads e pegasus-crm. auth.users é único e cluster-wide — email/senha
+// globais. Pra evitar ops cruzadas (como ocorreu em 2026-04-18 quando o script
+// ligou Leandro a um user do CRM), todo user que PEGASUS-ADS cria/enrola ganha
+// `app_metadata.apps` com "pegasus_ads" na lista.
+//
+// Semântica:
+//  - apps é ARRAY (futuro SSO): ["pegasus_ads", "pegasus_crm"] significa que
+//    o mesmo user tem profile nos dois
+//  - Ops admin do pegasus-ads só devem mexer em users que tenham "pegasus_ads"
+//    em apps. Crossing accidentally = bug
+//  - Controle de acesso por plano vem em camada separada (plan_features),
+//    não aqui — este módulo só diz "é enrolado no app X"
+
+export const APP_TAG = "pegasus_ads";
+
+export function hasApp(user: SupabaseUser, app: string = APP_TAG): boolean {
+  const apps = user.app_metadata?.apps;
+  if (!Array.isArray(apps)) return false;
+  return apps.includes(app);
+}
+
+/**
+ * Idempotente. Adiciona `app` ao array `app_metadata.apps` do user via
+ * adminUpdateUser se ainda não estiver lá. Preserva outros apps existentes
+ * (merge, não overwrite) — crítico pro SSO multi-app.
+ */
+export async function ensureAppEnrolled(
+  user: SupabaseUser,
+  app: string = APP_TAG,
+): Promise<SupabaseUser> {
+  if (hasApp(user, app)) return user;
+
+  const existingApps = Array.isArray(user.app_metadata?.apps)
+    ? (user.app_metadata!.apps as string[])
+    : [];
+  const mergedApps = [...new Set([...existingApps, app])];
+
+  return adminUpdateUser(user.id, {
+    app_metadata: {
+      ...(user.app_metadata ?? {}),
+      apps: mergedApps,
+    },
+  });
+}
+
 export async function adminSendPasswordReset(email: string, redirectTo?: string): Promise<void> {
   await gotrueFetch("/recover", {
     method: "POST",

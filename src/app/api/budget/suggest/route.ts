@@ -5,23 +5,25 @@
  * Algoritmo: proporcional ao inverso do CPL (melhor CPL → mais budget).
  *
  * Params:
- *   campaign_key?   — campanha (default: T7_0003_RAT)
- *   total_budget?   — verba total disponível em R$ (default: usa budget atual)
+ *   campaign_key?   — funnel key (default: T7_0003_RAT)
+ *   total_budget?   — verba total disponível em R$ (default: usa spend atual)
  *   period?         — "7d" | "30d" (default: "7d")
- *   top_n?          — número de criativos a incluir (default: 10)
+ *   top_n?          — número de criativos a incluir (default: 10, max: 30)
  *   min_leads?      — mínimo de leads para considerar (default: 3)
  *
- * Lógica:
- *   1. Busca criativos ativos (status = 'testing' | 'winner') com métricas
- *   2. Filtra por min_leads (dados insuficientes → orçamento de exploração)
- *   3. Peso = 1 / CPL (normalizado) para criativos com dados suficientes
- *   4. Criativos sem dados suficientes recebem orçamento de exploração fixo
- *   5. Retorna alocação sugerida + diagnóstico por criativo
- *
- * Proteção: x-api-key = TEST_LOG_API_KEY
+ * MIGRADO NA FASE 1C (Wave 2):
+ *  - getDb() → withWorkspace (RLS)
+ *  - Aggregate query em sql`` (CASE WHEN + COALESCE + LEFT JOIN GROUP BY)
+ *  - BUGS LATENTES CORRIGIDOS NA MIGRAÇÃO:
+ *    * `m.date_start` → `m.date` (schema usa TEXT 'date', não 'date_start')
+ *    * `c.campaign_key` → `c.funnel_key` (creatives não tem campaign_key,
+ *      a chave de funnel é funnel_key)
+ *  Se esses bugs silenciavam no Neon, a rota nunca retornava dados
+ *  agregados corretamente. Revisar se houve comportamento esperado
+ *  dependente desses erros.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { getDb } from "@/lib/db";
+import { withWorkspace, sql } from "@/lib/db";
 import { requireAuth } from "@/lib/auth";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
 
@@ -57,54 +59,52 @@ export async function GET(req: NextRequest) {
   const auth = await requireAuth(req);
   if (auth instanceof NextResponse) return auth;
 
-  const db = getDb();
-
   const { searchParams } = new URL(req.url);
   const campaignKey = searchParams.get("campaign_key") ?? "T7_0003_RAT";
   const period = searchParams.get("period") ?? "7d";
   const topN = Math.min(Number(searchParams.get("top_n") ?? "10"), 30);
   const minLeads = Number(searchParams.get("min_leads") ?? "3");
 
-  // Budget total: parâmetro ou estimado pelo spend atual
   const totalBudgetParam = searchParams.get("total_budget");
   let totalBudget: number | null = totalBudgetParam ? Number(totalBudgetParam) : null;
 
-  // ── Buscar campanha ──────────────────────────────────────────────────────
   const campaign = KNOWN_CAMPAIGNS[campaignKey as keyof typeof KNOWN_CAMPAIGNS];
   if (!campaign) {
     return NextResponse.json({ error: `Campaign '${campaignKey}' not found` }, { status: 404 });
   }
 
-  // ── Buscar criativos ativos com métricas ─────────────────────────────────
   const daysBack = period === "30d" ? 30 : 7;
   const dateFrom = new Date();
   dateFrom.setDate(dateFrom.getDate() - daysBack);
   const dateFromStr = dateFrom.toISOString().split("T")[0];
 
-  const creativeResult = await db.execute({
-    sql: `SELECT
-       c.id,
-       c.name,
-       c.status,
-       c.is_control,
-       COALESCE(SUM(m.spend), 0)::DOUBLE PRECISION AS total_spend,
-       COALESCE(SUM(m.leads), 0)::DOUBLE PRECISION AS total_leads,
-       CASE
-         WHEN SUM(m.leads) > 0
-         THEN (SUM(m.spend) / SUM(m.leads))::DOUBLE PRECISION
-         ELSE NULL
-       END AS cpl,
-       CASE WHEN SUM(m.leads) >= $3 THEN TRUE ELSE FALSE END AS has_data
-     FROM creatives c
-     LEFT JOIN metrics m ON m.creative_id = c.id AND m.date_start >= $2
-     WHERE c.campaign_key = $1
-       AND c.status IN ('testing', 'winner')
-     GROUP BY c.id, c.name, c.status, c.is_control
-     ORDER BY cpl ASC NULLS LAST, total_spend DESC
-     LIMIT $4`,
-    args: [campaignKey, dateFromStr, minLeads, topN],
+  // Aggregate: criativos ativos (testing|winner) com spend/leads do período.
+  // RLS escopa workspace_id em c (creatives) e m (metrics) via SET LOCAL.
+  const creativeRows = await withWorkspace(auth.workspace_id, async (tx) => {
+    const result = await tx.execute(sql`
+      SELECT
+        c.id,
+        c.name,
+        c.status,
+        c.is_control,
+        COALESCE(SUM(m.spend), 0)::DOUBLE PRECISION AS total_spend,
+        COALESCE(SUM(m.leads), 0)::DOUBLE PRECISION AS total_leads,
+        CASE
+          WHEN SUM(m.leads) > 0
+          THEN (SUM(m.spend) / SUM(m.leads))::DOUBLE PRECISION
+          ELSE NULL
+        END AS cpl,
+        CASE WHEN SUM(m.leads) >= ${minLeads} THEN TRUE ELSE FALSE END AS has_data
+      FROM creatives c
+      LEFT JOIN metrics m ON m.creative_id = c.id AND m.date >= ${dateFromStr}
+      WHERE c.funnel_key = ${campaignKey}
+        AND c.status IN ('testing', 'winner')
+      GROUP BY c.id, c.name, c.status, c.is_control
+      ORDER BY cpl ASC NULLS LAST, total_spend DESC
+      LIMIT ${topN}
+    `);
+    return result as unknown as CreativeMetric[];
   });
-  const creativeRows = creativeResult.rows as unknown as CreativeMetric[];
 
   if (creativeRows.length === 0) {
     return NextResponse.json({
@@ -116,30 +116,25 @@ export async function GET(req: NextRequest) {
 
   // ── Estimar budget total se não fornecido ────────────────────────────────
   if (!totalBudget) {
-    const totalSpend = creativeRows.reduce((s: number, r: CreativeMetric) => s + r.total_spend, 0);
-    // Projeta spend semanal (7d) ou mantém proporcional
+    const totalSpend = creativeRows.reduce((s, r) => s + r.total_spend, 0);
     totalBudget = period === "7d" ? totalSpend : totalSpend / (daysBack / 7);
-    // Arredonda para múltiplo de 50
     totalBudget = Math.ceil(totalBudget / 50) * 50 || 500;
   }
 
   // ── Separar criativos com e sem dados suficientes ────────────────────────
-  const withData = creativeRows.filter((r: CreativeMetric) => r.has_data && r.cpl !== null && r.cpl > 0);
-  const noData = creativeRows.filter((r: CreativeMetric) => !r.has_data || r.cpl === null);
+  const withData = creativeRows.filter((r) => r.has_data && r.cpl !== null && r.cpl > 0);
+  const noData = creativeRows.filter((r) => !r.has_data || r.cpl === null);
 
-  // Budget de exploração reservado para criativos sem dados
   const explorationPool = noData.length > 0 ? (totalBudget as number) * EXPLORATION_BUDGET_PCT : 0;
   const performancePool = (totalBudget as number) - explorationPool;
 
-  // ── Calcular pesos por CPL inverso ────────────────────────────────────────
-  // Peso = 1/CPL → CPL menor = peso maior
-  const weights = withData.map((r: CreativeMetric) => 1 / r.cpl!);
-  const totalWeight = weights.reduce((s: number, w: number) => s + w, 0);
+  // Peso = 1/CPL (CPL menor → peso maior)
+  const weights = withData.map((r) => 1 / r.cpl!);
+  const totalWeight = weights.reduce((s, w) => s + w, 0);
 
   const allocations: BudgetAllocation[] = [];
 
-  // Criativos com dados suficientes
-  withData.forEach((r: CreativeMetric, i: number) => {
+  withData.forEach((r, i) => {
     const normalizedWeight = totalWeight > 0 ? weights[i] / totalWeight : 1 / withData.length;
     const suggestedBudget = Math.round(performancePool * normalizedWeight);
     const cplTarget = campaign.cplTarget ?? null;
@@ -168,11 +163,10 @@ export async function GET(req: NextRequest) {
     });
   });
 
-  // Criativos sem dados suficientes — exploração uniforme
   if (noData.length > 0) {
     const explorePerCreative = Math.round(explorationPool / noData.length);
     const exploreWeight = 1 / noData.length;
-    noData.forEach((r: CreativeMetric) => {
+    noData.forEach((r) => {
       allocations.push({
         creative_id: r.id,
         creative_name: r.name,
@@ -188,7 +182,6 @@ export async function GET(req: NextRequest) {
     });
   }
 
-  // ── Ordenar por budget sugerido desc ─────────────────────────────────────
   allocations.sort((a, b) => b.suggested_budget - a.suggested_budget);
 
   const totalAllocated = allocations.reduce((s, a) => s + a.suggested_budget, 0);

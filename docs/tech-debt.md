@@ -53,8 +53,11 @@ consumido "errado" por dashboards — revisar antes de consertar.
 - 4 colunas legacy de `users` (account_id, role, is_active, last_login_at)
   consolidadas no schema Drizzle + migration 0004 idempotente
 
-**Pendência menor:** após 24-48h estável, rodar `scripts/cutover/04-remove-blue.sh`
-para remover blue container + atualizar `deploy.sh`. Brain memória #173/#174.
+**Pendência menor:** remoção do blue DIFERIDA para o final do plano de
+migração (decisão 2026-04-18 pós-Fase 1C validada). Blue permanece como
+rede de segurança durante Fases 2-5 — custo marginal (container idle +
+Neon free tier), benefício real se alguma fase futura introduzir
+regressão. Rodar `scripts/cutover/04-remove-blue.sh` só após Fase 5.
 
 ---
 

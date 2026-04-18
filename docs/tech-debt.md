@@ -239,22 +239,34 @@ adicionadas aos schemas Drizzle na Fase 1B prep
 
 ---
 
-## TD-006 — gotrue com JWT secret demo público (herdado do CRM) ⚠️
+## TD-006 — gotrue JWT secret rotacionado 🟢 done
 
 **Descoberto:** 2026-04-15 (Brain memória #149, TD-001 do CRM)
-**Dono:** Leandro + time CRM
-**Impacto:** **P0 antes de prod com dados reais.** O `alpes-ads_supabase-auth-1`
-está com `GOTRUE_JWT_SECRET=your-super-secret-jwt-token-with-at-least-32-characters-long`
-(demo público do tutorial Supabase). Anon/service_role keys também são as
-públicas do demo. Qualquer pessoa consegue forjar JWT válido para os dois apps
-(CRM e Ads depois da Fase 2).
+**Atualizado:** 2026-04-18 (rotação executada pelo cowork CRM)
+**Dono:** Time CRM (execução) + Leandro (coordenação)
+**Impacto:** Vulnerabilidade resolvida. Cluster não tem mais secret demo
+público. Fase 2 (Supabase Auth no pegasus-ads) destravada.
 
-**Contexto:** herdado do setup inicial do Supabase self-hosted. Quando o Pegasus
-Ads adotar Supabase Auth (Fase 2), passa a compartilhar essa vulnerabilidade.
+**Estado final:**
+- ✅ `GOTRUE_JWT_SECRET` rotacionado (novo valor, guardado em gerenciador
+  de senhas — nunca em repo, chat, ou logs)
+- ✅ `ANON_KEY` e `SERVICE_ROLE_KEY` regenerados com issuer `alpes-ads` +
+  expiração ~10 anos
+- ✅ 7 containers do cluster `alpes-ads_supabase` rotacionados e healthy
+- ✅ Auth endpoint valida 200 com nova anon
+- ✅ CRM `.env` + bundle atualizados; 85 refresh_tokens antigos deletados
+- ✅ Scripts de rotação commitados em
+  `scripts/td-006-*` (generate, rotate, update-crm-env) para replay futuro
 
-**Como resolver:** coordenar com o time do CRM para rotação do
-`GOTRUE_JWT_SECRET` + anon/service_role keys. Rotação invalida sessões — todos
-os usuários precisam relogar.
+**Descoberta colateral (fix já em prod):** o `Dockerfile` do CRM tinha o
+JWT demo hardcoded como `ARG default`, e `deploy.sh` nunca baked o real
+ANON_KEY via `--build-arg`. Funcionava por sorte (CRM usa auth
+server-side, não browser supabase-js). Corrigido em `scripts/deploy.sh`
+com `NEXT_PUBLIC_SUPABASE_*` como build-arg + `ANON_HASH` no `BUILD_ID`
+pra invalidar cache em rotações futuras.
 
-**Quando:** ANTES da Fase 2 do pegasus-ads entrar em prod com dados reais.
-Bloqueador P0.
+**Implicações para pegasus-ads (Fase 2):**
+- Quando migrar pra Supabase Auth, usar o novo `GOTRUE_JWT_SECRET`
+  (mesmo cluster, compartilhado com CRM)
+- Bakear `NEXT_PUBLIC_SUPABASE_ANON_KEY` corretamente via build-arg
+  (espelhar o fix do CRM no `deploy.sh` do pegasus-ads)

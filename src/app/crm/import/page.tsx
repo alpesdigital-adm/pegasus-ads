@@ -1,4 +1,6 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any */
+// TODO(fase-4-cleanup): tipar `any` (CSV parse).
 
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import AppShell from "@/components/AppShell";

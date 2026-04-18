@@ -1,4 +1,6 @@
 "use client";
+/* eslint-disable react-hooks/set-state-in-effect */
+// TODO(fase-4-cleanup): refatorar useEffect fora do set-state pattern.
 
 import { useEffect, useState, useCallback } from "react";
 import AppShell from "@/components/AppShell";

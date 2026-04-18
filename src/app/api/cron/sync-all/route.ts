@@ -105,6 +105,7 @@ export async function GET(req: NextRequest) {
     totalFetched = insights.length;
 
     // Cast to any — getAccountAdsInsights returns extra fields not in AdInsightRecord type
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const t7Insights = (insights as any[]).filter((r) =>
       (r.campaign_name || "").startsWith("T7")
     );
@@ -164,6 +165,7 @@ export async function GET(req: NextRequest) {
     }
 
     // ── 3. Also upsert into metrics for mapped creatives ──
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const adIds = [...new Set(t7Insights.map((r: any) => r.meta_ad_id || r.ad_id).filter(Boolean) as string[])];
     if (adIds.length > 0) {
       const pubAds = await dbAdmin

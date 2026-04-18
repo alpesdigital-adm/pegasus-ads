@@ -1,4 +1,6 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any, react-hooks/set-state-in-effect */
+// TODO(fase-4-cleanup): tipar `any` + refatorar useEffect fetches.
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";

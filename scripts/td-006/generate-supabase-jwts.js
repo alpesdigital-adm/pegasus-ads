@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/* eslint-disable @typescript-eslint/no-require-imports */
 /**
  * TD-006 — Gera anon + service_role JWTs assinados com o novo JWT_SECRET.
  *

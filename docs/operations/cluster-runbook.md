@@ -189,6 +189,17 @@ de pool + tenants visíveis — vale hit externo via uptime monitor.
 
 Ver `src/app/api/health/route.ts`.
 
+### UptimeRobot — monitor externo
+
+Cadastrado em 2026-04-18 (Leandro). Status page pública (read-only):
+
+**https://stats.uptimerobot.com/zDpiIXbCwA**
+
+Aponta para `https://pegasus.alpesd.com.br/api/health` (GET), que retorna
+200 quando pool + RLS estão saudáveis e 503 caso contrário. Alerta
+dispara no email do Leandro quando degrada. Primeira linha de defesa
+externa — complementa o canário implícito do cron diário (`sync-all`).
+
 ### Log aggregation
 
 `vector` container agrega logs Docker pra file. Pra investigar:

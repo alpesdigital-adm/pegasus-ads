@@ -16,6 +16,8 @@
 - **[operations/cluster-runbook.md](operations/cluster-runbook.md)** —
   Runbook do cluster Supabase self-hosted: arquitetura, credenciais,
   operações comuns, gotchas, incidents históricos.
+  - Status page pública (UptimeRobot → `/api/health`):
+    <https://stats.uptimerobot.com/zDpiIXbCwA>
 - **[api-reference.md](api-reference.md)** — Referência de endpoints.
 
 ## Migrações

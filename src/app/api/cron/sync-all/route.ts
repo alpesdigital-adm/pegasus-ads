@@ -35,6 +35,9 @@ import {
 } from "@/lib/db/schema";
 import { evaluateKillRules } from "@/config/kill-rules";
 import { and, eq, inArray } from "drizzle-orm";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ route: "/api/cron/sync-all" });
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -105,7 +108,15 @@ export async function GET(req: NextRequest) {
     const t7Insights = (insights as any[]).filter((r) =>
       (r.campaign_name || "").startsWith("T7")
     );
-    console.log(`[SyncAll] Fetched ${totalFetched} total, ${t7Insights.length} T7 insights (${dateFrom} → ${dateTo})`);
+    log.info(
+      {
+        totalFetched,
+        t7: t7Insights.length,
+        dateFrom,
+        dateTo,
+      },
+      "fetched",
+    );
 
     // ── 2. Upsert into classified_insights ──
     for (const row of t7Insights) {
@@ -308,7 +319,16 @@ export async function GET(req: NextRequest) {
       errors.push(`[kill-rules] ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    console.log(`[SyncAll] Done: fetched=${totalFetched} upserted=${upserted} kills=${killsTriggered} alerts=${alertsCreated} errors=${errors.length}`);
+    log.info(
+      {
+        fetched: totalFetched,
+        upserted,
+        kills: killsTriggered,
+        alerts: alertsCreated,
+        errors: errors.length,
+      },
+      "done",
+    );
 
     return NextResponse.json({
       ok: true,
@@ -324,7 +344,7 @@ export async function GET(req: NextRequest) {
 
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    console.error("[SyncAll] Fatal:", message);
+    log.error({ err: message }, "fatal");
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

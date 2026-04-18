@@ -16,6 +16,9 @@ import { getTokenForWorkspace } from "@/lib/meta";
 import { withWorkspace, sql } from "@/lib/db";
 import { classifiedInsights } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ route: "/api/creative-intel/pause" });
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -133,11 +136,11 @@ export async function POST(req: NextRequest) {
         } catch { /* non-critical */ }
 
         results.push({ ad_name: adName, ad_id: adId, success: true });
-        console.log(`[CreativeIntelPause] Paused ad ${adName} (${adId})`);
+        log.info({ adName, adId }, "ad paused");
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         results.push({ ad_name: adName, ad_id: adId, success: false, error: msg });
-        console.error(`[CreativeIntelPause] FAILED ${adName} (${adId}):`, msg);
+        log.error({ adName, adId, err: msg }, "pause failed");
       }
     }
 
@@ -150,7 +153,7 @@ export async function POST(req: NextRequest) {
       results,
     });
   } catch (err) {
-    console.error("[CreativeIntelPause]", err);
+    log.error({ err }, "handler error");
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
       { status: 500 },

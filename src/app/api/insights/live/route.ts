@@ -8,6 +8,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
 import { getTokenForWorkspace } from "@/lib/meta";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ route: "/api/insights/live" });
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -103,7 +106,7 @@ export async function GET(req: NextRequest) {
       ads,
     });
   } catch (err) {
-    console.error("[InsightsLive]", err);
+    log.error({ err }, "handler error");
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
 }

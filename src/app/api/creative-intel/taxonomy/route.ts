@@ -13,6 +13,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
 import { withWorkspace, sql } from "@/lib/db";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ route: "/api/creative-intel/taxonomy" });
 
 export const runtime = "nodejs";
 
@@ -155,7 +158,7 @@ export async function GET(req: NextRequest) {
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error("GET /api/creative-intel/taxonomy error:", message);
+    log.error({ err: message }, "GET failed");
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

@@ -19,6 +19,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withWorkspace, sql } from "@/lib/db";
 import { requireAuth } from "@/lib/auth";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ route: "/api/insights" });
 
 export const runtime = "nodejs";
 
@@ -139,7 +142,7 @@ export async function GET(req: NextRequest) {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Erro interno";
-    console.error("[InsightsRoute]", message);
+    log.error({ err: message }, "handler error");
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

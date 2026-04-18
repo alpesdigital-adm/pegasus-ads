@@ -34,6 +34,9 @@ import {
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
 import { evaluateKillRules } from "@/config/kill-rules";
 import { and, eq, inArray } from "drizzle-orm";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ route: "/api/cron/collect" });
 
 export const runtime = "nodejs";
 export const maxDuration = 300; // 5 min — coleta + kill rules + alertas
@@ -124,7 +127,7 @@ export async function GET(req: NextRequest) {
       campaign.metaCampaignId, dateFrom, dateTo, workspaceId,
     );
     collected = insights.length;
-    console.log(`[CronCollect] ${collected} registros padrão (${dateFrom} → ${dateTo})`);
+    log.info({ collected, dateFrom, dateTo }, "standard records collected");
 
     if (collected > 0) {
       const adIds = [...new Set(insights.map((r) => r.meta_ad_id).filter(Boolean) as string[])];
@@ -353,7 +356,18 @@ export async function GET(req: NextRequest) {
       errors.push(`[kill-rules] ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    console.log(`[CronCollect] ✓ collected=${collected} upserted=${upserted} skipped=${skipped} breakdown_upserted=${breakdownUpserted} kills_triggered=${killsTriggered} alerts_created=${alertsCreated} errors=${errors.length}`);
+    log.info(
+      {
+        collected,
+        upserted,
+        skipped,
+        breakdown_upserted: breakdownUpserted,
+        kills_triggered: killsTriggered,
+        alerts_created: alertsCreated,
+        errors: errors.length,
+      },
+      "cron run complete",
+    );
 
     return NextResponse.json({
       ok: true,
@@ -371,7 +385,7 @@ export async function GET(req: NextRequest) {
 
   } catch (err) {
     const message = err instanceof Error ? err.message : "Erro desconhecido";
-    console.error("[CronCollect] Erro fatal:", message);
+    log.error({ err: message }, "fatal");
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

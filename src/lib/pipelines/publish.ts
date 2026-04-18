@@ -28,6 +28,9 @@ import {
   campaigns,
 } from "../db/schema";
 import { and, eq, inArray, sql } from "drizzle-orm";
+import { logger } from "../logger";
+
+const log = logger.child({ pipeline: "publish" });
 import * as meta from "../meta";
 import { verifyPrePublish, verifyPostPublish } from "../ai-verify";
 import { generateMetaAdName } from "../creative-naming";
@@ -118,17 +121,22 @@ export async function runPublishPipeline(
 
     const variantPairs = groupVariantsByAd(variantRows);
 
-    console.log("[PublishPipeline] Fetching ad set template for campaign:", campaignId);
+    log.info({ campaignId }, "fetching ad set template");
     const adSetTemplate = await meta.getAdSetTemplate(ws, campaignId);
     if (!adSetTemplate) {
       throw new Error(`No ad set template found for campaign ${campaignId}`);
     }
-    console.log("[PublishPipeline] Ad set template:", JSON.stringify({
-      name: adSetTemplate.name,
-      daily_budget: adSetTemplate.daily_budget,
-      bid_strategy: adSetTemplate.bid_strategy,
-      targeting_keys: adSetTemplate.targeting ? Object.keys(adSetTemplate.targeting as Record<string, unknown>) : "null",
-    }));
+    log.info(
+      {
+        name: adSetTemplate.name,
+        daily_budget: adSetTemplate.daily_budget,
+        bid_strategy: adSetTemplate.bid_strategy,
+        targeting_keys: adSetTemplate.targeting
+          ? Object.keys(adSetTemplate.targeting as Record<string, unknown>)
+          : null,
+      },
+      "ad set template",
+    );
 
     step1.status = "completed";
     step1.completed_at = new Date().toISOString();
@@ -177,17 +185,17 @@ export async function runPublishPipeline(
       const step3: PipelineStep = { name: `upload_images_${adName}`, status: "running", started_at: new Date().toISOString() };
       steps.push(step3);
 
-      console.log(`[PublishPipeline] Uploading feed image for ${adName}...`);
+      log.info({ adName }, "uploading feed image");
       const feedResponse = await fetch(pair.feed!.blobUrl);
       const feedBuffer = Buffer.from(await feedResponse.arrayBuffer());
       const feedUpload = await meta.uploadImage(accountId, feedBuffer, `${adName}F.png`, ws);
-      console.log(`[PublishPipeline] Feed upload OK: hash=${feedUpload.hash}`);
+      log.info({ adName, hash: feedUpload.hash }, "feed upload ok");
 
-      console.log(`[PublishPipeline] Uploading stories image for ${adName}...`);
+      log.info({ adName }, "uploading stories image");
       const storiesResponse = await fetch(pair.stories!.blobUrl);
       const storiesBuffer = Buffer.from(await storiesResponse.arrayBuffer());
       const storiesUpload = await meta.uploadImage(accountId, storiesBuffer, `${adName}S.png`, ws);
-      console.log(`[PublishPipeline] Stories upload OK: hash=${storiesUpload.hash}`);
+      log.info({ adName, hash: storiesUpload.hash }, "stories upload ok");
 
       step3.status = "completed";
       step3.completed_at = new Date().toISOString();
@@ -205,7 +213,16 @@ export async function runPublishPipeline(
       steps.push(step5);
 
       const existingAd = await getExistingAdContentWithFallback(campaignId, accountId, ws);
-      console.log(`[PublishPipeline] Ad content: body=${existingAd.body?.substring(0, 50)}... link=${existingAd.link} title=${existingAd.title} cta=${existingAd.callToAction}`);
+      log.info(
+        {
+          adName,
+          body_preview: existingAd.body?.substring(0, 50),
+          link: existingAd.link,
+          title: existingAd.title,
+          cta: existingAd.callToAction,
+        },
+        "ad content",
+      );
 
       const metaCreative = await meta.createCreative({
         accountId,
@@ -382,7 +399,7 @@ export async function runPublishPipeline(
         })
         .where(eq(pipelineExecutions.id, executionId));
     }).catch((dbErr) => {
-      console.error("[PublishPipeline] Failed to record error state:", dbErr);
+      log.error({ err: dbErr }, "failed to record error state");
     });
 
     throw error;
@@ -455,7 +472,7 @@ async function getExistingAdContentWithFallback(
           : rows[0].config;
 
       if (config?.ad_content?.link) {
-        console.log("[PublishPipeline] Using ad_content from campaign config (DB)");
+        log.info("using ad_content from campaign config (DB)");
         return config.ad_content;
       }
     }
@@ -464,10 +481,10 @@ async function getExistingAdContentWithFallback(
   }
 
   // 2. Meta API
-  console.log("[PublishPipeline] Fetching ad content from Meta API...");
+  log.info("fetching ad content from meta api");
   const metaContent = await meta.getAdContentFromCampaign(workspaceId, campaignId);
   if (metaContent && metaContent.link) {
-    console.log("[PublishPipeline] Got ad content from Meta API");
+    log.info("got ad content from meta api");
 
     try {
       await withWorkspace(workspaceId, async (tx) => {
@@ -480,9 +497,9 @@ async function getExistingAdContentWithFallback(
           WHERE meta_campaign_id = ${campaignId} AND meta_account_id = ${accountId}
         `);
       });
-      console.log("[PublishPipeline] Cached ad_content in campaign config");
+      log.info("cached ad_content in campaign config");
     } catch (cacheErr) {
-      console.warn("[PublishPipeline] Failed to cache ad_content:", cacheErr);
+      log.warn({ err: cacheErr }, "failed to cache ad_content");
     }
 
     return metaContent;

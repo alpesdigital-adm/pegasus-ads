@@ -37,6 +37,9 @@ import { getNextAdNumber, generateCreativeNamePair, generateMetaAdName } from ".
 import { uploadToGoogleDrive, getSelectedFolderId } from "../google-drive";
 import { put } from "@vercel/blob";
 import type { PipelineStep } from "../types";
+import { logger } from "../logger";
+
+const log = logger.child({ pipeline: "generate" });
 
 async function resizeImage(
   imageBase64: string,
@@ -51,7 +54,7 @@ async function resizeImage(
       .png()
       .toBuffer();
   } catch {
-    console.warn("[GeneratePipeline] sharp não disponível, retornando imagem sem resize");
+    log.warn("sharp unavailable, returning image without resize");
     return inputBuffer;
   }
 }
@@ -113,7 +116,7 @@ PALETTE_SPEC::{"primary":"#hexcode","secondary":"#hexcode","accent":"#hexcode","
 
     return parseColorSpec(text);
   } catch (err) {
-    console.error("[GeneratePipeline] fetchColorSpec error:", err);
+    log.error({ err }, "fetchColorSpec failed");
     return null;
   }
 }
@@ -383,7 +386,7 @@ export async function runGeneratePipeline(
           await uploadToGoogleDrive(ws, storiesName, storiesBuffer, "image/png", folderId);
         }
       } catch (driveError) {
-        console.error("[GeneratePipeline] Drive upload failed:", driveError);
+        log.error({ err: driveError }, "drive upload failed");
       }
 
       step3.status = "completed";
@@ -462,7 +465,7 @@ export async function runGeneratePipeline(
         })
         .where(eq(pipelineExecutions.id, executionId));
     }).catch((dbErr) => {
-      console.error("[GeneratePipeline] Failed to record error state:", dbErr);
+      log.error({ err: dbErr }, "failed to record error state");
     });
 
     throw error;

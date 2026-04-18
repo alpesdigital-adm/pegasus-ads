@@ -37,6 +37,9 @@ import { metrics, metricsBreakdowns, publishedAds, creatives } from "@/lib/db/sc
 import { requireAuth } from "@/lib/auth";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
 import { and, eq, inArray, sql } from "drizzle-orm";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ route: "/api/insights/collect" });
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -106,7 +109,7 @@ export async function POST(req: NextRequest) {
         : await getAccountAdsInsights(accountId!, dateFrom, dateTo, auth.workspace_id);
 
       collected = insights.length;
-      console.log(`[InsightsCollect] ${collected} registros Meta API (padrão)`);
+      log.info({ collected }, "meta api standard records");
 
       if (collected > 0) {
         const result = await withWorkspace(auth.workspace_id, async (tx) => {
@@ -120,7 +123,7 @@ export async function POST(req: NextRequest) {
           for (const row of adRows) {
             if (row.metaAdId && row.creativeId) adMap.set(row.metaAdId, row.creativeId);
           }
-          console.log(`[InsightsCollect] ${adMap.size} ads vinculados a criativos`);
+          log.info({ linked: adMap.size }, "ads linked to creatives");
 
           let up = 0;
           let sk = 0;
@@ -192,7 +195,10 @@ export async function POST(req: NextRequest) {
         : await getAccountAdsInsights(accountId!, dateFrom, dateTo, auth.workspace_id);
 
       breakdownCollected = breakdownInsights.length;
-      console.log(`[InsightsCollect] ${breakdownCollected} registros Meta API (breakdown: ${collectBreakdown})`);
+      log.info(
+        { breakdown: collectBreakdown, records: breakdownCollected },
+        "meta api breakdown records",
+      );
 
       if (breakdownCollected > 0) {
         const result = await withWorkspace(auth.workspace_id, async (tx) => {
@@ -269,8 +275,14 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    console.log(
-      `[InsightsCollect] Concluído: upserted=${upserted} breakdown_upserted=${breakdownUpserted} skipped=${skipped} errors=${errors.length}`,
+    log.info(
+      {
+        upserted,
+        breakdown_upserted: breakdownUpserted,
+        skipped,
+        errors: errors.length,
+      },
+      "collect done",
     );
 
     return NextResponse.json({
@@ -286,7 +298,7 @@ export async function POST(req: NextRequest) {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Erro desconhecido";
-    console.error("[InsightsCollect] Erro fatal:", message);
+    log.error({ err: message }, "fatal");
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

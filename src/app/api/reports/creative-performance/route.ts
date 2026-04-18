@@ -13,6 +13,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
 import { withWorkspace } from "@/lib/db";
 import { sql } from "drizzle-orm";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ route: "/api/reports/creative-performance" });
 
 export const runtime = "nodejs";
 
@@ -323,7 +326,7 @@ export async function GET(req: NextRequest) {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error("Creative performance report error:", message);
+    log.error({ err: message }, "report failed");
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

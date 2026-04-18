@@ -1,22 +1,39 @@
 /**
  * GET /api/cron/collect  — Cron de coleta diária (Tarefa 2.6)
  *
- * Chamado automaticamente pela Vercel Cron todos os dias às 10h BRT (13:00 UTC).
- * Protegido por CRON_SECRET no header Authorization: Bearer <secret>.
+ * Chamado pelo crond do container todos os dias (cron/crontab). Protegido
+ * por CRON_SECRET no header Authorization: Bearer <secret>.
  *
  * Fluxo:
  * 1. Coleta insights padrão + breakdown para T7_0003_RAT (últimos 7 dias)
  * 2. Avalia kill rules para todos os criativos em teste
  * 3. Gera alertas de anomalia (kill triggers + CPL spike)
  * 4. Retorna sumário { collected, upserted, kills_triggered, alerts_created }
+ *
+ * MIGRADO NA FASE 1C (Wave 1):
+ *  - getDb().execute() → dbAdmin (cross-workspace cron)
+ *  - 6 queries CRUD em Drizzle typed query builder
+ *  - 2 queries agregadas (testing creatives, control CPL) em sql``
+ *    — JOIN + GROUP BY + HAVING complexos ficam mais legíveis como SQL
+ *  - uuid() manual removido — schemas usam defaultRandom()
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getCampaignAdsInsights, extractLPVFromInsights, extractLeadsFromInsights, extractCPLFromInsights } from "@/lib/meta";
-import { getDb } from "@/lib/db";
+import {
+  getCampaignAdsInsights,
+} from "@/lib/meta";
+import { dbAdmin, sql } from "@/lib/db";
+import {
+  workspaceMetaAccounts,
+  publishedAds,
+  metrics,
+  metricsBreakdowns,
+  creatives,
+  alerts,
+} from "@/lib/db/schema";
 import { KNOWN_CAMPAIGNS } from "@/config/campaigns";
 import { evaluateKillRules } from "@/config/kill-rules";
-import { v4 as uuid } from "uuid";
+import { and, eq, inArray } from "drizzle-orm";
 
 export const runtime = "nodejs";
 export const maxDuration = 300; // 5 min — coleta + kill rules + alertas
@@ -52,20 +69,24 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const db = getDb();
   const campaign = KNOWN_CAMPAIGNS["T7_0003_RAT"];
   const { from: dateFrom, to: dateTo } = getDateRange(7);
   const todayStr = today();
 
   // Resolve workspace_id from meta account linked to this campaign
-  const wmaRow = await db.execute({
-    sql: `SELECT workspace_id FROM workspace_meta_accounts WHERE meta_account_id = ? LIMIT 1`,
-    args: [campaign.metaAccountId],
-  });
-  if (wmaRow.rows.length === 0) {
-    return NextResponse.json({ error: "No workspace linked to campaign meta account" }, { status: 500 });
+  const wmaRow = await dbAdmin
+    .select({ workspaceId: workspaceMetaAccounts.workspaceId })
+    .from(workspaceMetaAccounts)
+    .where(eq(workspaceMetaAccounts.metaAccountId, campaign.metaAccountId))
+    .limit(1);
+
+  if (wmaRow.length === 0) {
+    return NextResponse.json(
+      { error: "No workspace linked to campaign meta account" },
+      { status: 500 },
+    );
   }
-  const workspaceId = wmaRow.rows[0].workspace_id as string;
+  const workspaceId = wmaRow[0].workspaceId as string;
 
   const errors: string[] = [];
   let collected = 0;
@@ -75,16 +96,22 @@ export async function GET(req: NextRequest) {
   let killsTriggered = 0;
   let alertsCreated = 0;
 
-  // ── 1. Mapa: meta_ad_id → creative_id ──
+  // ── Mapa: meta_ad_id → creative_id ──
   async function buildAdMap(adIds: string[]): Promise<Map<string, string>> {
     if (adIds.length === 0) return new Map();
-    const rows = await db.execute({
-      sql: `SELECT meta_ad_id, creative_id FROM published_ads WHERE meta_ad_id = ANY(ARRAY[${adIds.map(() => "?").join(",")}]::text[])`,
-      args: adIds,
-    });
+    const rows = await dbAdmin
+      .select({
+        metaAdId: publishedAds.metaAdId,
+        creativeId: publishedAds.creativeId,
+      })
+      .from(publishedAds)
+      .where(inArray(publishedAds.metaAdId, adIds));
+
     const map = new Map<string, string>();
-    for (const row of rows.rows) {
-      map.set(row.meta_ad_id as string, row.creative_id as string);
+    for (const row of rows) {
+      if (row.metaAdId && row.creativeId) {
+        map.set(row.metaAdId, row.creativeId);
+      }
     }
     return map;
   }
@@ -93,12 +120,14 @@ export async function GET(req: NextRequest) {
     // ════════════════════════════════════════════════════════════════
     // PASSO 1 — Coleta padrão de insights
     // ════════════════════════════════════════════════════════════════
-    const insights = await getCampaignAdsInsights(campaign.metaCampaignId, dateFrom, dateTo, workspaceId);
+    const insights = await getCampaignAdsInsights(
+      campaign.metaCampaignId, dateFrom, dateTo, workspaceId,
+    );
     collected = insights.length;
     console.log(`[CronCollect] ${collected} registros padrão (${dateFrom} → ${dateTo})`);
 
     if (collected > 0) {
-      const adIds = [...new Set(insights.map((r) => r.meta_ad_id).filter(Boolean))];
+      const adIds = [...new Set(insights.map((r) => r.meta_ad_id).filter(Boolean) as string[])];
       const adMap = await buildAdMap(adIds);
 
       for (const insight of insights) {
@@ -106,34 +135,48 @@ export async function GET(req: NextRequest) {
         if (!creativeId) { skipped++; continue; }
 
         try {
-          await db.execute({
-            sql: `INSERT INTO metrics (id, creative_id, date, spend, impressions, cpm, ctr, clicks, cpc, leads, cpl, landing_page_views, meta_ad_id)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                  ON CONFLICT (creative_id, date) DO UPDATE SET
-                    spend               = EXCLUDED.spend,
-                    impressions         = EXCLUDED.impressions,
-                    cpm                 = EXCLUDED.cpm,
-                    ctr                 = EXCLUDED.ctr,
-                    clicks              = EXCLUDED.clicks,
-                    cpc                 = EXCLUDED.cpc,
-                    leads               = EXCLUDED.leads,
-                    cpl                 = EXCLUDED.cpl,
-                    landing_page_views  = EXCLUDED.landing_page_views,
-                    meta_ad_id          = COALESCE(EXCLUDED.meta_ad_id, metrics.meta_ad_id)`,
-            args: [
-              uuid(), creativeId, insight.date_start,
-              insight.spend, insight.impressions, insight.cpm,
-              insight.ctr, insight.clicks, insight.cpc,
-              insight.leads, insight.cpl,
-              insight.landing_page_views ?? 0,
-              insight.meta_ad_id,
-            ],
-          });
+          await dbAdmin
+            .insert(metrics)
+            .values({
+              creativeId,
+              date: insight.date_start,
+              spend: insight.spend,
+              impressions: insight.impressions,
+              cpm: insight.cpm,
+              ctr: insight.ctr,
+              clicks: insight.clicks,
+              cpc: insight.cpc,
+              leads: insight.leads,
+              cpl: insight.cpl,
+              landingPageViews: insight.landing_page_views ?? 0,
+              metaAdId: insight.meta_ad_id,
+            })
+            .onConflictDoUpdate({
+              target: [metrics.creativeId, metrics.date],
+              set: {
+                spend: sql`EXCLUDED.spend`,
+                impressions: sql`EXCLUDED.impressions`,
+                cpm: sql`EXCLUDED.cpm`,
+                ctr: sql`EXCLUDED.ctr`,
+                clicks: sql`EXCLUDED.clicks`,
+                cpc: sql`EXCLUDED.cpc`,
+                leads: sql`EXCLUDED.leads`,
+                cpl: sql`EXCLUDED.cpl`,
+                landingPageViews: sql`EXCLUDED.landing_page_views`,
+                metaAdId: sql`COALESCE(EXCLUDED.meta_ad_id, metrics.meta_ad_id)`,
+              },
+            });
 
-          await db.execute({
-            sql: `UPDATE creatives SET status = 'testing' WHERE id = ? AND status = 'generated'`,
-            args: [creativeId],
-          });
+          // Promover creative de 'generated' → 'testing' ao começar a receber métricas
+          await dbAdmin
+            .update(creatives)
+            .set({ status: "testing" })
+            .where(
+              and(
+                eq(creatives.id, creativeId),
+                eq(creatives.status, "generated"),
+              ),
+            );
 
           upserted++;
         } catch (err) {
@@ -148,11 +191,11 @@ export async function GET(req: NextRequest) {
     try {
       const bkInsights = await getCampaignAdsInsights(
         campaign.metaCampaignId, dateFrom, dateTo, workspaceId,
-        "publisher_platform,platform_position"
+        "publisher_platform,platform_position",
       );
 
       if (bkInsights.length > 0) {
-        const adIds = [...new Set(bkInsights.map((r) => r.meta_ad_id).filter(Boolean))];
+        const adIds = [...new Set(bkInsights.map((r) => r.meta_ad_id).filter(Boolean) as string[])];
         const adMap = await buildAdMap(adIds);
 
         for (const insight of bkInsights) {
@@ -163,29 +206,42 @@ export async function GET(req: NextRequest) {
           const platPosition = insight.platform_position ?? "";
 
           try {
-            await db.execute({
-              sql: `INSERT INTO metrics_breakdowns
-                      (id, creative_id, date, publisher_platform, platform_position,
-                       spend, impressions, cpm, ctr, clicks, cpc, leads, cpl, meta_ad_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (creative_id, date, publisher_platform, platform_position) DO UPDATE SET
-                      spend       = EXCLUDED.spend,
-                      impressions = EXCLUDED.impressions,
-                      cpm         = EXCLUDED.cpm,
-                      ctr         = EXCLUDED.ctr,
-                      clicks      = EXCLUDED.clicks,
-                      cpc         = EXCLUDED.cpc,
-                      leads       = EXCLUDED.leads,
-                      cpl         = EXCLUDED.cpl,
-                      meta_ad_id  = COALESCE(EXCLUDED.meta_ad_id, metrics_breakdowns.meta_ad_id)`,
-              args: [
-                uuid(), creativeId, insight.date_start,
-                pubPlatform, platPosition,
-                insight.spend, insight.impressions, insight.cpm,
-                insight.ctr, insight.clicks, insight.cpc,
-                insight.leads, insight.cpl, insight.meta_ad_id,
-              ],
-            });
+            await dbAdmin
+              .insert(metricsBreakdowns)
+              .values({
+                creativeId,
+                date: insight.date_start,
+                publisherPlatform: pubPlatform,
+                platformPosition: platPosition,
+                spend: insight.spend,
+                impressions: insight.impressions,
+                cpm: insight.cpm,
+                ctr: insight.ctr,
+                clicks: insight.clicks,
+                cpc: insight.cpc,
+                leads: insight.leads,
+                cpl: insight.cpl,
+                metaAdId: insight.meta_ad_id,
+              })
+              .onConflictDoUpdate({
+                target: [
+                  metricsBreakdowns.creativeId,
+                  metricsBreakdowns.date,
+                  metricsBreakdowns.publisherPlatform,
+                  metricsBreakdowns.platformPosition,
+                ],
+                set: {
+                  spend: sql`EXCLUDED.spend`,
+                  impressions: sql`EXCLUDED.impressions`,
+                  cpm: sql`EXCLUDED.cpm`,
+                  ctr: sql`EXCLUDED.ctr`,
+                  clicks: sql`EXCLUDED.clicks`,
+                  cpc: sql`EXCLUDED.cpc`,
+                  leads: sql`EXCLUDED.leads`,
+                  cpl: sql`EXCLUDED.cpl`,
+                  metaAdId: sql`COALESCE(EXCLUDED.meta_ad_id, metrics_breakdowns.meta_ad_id)`,
+                },
+              });
             breakdownUpserted++;
           } catch (err) {
             errors.push(`[breakdown] ad ${insight.meta_ad_id}: ${err instanceof Error ? err.message : String(err)}`);
@@ -200,8 +256,9 @@ export async function GET(req: NextRequest) {
     // PASSO 3 — Avaliar kill rules + gerar alertas
     // ════════════════════════════════════════════════════════════════
     try {
-      // Buscar todos os criativos em teste com métricas acumuladas
-      const testingCreatives = await db.execute(`
+      // Aggregate query: todos os criativos em teste com métricas acumuladas.
+      // JOIN + GROUP BY + HAVING — fica mais limpo como raw SQL.
+      const testingCreativesResult = await dbAdmin.execute(sql`
         SELECT
           c.id                                    AS creative_id,
           c.name                                  AS creative_name,
@@ -220,9 +277,10 @@ export async function GET(req: NextRequest) {
         GROUP BY c.id, c.name
         HAVING SUM(m.spend) > 0
       `);
+      const testingCreatives = testingCreativesResult as unknown as Array<Record<string, unknown>>;
 
       // CPL do controle (generation=0) para comparação
-      const controlRow = await db.execute(`
+      const controlRowResult = await dbAdmin.execute(sql`
         SELECT
           SUM(m.spend) / NULLIF(SUM(m.leads), 0) AS control_cpl
         FROM creatives c
@@ -232,13 +290,14 @@ export async function GET(req: NextRequest) {
         HAVING SUM(m.leads) > 0
         LIMIT 1
       `);
-      const controlCpl = controlRow.rows[0]
-        ? (Number(controlRow.rows[0].control_cpl) || null)
+      const controlRow = controlRowResult as unknown as Array<Record<string, unknown>>;
+      const controlCpl = controlRow[0]
+        ? (Number(controlRow[0].control_cpl) || null)
         : null;
 
       const cplTarget = campaign.cplTarget;
 
-      for (const row of testingCreatives.rows) {
+      for (const row of testingCreatives) {
         const metricsInput = {
           spend:       Number(row.total_spend),
           leads:       Number(row.total_leads),
@@ -256,11 +315,19 @@ export async function GET(req: NextRequest) {
         killsTriggered++;
 
         // Verificar se já existe alerta não resolvido para esse creative + nível hoje
-        const existing = await db.execute({
-          sql: `SELECT id FROM alerts WHERE creative_id = ? AND level = ? AND date = ? AND resolved = false LIMIT 1`,
-          args: [row.creative_id as string, triggered.level, todayStr],
-        });
-        if (existing.rows.length > 0) continue; // já existe, não duplicar
+        const existing = await dbAdmin
+          .select({ id: alerts.id })
+          .from(alerts)
+          .where(
+            and(
+              eq(alerts.creativeId, row.creative_id as string),
+              eq(alerts.level, triggered.level),
+              eq(alerts.date, todayStr),
+              eq(alerts.resolved, false),
+            ),
+          )
+          .limit(1);
+        if (existing.length > 0) continue; // já existe, não duplicar
 
         const cplStr = metricsInput.cpl !== null
           ? `CPL atual: R$${metricsInput.cpl.toFixed(2)} (target: R$${cplTarget})`
@@ -268,21 +335,17 @@ export async function GET(req: NextRequest) {
 
         const message = `[${triggered.level}] ${triggered.name} — ${row.creative_name} — ${cplStr}`;
 
-        await db.execute({
-          sql: `INSERT INTO alerts (id, creative_id, campaign_key, date, level, rule_name, message, spend, cpl, cpl_target, resolved)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false)`,
-          args: [
-            uuid(),
-            row.creative_id as string,
-            "T7_0003_RAT",
-            todayStr,
-            triggered.level,
-            triggered.name,
-            message,
-            metricsInput.spend,
-            metricsInput.cpl,
-            cplTarget,
-          ],
+        await dbAdmin.insert(alerts).values({
+          creativeId: row.creative_id as string,
+          campaignKey: "T7_0003_RAT",
+          date: todayStr,
+          level: triggered.level,
+          ruleName: triggered.name,
+          message,
+          spend: metricsInput.spend,
+          cpl: metricsInput.cpl,
+          cplTarget,
+          resolved: false,
         });
         alertsCreated++;
       }
